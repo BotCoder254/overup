@@ -55,3 +55,24 @@ pub async fn list_for_pipeline(
     .fetch_all(pool)
     .await
 }
+
+/// Ledger entries for one job of a pipeline, oldest first, sanity-capped.
+/// Filtered by pipeline too so a job id can never read across pipelines.
+pub async fn list_for_job(
+    pool: &PgPool,
+    pipeline_id: Uuid,
+    job_id: Uuid,
+) -> sqlx::Result<Vec<PipelineEvent>> {
+    sqlx::query_as::<_, PipelineEvent>(
+        r#"
+        SELECT * FROM pipeline_events
+        WHERE pipeline_id = $1 AND job_id = $2
+        ORDER BY id
+        LIMIT 500
+        "#,
+    )
+    .bind(pipeline_id)
+    .bind(job_id)
+    .fetch_all(pool)
+    .await
+}

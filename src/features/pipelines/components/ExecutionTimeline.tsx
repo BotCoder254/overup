@@ -1,4 +1,6 @@
 import { format } from 'date-fns';
+import { ArrowUpRight } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import { cn } from '../../../lib/cn';
 import type { Pipeline, PipelineJob } from '../../../types/pipeline';
 import { formatDuration } from '../lib/format';
@@ -9,6 +11,9 @@ interface ExecutionTimelineProps {
   jobs: PipelineJob[];
   selected?: string | null;
   onSelect?: (jobKey: string) => void;
+  /** When set, each lane gets a trailing link into the job's own page —
+   * navigation is additive, in-page selection stays untouched. */
+  jobHref?: (job: PipelineJob) => string;
 }
 
 /** Run-segment color per terminal/live state (solid palette only). */
@@ -32,7 +37,13 @@ function segmentClass(job: PipelineJob): string {
  * dependencies, colored = execution. The scale spans pipeline creation to
  * completion (or now, while live).
  */
-export function ExecutionTimeline({ pipeline, jobs, selected, onSelect }: ExecutionTimelineProps) {
+export function ExecutionTimeline({
+  pipeline,
+  jobs,
+  selected,
+  onSelect,
+  jobHref,
+}: ExecutionTimelineProps) {
   const startMs = new Date(pipeline.createdAt).getTime();
   const endMs = pipeline.finishedAt ? new Date(pipeline.finishedAt).getTime() : Date.now();
   const span = Math.max(endMs - startMs, 1000);
@@ -73,13 +84,13 @@ export function ExecutionTimeline({ pipeline, jobs, selected, onSelect }: Execut
             .join('\n');
 
           return (
+            <div key={job.id} className="flex items-center gap-1">
             <button
-              key={job.id}
               type="button"
               title={title}
               onClick={() => onSelect?.(job.key)}
               className={cn(
-                'flex w-full items-center gap-2 rounded px-1 py-0.5 text-left transition-colors',
+                'flex min-w-0 flex-1 items-center gap-2 rounded px-1 py-0.5 text-left transition-colors',
                 selected === job.key ? 'bg-primary/10' : 'hover:bg-surface',
               )}
             >
@@ -115,6 +126,18 @@ export function ExecutionTimeline({ pipeline, jobs, selected, onSelect }: Execut
                 {job.startedAt ? formatDuration(job.startedAt, job.finishedAt) : '—'}
               </span>
             </button>
+            {jobHref && (
+              <Link
+                to={jobHref(job)}
+                onClick={(event) => event.stopPropagation()}
+                title={`Open ${job.name ?? job.key} in its own workspace`}
+                className="shrink-0 rounded p-0.5 text-steel transition-colors hover:bg-surface hover:text-link"
+              >
+                <ArrowUpRight size={13} aria-hidden="true" />
+                <span className="sr-only">Open job {job.name ?? job.key}</span>
+              </Link>
+            )}
+            </div>
           );
         })}
       </div>

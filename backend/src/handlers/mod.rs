@@ -5,6 +5,7 @@ pub mod dashboard_ws;
 pub mod github_installations;
 pub mod github_webhooks;
 pub mod health;
+pub mod jobs;
 pub mod me;
 pub mod pipelines;
 pub mod repositories;

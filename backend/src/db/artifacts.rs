@@ -96,6 +96,13 @@ pub async fn list_for_pipeline(pool: &PgPool, pipeline_id: Uuid) -> sqlx::Result
     .await
 }
 
+pub async fn list_for_job(pool: &PgPool, job_id: Uuid) -> sqlx::Result<Vec<Artifact>> {
+    sqlx::query_as::<_, Artifact>("SELECT * FROM artifacts WHERE job_id = $1 ORDER BY created_at")
+        .bind(job_id)
+        .fetch_all(pool)
+        .await
+}
+
 pub async fn find_for_workspace(
     pool: &PgPool,
     workspace_id: Uuid,

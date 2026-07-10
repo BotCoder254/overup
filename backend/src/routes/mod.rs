@@ -12,8 +12,8 @@ use tower_http::trace::TraceLayer;
 
 use crate::error::AppError;
 use crate::handlers::{
-    auth, browser_ws, dashboard, dashboard_ws, github_installations, github_webhooks, health, me,
-    pipelines, repositories, runner_ws, runners, workflows, workspaces,
+    auth, browser_ws, dashboard, dashboard_ws, github_installations, github_webhooks, health,
+    jobs, me, pipelines, repositories, runner_ws, runners, workflows, workspaces,
 };
 use crate::middleware::{csrf, security_headers};
 use crate::state::AppState;
@@ -142,9 +142,19 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
             post(pipelines::rerun).layer(GovernorLayer::new(dispatch_governor)),
         )
         .route(
+            "/workspaces/{workspace_id}/pipelines/{pipeline_id}/jobs/{job_id}",
+            get(pipelines::job_detail),
+        )
+        .route(
+            "/workspaces/{workspace_id}/pipelines/{pipeline_id}/jobs/{job_id}/cancel",
+            post(pipelines::job_cancel),
+        )
+        .route(
             "/workspaces/{workspace_id}/pipelines/{pipeline_id}/jobs/{job_id}/logs",
             get(pipelines::job_logs),
         )
+        .route("/workspaces/{workspace_id}/jobs", get(jobs::list))
+        .route("/workspaces/{workspace_id}/jobs/summary", get(jobs::summary))
         .route(
             "/workspaces/{workspace_id}/pipelines/{pipeline_id}/jobs/{job_id}/logs/raw",
             get(pipelines::job_logs_raw),

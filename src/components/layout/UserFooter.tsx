@@ -7,7 +7,6 @@ import {
 import { useLogout } from '../../features/auth/hooks/useAuth';
 import type { Me } from '../../types/user';
 import { MenuItem, Popover } from '../ui/Popover';
-import { Spinner } from '../ui/Spinner';
 import { cn } from '../../lib/cn';
 
 interface UserFooterProps {
@@ -15,16 +14,17 @@ interface UserFooterProps {
 }
 
 /**
- * Fixed sidebar footer: the profile region opens a contextual menu, while a
- * standalone logout icon keeps sign-out a single click away. The avatar uses
- * the 6px square treatment (sidebar identity), not the circular one.
+ * Fixed sidebar footer: the profile region opens a contextual menu that owns
+ * every account action, including sign-out. Deliberately seamless — no
+ * separator against the nav above. The avatar uses the 6px square treatment
+ * (sidebar identity), not the circular one.
  */
 export function UserFooter({ me }: UserFooterProps) {
   const logout = useLogout();
   const name = me.displayName ?? me.username;
 
   return (
-    <div className="flex items-center gap-1 border-t border-steel/20 p-3">
+    <div className="flex items-center p-3">
       <Popover
         ariaLabel="Account menu"
         side="top"
@@ -90,20 +90,6 @@ export function UserFooter({ me }: UserFooterProps) {
           </>
         )}
       </Popover>
-      <button
-        type="button"
-        aria-label="Sign out"
-        title="Sign out"
-        disabled={logout.isPending}
-        onClick={() => logout.mutate()}
-        className="shrink-0 rounded p-2 text-steel transition-colors hover:bg-danger/10 hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:pointer-events-none"
-      >
-        {logout.isPending ? (
-          <Spinner className="h-4 w-4" />
-        ) : (
-          <LogOut size={16} aria-hidden="true" />
-        )}
-      </button>
     </div>
   );
 }
