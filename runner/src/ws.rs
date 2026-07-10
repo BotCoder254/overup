@@ -46,9 +46,40 @@ pub async fn run_connection(
             .context("token contains invalid header characters")?,
     );
 
-    let (socket, _) = tokio_tungstenite::connect_async(request)
-        .await
-        .context("websocket connect failed (is the control plane up? is the token valid?)")?;
+    let (socket, _) = match tokio_tungstenite::connect_async(request).await {
+        Ok(connected) => connected,
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            let status = response.status();
+            // The control plane attaches a static category ("invalid_token",
+            // "bootstrap_expired", "missing_token") to auth rejections.
+            let reason = response
+                .body()
+                .as_deref()
+                .map(|body| String::from_utf8_lossy(body).trim().to_string())
+                .unwrap_or_default();
+            if status.as_u16() == 401 {
+                if reason == "bootstrap_expired" {
+                    tracing::error!(
+                        "control plane rejected the token (401 bootstrap_expired): the \
+                         registration token expired before its first use (1 hour limit) — \
+                         register the runner again and use the fresh token"
+                    );
+                } else {
+                    tracing::error!(
+                        reason = %reason,
+                        "control plane rejected the token (401): it was revoked, rotated, \
+                         or was a one-time bootstrap token that has already been exchanged. \
+                         Regenerate the token in the UI and update RUNNER_TOKEN — and set \
+                         RUNNER_TOKEN_FILE so the exchanged permanent token survives restarts"
+                    );
+                }
+            }
+            anyhow::bail!("websocket connect rejected: HTTP {status} {reason}");
+        }
+        Err(error) => {
+            return Err(error).context("websocket connect failed (is the control plane up?)");
+        }
+    };
     let (mut sink, mut stream) = socket.split();
 
     send(

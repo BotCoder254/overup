@@ -1,4 +1,6 @@
 import { format } from 'date-fns';
+import { ArrowUpRight } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import { Badge } from '../../../../components/ui/Badge';
 import type { Pipeline, PipelineJob } from '../../../../types/pipeline';
 import { branchOfRef, formatDuration, shortSha } from '../../lib/format';
@@ -8,9 +10,12 @@ import { Field, FieldList, PanelSection } from './fields';
 export function MetadataPanel({
   pipeline,
   job,
+  jobHref,
 }: {
   pipeline: Pipeline;
   job: PipelineJob | null;
+  /** Link into the selected job's dedicated execution workspace. */
+  jobHref?: string;
 }) {
   return (
     <div>
@@ -68,6 +73,15 @@ export function MetadataPanel({
               {job.needs.length > 0 ? job.needs.join(', ') : 'nothing'}
             </Field>
           </FieldList>
+          {jobHref && (
+            <Link
+              to={jobHref}
+              className="mt-2 inline-flex items-center gap-1 text-sm text-link hover:underline"
+            >
+              Open job workspace
+              <ArrowUpRight size={13} aria-hidden="true" />
+            </Link>
+          )}
         </PanelSection>
       )}
     </div>

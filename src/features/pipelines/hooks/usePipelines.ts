@@ -9,10 +9,12 @@ import { toast } from 'sonner';
 import { useWorkspaceId } from '../../repositories/hooks/useRepositories';
 import type { PipelineDetail } from '../../../types/pipeline';
 import {
+  cancelJob,
   cancelPipeline,
   dispatchWorkflow,
   getArtifactDownloadUrl,
   getArtifacts,
+  getJobDetail,
   getPipelineDetail,
   getPipelines,
   rerunPipeline,
@@ -40,6 +42,8 @@ export const pipelineKey = (workspaceId: string, pipelineId: string) =>
   ['workspaces', workspaceId, 'pipelines', 'detail', pipelineId] as const;
 export const artifactsKey = (workspaceId: string, pipelineId: string) =>
   ['workspaces', workspaceId, 'pipelines', 'detail', pipelineId, 'artifacts'] as const;
+export const jobKey = (workspaceId: string, pipelineId: string, jobId: string) =>
+  ['workspaces', workspaceId, 'pipelines', 'detail', pipelineId, 'jobs', jobId] as const;
 
 /** Poll every few seconds while executions are live. */
 const pollWhileActive = 3000;
@@ -80,6 +84,22 @@ export function usePipelineDetail(pipelineId: string | undefined, streamConnecte
   });
 }
 
+/**
+ * Per-job identity payload (runner summary, job-scoped events/artifacts).
+ * The pipeline stream keeps job state itself live; this poll exists for
+ * runner health, which is not on the per-pipeline socket.
+ */
+export function useJobDetail(pipelineId: string | undefined, jobId: string | undefined) {
+  const workspaceId = useWorkspaceId();
+  return useQuery({
+    queryKey: jobKey(workspaceId ?? '', pipelineId ?? '', jobId ?? ''),
+    queryFn: () => getJobDetail(workspaceId!, pipelineId!, jobId!),
+    enabled: Boolean(workspaceId && pipelineId && jobId),
+    refetchInterval: (query) =>
+      query.state.data?.job.status !== 'completed' ? 5000 : false,
+  });
+}
+
 export function useArtifacts(pipelineId: string | undefined) {
   const workspaceId = useWorkspaceId();
   return useQuery({
@@ -112,6 +132,27 @@ export function useCancelPipeline() {
     },
     onError: (error) => {
       toast.error(describeError(error, 'Could not cancel the pipeline.'));
+    },
+  });
+}
+
+export function useCancelJob() {
+  const workspaceId = useWorkspaceId();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { pipelineId: string; jobId: string }) =>
+      cancelJob(workspaceId!, input.pipelineId, input.jobId),
+    onSuccess: (_data, input) => {
+      toast.success('Job cancellation requested.');
+      if (workspaceId) {
+        void queryClient.invalidateQueries({
+          queryKey: pipelineKey(workspaceId, input.pipelineId),
+        });
+        void queryClient.invalidateQueries({ queryKey: ['workspaces', workspaceId, 'jobs'] });
+      }
+    },
+    onError: (error) => {
+      toast.error(describeError(error, 'Could not cancel the job.'));
     },
   });
 }

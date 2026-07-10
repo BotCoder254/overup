@@ -151,7 +151,10 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|path| std::fs::read_to_string(path).ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .map_or_else(|| required("RUNNER_TOKEN"), Ok)?;
+        // Trim the env-var path too: a trailing newline/space (heredocs,
+        // secret files pasted into env) hashes to a different token and
+        // gets a baffling 401 from the control plane.
+        .map_or_else(|| required("RUNNER_TOKEN").map(|t| t.trim().to_string()), Ok)?;
 
     let mut config = RunnerConfig {
         server_url: optional("OVERUP_URL", "http://localhost:8080")

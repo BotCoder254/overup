@@ -1,7 +1,9 @@
+use chrono::{DateTime, Utc};
+use serde::Serialize;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::models::pipeline::PipelineJob;
+use crate::models::pipeline::{PipelineJob, QueueJobRow};
 
 pub async fn list_for_pipeline(pool: &PgPool, pipeline_id: Uuid) -> sqlx::Result<Vec<PipelineJob>> {
     sqlx::query_as::<_, PipelineJob>(
@@ -66,6 +68,179 @@ pub async fn find_eligible(pool: &PgPool, limit: i64) -> sqlx::Result<Vec<Pipeli
     .bind(limit)
     .fetch_all(pool)
     .await
+}
+
+/// Validated filters for the workspace queue view. `search_pattern` is a
+/// pre-escaped ILIKE pattern built by the handler — never raw user input.
+pub struct QueueFilter {
+    pub status: Option<String>,
+    pub repository_id: Option<Uuid>,
+    pub workflow_id: Option<Uuid>,
+    pub runner_id: Option<Uuid>,
+    pub label: Option<String>,
+    pub search_pattern: Option<String>,
+    pub cursor: Option<(DateTime<Utc>, Uuid)>,
+    pub limit: i64,
+}
+
+/// Active (queued or in-progress) jobs across every live pipeline of a
+/// workspace, in scheduler order (oldest queued first). The ascending keyset
+/// cursor composes with every filter; `blocked_by_needs` mirrors the
+/// scheduler's eligibility predicate so the handler can explain waits.
+pub async fn list_queue_for_workspace(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    filter: &QueueFilter,
+) -> sqlx::Result<Vec<QueueJobRow>> {
+    let (cursor_at, cursor_id) = match filter.cursor {
+        Some((at, id)) => (Some(at), Some(id)),
+        None => (None, None),
+    };
+    sqlx::query_as::<_, QueueJobRow>(
+        r#"
+        SELECT j.*,
+               p.number AS pipeline_number,
+               p.repository_id AS repository_id,
+               r.full_name AS repo_full_name,
+               p.workflow_id AS pipeline_workflow_id,
+               p.workflow_name AS workflow_name,
+               p.git_ref AS git_ref,
+               p.trigger AS trigger,
+               EXISTS (
+                   SELECT 1 FROM pipeline_jobs d
+                   WHERE d.pipeline_id = j.pipeline_id
+                     AND d.job_key = ANY(j.needs)
+                     AND (d.conclusion IS DISTINCT FROM 'success')
+               ) AS blocked_by_needs
+        FROM pipeline_jobs j
+        JOIN pipelines p ON p.id = j.pipeline_id
+        JOIN repositories r ON r.id = p.repository_id
+        WHERE p.workspace_id = $1
+          AND p.status <> 'completed'
+          AND j.status IN ('queued', 'in_progress')
+          AND ($2::text IS NULL OR j.status = $2)
+          AND ($3::uuid IS NULL OR p.repository_id = $3)
+          AND ($4::uuid IS NULL OR p.workflow_id = $4)
+          AND ($5::uuid IS NULL OR j.runner_id = $5)
+          AND ($6::text IS NULL OR $6 = ANY(j.runs_on))
+          AND ($7::text IS NULL OR
+                j.job_key ILIKE $7 ESCAPE '\'
+                OR j.name ILIKE $7 ESCAPE '\'
+                OR p.workflow_name ILIKE $7 ESCAPE '\')
+          AND ($8::timestamptz IS NULL OR (j.queued_at, j.id) > ($8, $9))
+        ORDER BY j.queued_at, j.id
+        LIMIT $10
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(&filter.status)
+    .bind(filter.repository_id)
+    .bind(filter.workflow_id)
+    .bind(filter.runner_id)
+    .bind(&filter.label)
+    .bind(&filter.search_pattern)
+    .bind(cursor_at)
+    .bind(cursor_id)
+    .bind(filter.limit.clamp(1, 100))
+    .fetch_all(pool)
+    .await
+}
+
+/// Aggregate scheduler metrics for the Job Queue page's summary strip,
+/// computed over active jobs plus the current runner fleet (same
+/// COUNT-FILTER shape as the Dashboard summary).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueSummary {
+    pub queued_total: i64,
+    pub queued_blocked: i64,
+    pub queued_waiting_runner: i64,
+    pub in_progress: i64,
+    pub avg_queue_wait_secs: Option<f64>,
+    pub max_queue_wait_secs: Option<f64>,
+    pub oldest_queued_at: Option<DateTime<Utc>>,
+    pub runners_idle: i64,
+    pub runners_busy: i64,
+    pub runners_offline: i64,
+    pub runners_disabled: i64,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct QueueCounts {
+    queued_total: i64,
+    queued_blocked: i64,
+    queued_waiting_runner: i64,
+    in_progress: i64,
+    avg_queue_wait_secs: Option<f64>,
+    max_queue_wait_secs: Option<f64>,
+    oldest_queued_at: Option<DateTime<Utc>>,
+}
+
+pub async fn queue_summary(pool: &PgPool, workspace_id: Uuid) -> sqlx::Result<QueueSummary> {
+    let counts = sqlx::query_as::<_, QueueCounts>(
+        r#"
+        SELECT
+            COUNT(*) FILTER (WHERE status = 'queued') AS queued_total,
+            COUNT(*) FILTER (WHERE status = 'queued' AND blocked) AS queued_blocked,
+            COUNT(*) FILTER (WHERE status = 'queued' AND NOT blocked) AS queued_waiting_runner,
+            COUNT(*) FILTER (WHERE status = 'in_progress') AS in_progress,
+            AVG(EXTRACT(EPOCH FROM (now() - queued_at))::double precision)
+                FILTER (WHERE status = 'queued') AS avg_queue_wait_secs,
+            MAX(EXTRACT(EPOCH FROM (now() - queued_at))::double precision)
+                FILTER (WHERE status = 'queued') AS max_queue_wait_secs,
+            MIN(queued_at) FILTER (WHERE status = 'queued') AS oldest_queued_at
+        FROM (
+            SELECT j.status, j.queued_at,
+                   EXISTS (
+                       SELECT 1 FROM pipeline_jobs d
+                       WHERE d.pipeline_id = j.pipeline_id
+                         AND d.job_key = ANY(j.needs)
+                         AND (d.conclusion IS DISTINCT FROM 'success')
+                   ) AS blocked
+            FROM pipeline_jobs j
+            JOIN pipelines p ON p.id = j.pipeline_id
+            WHERE p.workspace_id = $1
+              AND p.status <> 'completed'
+              AND j.status IN ('queued', 'in_progress')
+        ) active
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await?;
+
+    let runner_counts: Vec<(String, i64)> = sqlx::query_as(
+        r#"
+        SELECT status, COUNT(*) AS count
+        FROM runners
+        WHERE workspace_id = $1 AND revoked_at IS NULL
+        GROUP BY status
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_all(pool)
+    .await?;
+    let runner_count = |status: &str| {
+        runner_counts
+            .iter()
+            .find(|(s, _)| s == status)
+            .map(|(_, count)| *count)
+            .unwrap_or(0)
+    };
+
+    Ok(QueueSummary {
+        queued_total: counts.queued_total,
+        queued_blocked: counts.queued_blocked,
+        queued_waiting_runner: counts.queued_waiting_runner,
+        in_progress: counts.in_progress,
+        avg_queue_wait_secs: counts.avg_queue_wait_secs,
+        max_queue_wait_secs: counts.max_queue_wait_secs,
+        oldest_queued_at: counts.oldest_queued_at,
+        runners_idle: runner_count("idle"),
+        runners_busy: runner_count("busy"),
+        runners_offline: runner_count("offline"),
+        runners_disabled: runner_count("disabled"),
+    })
 }
 
 /// Atomically claim one job for one runner: both the job row and the runner
@@ -269,6 +444,23 @@ pub async fn mark_skipped(pool: &PgPool, ids: &[Uuid]) -> sqlx::Result<Vec<Pipel
     )
     .bind(ids)
     .fetch_all(pool)
+    .await
+}
+
+/// Cancel a single queued job. The status guard makes the transition safe
+/// against a concurrent claim: an already-assigned job returns None and the
+/// caller falls through to the in-progress cancel path.
+pub async fn cancel_one_queued(pool: &PgPool, job_id: Uuid) -> sqlx::Result<Option<PipelineJob>> {
+    sqlx::query_as::<_, PipelineJob>(
+        r#"
+        UPDATE pipeline_jobs
+        SET status = 'completed', conclusion = 'cancelled', stage = 'done', finished_at = now()
+        WHERE id = $1 AND status = 'queued'
+        RETURNING *
+        "#,
+    )
+    .bind(job_id)
+    .fetch_optional(pool)
     .await
 }
 

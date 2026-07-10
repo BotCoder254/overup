@@ -64,8 +64,9 @@ pub async fn list(
     Ok(Json(json!({ "pipelines": pipelines, "nextCursor": next_cursor })))
 }
 
-/// Opaque-ish keyset cursor: `<rfc3339>~<uuid>`.
-fn parse_cursor(raw: &str) -> AppResult<(DateTime<Utc>, Uuid)> {
+/// Opaque-ish keyset cursor: `<rfc3339>~<uuid>`. Shared with the workspace
+/// jobs (queue) handler, which uses the identical cursor shape.
+pub(crate) fn parse_cursor(raw: &str) -> AppResult<(DateTime<Utc>, Uuid)> {
     let invalid = || AppError::Validation("invalid cursor".into());
     if raw.len() > 128 {
         return Err(invalid());
@@ -78,7 +79,7 @@ fn parse_cursor(raw: &str) -> AppResult<(DateTime<Utc>, Uuid)> {
     Ok((at, id))
 }
 
-fn format_cursor(at: DateTime<Utc>, id: Uuid) -> String {
+pub(crate) fn format_cursor(at: DateTime<Utc>, id: Uuid) -> String {
     format!("{}~{id}", at.to_rfc3339())
 }
 
@@ -159,7 +160,7 @@ fn build_list_filter(
 }
 
 /// Escape LIKE metacharacters so user text only ever matches literally.
-fn escape_like(raw: &str) -> String {
+pub(crate) fn escape_like(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     for c in raw.chars() {
         if matches!(c, '\\' | '%' | '_') {
@@ -353,6 +354,75 @@ pub async fn dispatch(
         .ok_or(AppError::NotFound)?;
     Ok((StatusCode::CREATED, Json(json!({ "pipeline": PipelineResponse::from(row) })))
         .into_response())
+}
+
+/// GET /api/workspaces/{ws}/pipelines/{pipeline}/jobs/{job}
+///
+/// The Job Execution page's identity payload: the job (masked plan), its
+/// pipeline, its slice of the event ledger, its artifacts, and the assigned
+/// runner's sanitized summary (token-free; health pre-clamped at ingest).
+pub async fn job_detail(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    Path((workspace_id, pipeline_id, job_id)): Path<(Uuid, Uuid, Uuid)>,
+) -> AppResult<Json<serde_json::Value>> {
+    authz::require_permission(&state.pool, user.id, workspace_id, authz::CONTENT_READ).await?;
+
+    // Scope chain: pipeline in workspace, job in pipeline.
+    let row = db::pipelines::find_row_for_workspace(&state.pool, workspace_id, pipeline_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let job = db::pipeline_jobs::find_for_pipeline(&state.pool, pipeline_id, job_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    let events: Vec<PipelineEventResponse> =
+        db::pipeline_events::list_for_job(&state.pool, pipeline_id, job.id)
+            .await?
+            .into_iter()
+            .map(PipelineEventResponse::from)
+            .collect();
+    let artifacts: Vec<ArtifactResponse> = db::artifacts::list_for_job(&state.pool, job.id)
+        .await?
+        .into_iter()
+        .map(ArtifactResponse::from)
+        .collect();
+    let runner = match job.runner_id {
+        Some(runner_id) => db::runners::find_by_id(&state.pool, workspace_id, runner_id)
+            .await?
+            .map(crate::models::runner::RunnerResponse::from),
+        None => None,
+    };
+
+    Ok(Json(json!({
+        "job": PipelineJobResponse::from(job),
+        "pipeline": PipelineResponse::from(row),
+        "events": events,
+        "artifacts": artifacts,
+        "runner": runner,
+    })))
+}
+
+/// POST /api/workspaces/{ws}/pipelines/{pipeline}/jobs/{job}/cancel
+pub async fn job_cancel(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    Path((workspace_id, pipeline_id, job_id)): Path<(Uuid, Uuid, Uuid)>,
+    headers: HeaderMap,
+) -> AppResult<Response> {
+    authz::require_permission(&state.pool, user.id, workspace_id, authz::CONTENT_WRITE).await?;
+
+    let pipeline = db::pipelines::find_for_workspace(&state.pool, workspace_id, pipeline_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let job = db::pipeline_jobs::find_for_pipeline(&state.pool, pipeline_id, job_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    let request_id = headers.get("x-request-id").and_then(|v| v.to_str().ok());
+    pipeline_run::cancel_job(&state, &pipeline, &job, Some(user.id), request_id).await?;
+
+    Ok((StatusCode::ACCEPTED, Json(json!({ "status": "cancelling" }))).into_response())
 }
 
 #[derive(Debug, Deserialize)]

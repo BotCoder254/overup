@@ -82,7 +82,7 @@ export const NAV_GROUPS: NavGroup[] = [
         segment: 'jobs',
         icon: ListChecks,
         description:
-          'Individual jobs inside pipeline runs, with live step output and per-job timing.',
+          'The scheduler console — queued and running jobs across every pipeline, with wait reasons, live durations, and runner availability.',
       },
     ],
   },

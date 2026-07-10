@@ -152,6 +152,7 @@ export function PipelineDetailPage() {
               jobs={jobs}
               selected={selectedKey}
               onSelect={setSelectedKey}
+              jobHref={(job) => workspacePath(slug, `pipelines/${pipeline.id}/jobs/${job.id}`)}
             />
           </>
         );
@@ -190,7 +191,17 @@ export function PipelineDetailPage() {
                 <p className="text-sm text-steel">Select a job.</p>
               ))}
             {tab === 'artifacts' && <ArtifactsPanel pipelineId={pipeline.id} />}
-            {tab === 'metadata' && <MetadataPanel pipeline={pipeline} job={selectedJob} />}
+            {tab === 'metadata' && (
+              <MetadataPanel
+                pipeline={pipeline}
+                job={selectedJob}
+                jobHref={
+                  selectedJob
+                    ? workspacePath(slug, `pipelines/${pipeline.id}/jobs/${selectedJob.id}`)
+                    : undefined
+                }
+              />
+            )}
             {tab === 'container' &&
               (selectedJob ? (
                 <ContainerPanel job={selectedJob} />

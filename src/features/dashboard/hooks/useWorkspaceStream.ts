@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { env } from '../../../lib/env';
+import { mintWsTicket } from '../../../lib/wsTicket';
 import type { Runner } from '../../../types/runner';
 import type { WorkspaceStreamEvent } from '../../../types/dashboard';
 import { useWorkspaceId } from '../../repositories/hooks/useRepositories';
@@ -8,11 +9,21 @@ import { runnerKey, runnersKey } from '../../runners/hooks/useRunners';
 import { dashboardRecentPipelinesKey } from './useDashboard';
 
 /**
+ * After this many consecutive failures the stream goes dormant and retries
+ * rarely — the polling fallback keeps the pages fresh, so there is no point
+ * hammering an endpoint the network can't reach.
+ */
+const DORMANT_AFTER = 5;
+const DORMANT_DELAY_MS = 5 * 60_000;
+
+/**
  * Live workspace-wide stream over an authenticated WebSocket. Feeds the
  * Dashboard and Runner Management pages: runner lifecycle/health changes and
  * meaningful pipeline transitions (started/finished — not every per-job
- * update). Session cookie rides along on the upgrade GET, same as the
- * per-pipeline stream. Consumers gate their own polling on `connected`.
+ * update). Auth: the session cookie rides along on the same-origin upgrade
+ * GET; when `env.wsOrigin` points the socket at a different origin (proxies
+ * that can't forward upgrades, e.g. Netlify), a one-time ticket minted over
+ * REST is used instead. Consumers gate their own polling on `connected`.
  */
 export function useWorkspaceStream() {
   const workspaceId = useWorkspaceId();
@@ -58,6 +69,11 @@ export function useWorkspaceStream() {
           void queryClient.invalidateQueries({
             queryKey: ['workspaces', workspaceId, 'dashboard', 'activity'],
           });
+          // Pipeline transitions are exactly when the job queue changes
+          // shape; a no-op when the queue page isn't mounted.
+          void queryClient.invalidateQueries({
+            queryKey: ['workspaces', workspaceId, 'jobs'],
+          });
           break;
         case 'runner_update':
           patchRunner(event.runner);
@@ -81,10 +97,37 @@ export function useWorkspaceStream() {
       }
     };
 
-    const connect = () => {
+    const scheduleReconnect = () => {
       if (disposed) return;
-      const origin = env.apiOrigin || window.location.origin;
-      const url = `${origin.replace(/^http/, 'ws')}/ws/workspaces/${workspaceId}/dashboard`;
+      attempt += 1;
+      // Past DORMANT_AFTER straight failures, back way off: polling covers
+      // freshness, and endless fast retries only spam the console.
+      const delay =
+        attempt >= DORMANT_AFTER
+          ? DORMANT_DELAY_MS
+          : Math.min(1000 * 2 ** Math.min(attempt - 1, 5), 30_000);
+      reconnectTimer = setTimeout(() => {
+        void connect();
+      }, delay + Math.random() * 500);
+    };
+
+    const connect = async () => {
+      if (disposed) return;
+      const origin = env.wsOrigin || env.apiOrigin || window.location.origin;
+      let ticketQuery = '';
+      if (env.wsOrigin) {
+        // Cross-origin socket: the session cookie won't ride along, so trade
+        // it for a one-time ticket over REST (fresh per attempt — single-use).
+        try {
+          const ticket = await mintWsTicket(workspaceId);
+          ticketQuery = `?ticket=${encodeURIComponent(ticket)}`;
+        } catch {
+          scheduleReconnect();
+          return;
+        }
+        if (disposed) return; // torn down while awaiting the ticket
+      }
+      const url = `${origin.replace(/^http/, 'ws')}/ws/workspaces/${workspaceId}/dashboard${ticketQuery}`;
       const socket = new WebSocket(url);
       socketRef.current = socket;
 
@@ -118,18 +161,14 @@ export function useWorkspaceStream() {
         keepaliveTimer = undefined;
         setConnected(false);
         socketRef.current = null;
-        if (!disposed) {
-          attempt += 1;
-          const delay = Math.min(1000 * 2 ** Math.min(attempt - 1, 5), 30_000);
-          reconnectTimer = setTimeout(connect, delay + Math.random() * 500);
-        }
+        scheduleReconnect();
       };
       socket.onerror = () => {
         socket.close();
       };
     };
 
-    connect();
+    void connect();
     return () => {
       disposed = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);

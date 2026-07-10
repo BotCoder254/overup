@@ -12,6 +12,8 @@ import { WorkflowsPage } from '../features/workflows/pages/WorkflowsPage';
 import { WorkflowDetailPage } from '../features/workflows/pages/WorkflowDetailPage';
 import { PipelinesPage } from '../features/pipelines/pages/PipelinesPage';
 import { PipelineDetailPage } from '../features/pipelines/pages/PipelineDetailPage';
+import { JobDetailPage } from '../features/pipelines/pages/JobDetailPage';
+import { JobQueuePage } from '../features/jobs/pages/JobQueuePage';
 import { RunnersPage } from '../features/runners/pages/RunnersPage';
 import { RunnerDetailPage } from '../features/runners/pages/RunnerDetailPage';
 import { NAV_ITEMS } from './navigation';
@@ -20,7 +22,13 @@ import { PublicOnlyRoute } from './guards/PublicOnlyRoute';
 import { WorkspaceRoute } from './guards/WorkspaceRoute';
 
 /** Segments with real pages; everything else still renders a placeholder. */
-const IMPLEMENTED_SEGMENTS = new Set(['repositories', 'workflows', 'pipelines', 'runners']);
+const IMPLEMENTED_SEGMENTS = new Set([
+  'repositories',
+  'workflows',
+  'pipelines',
+  'jobs',
+  'runners',
+]);
 
 /** Legacy /dashboard entry point: forward to the slug-routed workspace. */
 function DashboardRedirect() {
@@ -58,6 +66,8 @@ export const router = createBrowserRouter([
               { path: 'workflows/:workflowId', element: <WorkflowDetailPage /> },
               { path: 'pipelines', element: <PipelinesPage /> },
               { path: 'pipelines/:pipelineId', element: <PipelineDetailPage /> },
+              { path: 'pipelines/:pipelineId/jobs/:jobId', element: <JobDetailPage /> },
+              { path: 'jobs', element: <JobQueuePage /> },
               { path: 'runners', element: <RunnersPage /> },
               { path: 'runners/:runnerId', element: <RunnerDetailPage /> },
               ...NAV_ITEMS.filter(

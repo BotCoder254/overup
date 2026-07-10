@@ -22,9 +22,19 @@ function statusBadge(status: Artifact['status']) {
   }
 }
 
-/** Artifacts produced by this pipeline; downloads use short-lived presigned
- * URLs, so the bytes never pass through the control plane. */
-export function ArtifactsPanel({ pipelineId }: { pipelineId: string }) {
+/** Artifacts produced by this pipeline (optionally narrowed to one job);
+ * downloads use short-lived presigned URLs, so the bytes never pass through
+ * the control plane. */
+export function ArtifactsPanel({
+  pipelineId,
+  jobId,
+  compact,
+}: {
+  pipelineId: string;
+  jobId?: string;
+  /** Sidebar placement: a one-line empty state instead of the tall card. */
+  compact?: boolean;
+}) {
   const artifacts = useArtifacts(pipelineId);
   const download = useDownloadArtifact();
 
@@ -35,8 +45,18 @@ export function ArtifactsPanel({ pipelineId }: { pipelineId: string }) {
       </div>
     );
   }
-  const rows = artifacts.data ?? [];
+  const rows = (artifacts.data ?? []).filter(
+    (artifact) => !jobId || artifact.jobId === jobId,
+  );
   if (rows.length === 0) {
+    if (compact) {
+      return (
+        <p className="text-sm text-steel">
+          No artifacts — files left in{' '}
+          <span className="font-mono text-xs">.overup/artifacts/</span> are uploaded here.
+        </p>
+      );
+    }
     return (
       <EmptyState
         icon={Package}

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { Dialog } from '../../../components/ui/Dialog';
 import { useBootstrapRunner } from '../hooks/useRunners';
 import { InstallCommandStep } from './wizard/InstallCommandStep';
@@ -38,18 +38,16 @@ export function RunnerRegistrationDialog({ open, onClose }: RunnerRegistrationDi
   const [os, setOs] = useState('');
   const [issued, setIssued] = useState<{ runnerId: string; token: string } | null>(null);
 
-  const reset = () => {
+  // Stable across re-renders (typing updates name/labels state every
+  // keystroke) so the Dialog never sees a changing onClose reference.
+  const close = useCallback(() => {
+    onClose();
     setStep('details');
     setName('');
     setLabels('');
     setOs('');
     setIssued(null);
-  };
-
-  const close = () => {
-    onClose();
-    reset();
-  };
+  }, [onClose]);
 
   const onDetailsNext = () => {
     bootstrap.mutate(

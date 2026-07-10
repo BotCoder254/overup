@@ -180,8 +180,9 @@ async fn assign_eligible(state: &AppState) -> anyhow::Result<()> {
 }
 
 /// GitHub-style label matching: every requested label must be offered by
-/// the runner. Jobs with no labels accept any runner.
-fn labels_satisfy(runs_on: &[String], runner_labels: &[String]) -> bool {
+/// the runner. Jobs with no labels accept any runner. Shared with the queue
+/// handler so its "no matching runner" diagnosis uses the exact same rule.
+pub(crate) fn labels_satisfy(runs_on: &[String], runner_labels: &[String]) -> bool {
     runs_on
         .iter()
         .all(|wanted| runner_labels.iter().any(|have| have == wanted))

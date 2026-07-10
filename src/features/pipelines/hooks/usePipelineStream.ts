@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { env } from '../../../lib/env';
+import { mintWsTicket } from '../../../lib/wsTicket';
 import type {
   PipelineDetail,
   PipelineStreamEvent,
@@ -11,13 +12,24 @@ import { useLogStore } from '../stores/logStore';
 import { artifactsKey, pipelineKey } from './usePipelines';
 
 /**
+ * After this many consecutive failures the stream goes dormant and retries
+ * rarely — the detail query's polling keeps the page fresh, so there is no
+ * point hammering an endpoint the network can't reach.
+ */
+const DORMANT_AFTER = 5;
+const DORMANT_DELAY_MS = 5 * 60_000;
+
+/**
  * Live pipeline stream over an authenticated WebSocket.
  *
- * The session cookie rides along on the upgrade GET: in dev,
+ * Auth: the session cookie rides along on the upgrade GET — in dev,
  * localhost:3000 -> localhost:8080 is same-site (SameSite is scheme+host,
- * not port), and in production the socket is same-origin `wss://`. Events
- * patch the react-query detail cache and push log chunks into the log
- * store; while disconnected, the detail query's polling takes over.
+ * not port), and behind one reverse proxy the socket is same-origin
+ * `wss://`. When `env.wsOrigin` points the socket at a different origin
+ * (proxies that can't forward upgrades, e.g. Netlify), a one-time ticket
+ * minted over REST is used instead. Events patch the react-query detail
+ * cache and push log chunks into the log store; while disconnected, the
+ * detail query's polling takes over.
  */
 export function usePipelineStream(pipelineId: string | undefined) {
   const workspaceId = useWorkspaceId();
@@ -169,10 +181,38 @@ export function usePipelineStream(pipelineId: string | undefined) {
       }
     };
 
-    const connect = () => {
+    const scheduleReconnect = () => {
       if (disposed) return;
-      const origin = env.apiOrigin || window.location.origin;
-      const url = `${origin.replace(/^http/, 'ws')}/ws/workspaces/${workspaceId}/pipelines/${pipelineId}`;
+      attempt += 1;
+      // Exponential backoff 1s -> 30s with jitter; past DORMANT_AFTER
+      // straight failures, back way off — polling covers freshness, and
+      // endless fast retries only spam the console.
+      const delay =
+        attempt >= DORMANT_AFTER
+          ? DORMANT_DELAY_MS
+          : Math.min(1000 * 2 ** Math.min(attempt - 1, 5), 30_000);
+      reconnectTimer = setTimeout(() => {
+        void connect();
+      }, delay + Math.random() * 500);
+    };
+
+    const connect = async () => {
+      if (disposed) return;
+      const origin = env.wsOrigin || env.apiOrigin || window.location.origin;
+      let ticketQuery = '';
+      if (env.wsOrigin) {
+        // Cross-origin socket: the session cookie won't ride along, so trade
+        // it for a one-time ticket over REST (fresh per attempt — single-use).
+        try {
+          const ticket = await mintWsTicket(workspaceId);
+          ticketQuery = `?ticket=${encodeURIComponent(ticket)}`;
+        } catch {
+          scheduleReconnect();
+          return;
+        }
+        if (disposed) return; // torn down while awaiting the ticket
+      }
+      const url = `${origin.replace(/^http/, 'ws')}/ws/workspaces/${workspaceId}/pipelines/${pipelineId}${ticketQuery}`;
       const socket = new WebSocket(url);
       socketRef.current = socket;
 
@@ -220,19 +260,14 @@ export function usePipelineStream(pipelineId: string | undefined) {
         keepaliveTimer = undefined;
         setConnected(false);
         socketRef.current = null;
-        if (!disposed) {
-          attempt += 1;
-          // Exponential backoff 1s -> 30s with jitter.
-          const delay = Math.min(1000 * 2 ** Math.min(attempt - 1, 5), 30_000);
-          reconnectTimer = setTimeout(connect, delay + Math.random() * 500);
-        }
+        scheduleReconnect();
       };
       socket.onerror = () => {
         socket.close();
       };
     };
 
-    connect();
+    void connect();
     return () => {
       disposed = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);

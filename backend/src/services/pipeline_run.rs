@@ -511,6 +511,99 @@ pub async fn cancel_pipeline(
     Ok(())
 }
 
+/// User-requested cancellation of a single job. A queued job cancels
+/// immediately (guarded UPDATE — a concurrent claim falls through to the
+/// running path); a running job gets a cancel signal to its runner, or is
+/// force-finished when the runner is unreachable. Dependents of a cancelled
+/// job are skipped exactly as for any other non-success conclusion.
+pub async fn cancel_job(
+    state: &AppState,
+    pipeline: &Pipeline,
+    job: &PipelineJob,
+    actor: Option<Uuid>,
+    request_id: Option<&str>,
+) -> AppResult<()> {
+    if job.status == "completed" {
+        return Err(AppError::Conflict("job already finished"));
+    }
+
+    record_event(
+        state,
+        pipeline.id,
+        Some(job.id),
+        "job.cancel_requested",
+        None,
+        None,
+        None,
+        actor,
+        serde_json::json!({}),
+    )
+    .await?;
+
+    if let Some(cancelled) = db::pipeline_jobs::cancel_one_queued(&state.pool, job.id).await? {
+        record_event(
+            state,
+            pipeline.id,
+            Some(cancelled.id),
+            "job.completed",
+            Some("queued"),
+            Some("cancelled"),
+            None,
+            actor,
+            serde_json::json!({}),
+        )
+        .await?;
+        publish_job(state, &cancelled);
+        skip_dependents(state, pipeline.id).await?;
+        maybe_finalize(state, pipeline.id).await?;
+    } else {
+        // The job was claimed (or started) in the meantime: re-read its
+        // current assignment and cancel through the runner.
+        let Some(current) =
+            db::pipeline_jobs::find_for_pipeline(&state.pool, pipeline.id, job.id).await?
+        else {
+            return Err(AppError::NotFound);
+        };
+        if current.status == "completed" {
+            return Err(AppError::Conflict("job already finished"));
+        }
+        let signalled = current.runner_id.is_some_and(|runner_id| {
+            state.runner_hub.send(
+                runner_id,
+                protocol::ServerMsg::JobCancel {
+                    job_id: current.id,
+                    reason: protocol::CancelReason::User,
+                },
+            )
+        });
+        if !signalled {
+            // Runner unreachable: terminate authoritatively server-side.
+            if let Some(finished) =
+                db::pipeline_jobs::force_finish(&state.pool, current.id, "cancelled", None).await?
+            {
+                on_job_finished(state, &finished).await?;
+            }
+        }
+    }
+
+    sqlx::query(
+        r#"
+        INSERT INTO audit_logs
+            (workspace_id, actor_user_id, action, subject_type, subject_id, metadata, request_id)
+        VALUES ($1, $2, 'job.cancelled', 'pipeline_job', $3, $4, $5)
+        "#,
+    )
+    .bind(pipeline.workspace_id)
+    .bind(actor)
+    .bind(job.id)
+    .bind(serde_json::json!({ "pipeline": pipeline.id, "number": pipeline.number, "job": job.job_key }))
+    .bind(request_id)
+    .execute(&state.pool)
+    .await?;
+
+    Ok(())
+}
+
 /// A running job exhausted its budget: signal the runner (best effort) and
 /// finish it authoritatively.
 pub async fn timeout_job(state: &AppState, job: &PipelineJob) -> sqlx::Result<()> {

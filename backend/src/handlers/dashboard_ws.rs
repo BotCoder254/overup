@@ -4,8 +4,11 @@
 //! `browser_ws.rs`, this lives outside the CSRF layer and defends itself
 //! before upgrading:
 //!   1. strict Origin allow-list (CORS does not protect WebSockets),
-//!   2. session-cookie authentication (the CurrentUser code path),
-//!   3. workspace RBAC (`content.read`).
+//!   2. authentication — a one-time `?ticket=` (deployments whose SPA proxy
+//!      can't forward upgrades; see services/ws_ticket.rs) OR the session
+//!      cookie (same-origin; the CurrentUser code path) — never a fallback
+//!      from one to the other,
+//!   3. workspace RBAC (`content.read`), re-checked even on the ticket path.
 //!
 //! There is deliberately no step 4 "resource must exist" check the way the
 //! pipeline WS has one: this channel is workspace-wide, so membership
@@ -13,7 +16,7 @@
 //! resource below the workspace to scope to.
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
@@ -22,9 +25,36 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::db;
-use crate::models::user::User;
 use crate::services::{authz, session};
 use crate::state::AppState;
+
+/// Upgrade-time query parameters shared by the browser WS endpoints.
+#[derive(Debug, Deserialize)]
+pub struct WsQuery {
+    /// One-time ticket minted by POST /api/workspaces/{ws}/ws-ticket.
+    pub ticket: Option<String>,
+}
+
+/// Resolve the connecting user: ticket XOR cookie. When a ticket is present
+/// it is consumed (burned) and the cookie is never consulted — a replayed or
+/// expired ticket yields a clean 401 the client fixes by minting a fresh one.
+pub async fn authenticate_browser(
+    state: &AppState,
+    headers: &HeaderMap,
+    ticket: Option<&str>,
+    workspace_id: Uuid,
+) -> Option<Uuid> {
+    if let Some(ticket) = ticket {
+        return state.ws_tickets.consume(ticket, workspace_id);
+    }
+    let jar = axum_extra::extract::cookie::CookieJar::from_headers(headers);
+    let token = jar.get(&state.config.cookie_name)?.value().to_string();
+    db::sessions::find_valid_user(&state.pool, &session::hash_token(&token))
+        .await
+        .ok()
+        .flatten()
+        .map(|user| user.id)
+}
 
 /// Browsers only send tiny control frames.
 const MAX_BROWSER_FRAME: usize = 4 * 1024;
@@ -45,11 +75,13 @@ enum ClientMsg {
 pub async fn connect(
     State(state): State<AppState>,
     Path(workspace_id): Path<Uuid>,
+    Query(query): Query<WsQuery>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    // 1. Origin allow-list. A cross-site page can open a WebSocket with the
-    // victim's cookies; the Origin header is the reliable defense.
+    // 1. Origin allow-list FIRST — before a ticket can even be burned. A
+    // cross-site page can open a WebSocket with the victim's cookies; the
+    // Origin header is the reliable defense.
     let origin_ok = headers
         .get(header::ORIGIN)
         .and_then(|v| v.to_str().ok())
@@ -58,13 +90,16 @@ pub async fn connect(
         return StatusCode::FORBIDDEN.into_response();
     }
 
-    // 2. Session cookie -> live user (the CurrentUser code path).
-    let Some(user) = authenticate(&state, &headers).await else {
+    // 2. Ticket XOR session cookie -> live user id.
+    let Some(user_id) =
+        authenticate_browser(&state, &headers, query.ticket.as_deref(), workspace_id).await
+    else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
 
-    // 3. Workspace RBAC; flat 403, existence never leaks.
-    if authz::require_permission(&state.pool, user.id, workspace_id, authz::CONTENT_READ)
+    // 3. Workspace RBAC; flat 403, existence never leaks. Re-checked on the
+    // ticket path too, so membership revoked inside the 60 s window denies.
+    if authz::require_permission(&state.pool, user_id, workspace_id, authz::CONTENT_READ)
         .await
         .is_err()
     {
@@ -73,15 +108,6 @@ pub async fn connect(
 
     ws.max_message_size(MAX_BROWSER_FRAME)
         .on_upgrade(move |socket| handle(state, workspace_id, socket))
-}
-
-async fn authenticate(state: &AppState, headers: &HeaderMap) -> Option<User> {
-    let jar = axum_extra::extract::cookie::CookieJar::from_headers(headers);
-    let token = jar.get(&state.config.cookie_name)?.value().to_string();
-    db::sessions::find_valid_user(&state.pool, &session::hash_token(&token))
-        .await
-        .ok()
-        .flatten()
 }
 
 async fn handle(state: AppState, workspace_id: Uuid, socket: WebSocket) {

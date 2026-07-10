@@ -1,4 +1,5 @@
 import { api } from '../../../lib/api';
+import type { JobDetail } from '../../../types/job';
 import type {
   Artifact,
   Pipeline,
@@ -54,8 +55,26 @@ export async function getPipelineDetail(
     .json<PipelineDetail>();
 }
 
+export async function getJobDetail(
+  workspaceId: string,
+  pipelineId: string,
+  jobId: string,
+): Promise<JobDetail> {
+  return api
+    .get(`/api/workspaces/${workspaceId}/pipelines/${pipelineId}/jobs/${jobId}`)
+    .json<JobDetail>();
+}
+
 export async function cancelPipeline(workspaceId: string, pipelineId: string): Promise<void> {
   await api.post(`/api/workspaces/${workspaceId}/pipelines/${pipelineId}/cancel`);
+}
+
+export async function cancelJob(
+  workspaceId: string,
+  pipelineId: string,
+  jobId: string,
+): Promise<void> {
+  await api.post(`/api/workspaces/${workspaceId}/pipelines/${pipelineId}/jobs/${jobId}/cancel`);
 }
 
 export async function rerunPipeline(

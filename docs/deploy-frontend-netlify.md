@@ -36,14 +36,19 @@ Notes on the redirect rules (order matters — most specific first):
   (`/api/me`), the full-page login navigation goes to `/auth/github/login` on the
   Netlify origin, and both flow through the proxy.
 
-**Known limitation — WebSockets.** Netlify's proxy cannot forward WebSocket
-upgrades, so the live pipeline stream (`/ws/...`) cannot connect on this
-deployment. The app detects this and uses its built-in **REST polling fallback**
-(`usePipelineStream.ts`) — pipeline pages still update, just on a polling cadence
-instead of instantly. Runners are unaffected (they connect straight to the API
-domain). If instant streaming matters later, serve the built frontend from the
-same origin as the API (e.g. behind Traefik on the VPS) — that setup gets full WS
-and needs no proxy rules at all.
+**WebSockets — direct with one-time tickets.** Netlify's proxy cannot forward
+WebSocket upgrades, so the live streams (`/ws/...`) don't go through the proxy at
+all. Instead, `REACT_APP_WS_ORIGIN` points the sockets **directly at the API
+origin**, and because the session cookie is first-party on the Netlify origin
+(it can't ride a cross-origin upgrade), the app first mints a **one-time,
+60-second WS ticket** over the proxied REST API (`POST
+/api/workspaces/{id}/ws-ticket` — cookie, CSRF header, and RBAC all apply) and
+presents it as `?ticket=` on the upgrade. The backend still enforces its strict
+`Origin == FRONTEND_URL` allow-list on the handshake, so `FRONTEND_URL` (§4)
+must be exactly this site's origin. If a socket can't connect, the app falls
+back to REST polling and goes dormant after a few attempts rather than
+retrying forever. Runners are unaffected (they connect straight to the API
+domain with their own bearer token).
 
 ## 2. One-time Netlify setup (CLI)
 
@@ -58,6 +63,8 @@ netlify sites:create --name overup-app --account-slug <your-account-slug>
 
 # Build-time env for CI builds (same-origin — empty on purpose):
 netlify env:set REACT_APP_API_ORIGIN ""
+# Direct WebSocket origin (ticket auth — see §1):
+netlify env:set REACT_APP_WS_ORIGIN "https://overup-api.duckdns.org"
 ```
 
 The link state lives in `.netlify/` (gitignored). `netlify.toml` is committed —
@@ -107,7 +114,10 @@ OAUTH_REDIRECT_URL=https://overup-app.netlify.app/auth/github/callback
    (`{"error":...}`) — proves the proxy reaches the API. If it returns HTML, the
    redirect rules aren't active (see troubleshooting).
 3. "Continue with GitHub" → authorize → you land back in the app, logged in.
-4. Open a running pipeline: statuses and logs update (via polling — see §1).
+4. Open the dashboard or a running pipeline: statuses and logs update live —
+   the Network tab shows `POST .../ws-ticket` followed by a 101-switching
+   WebSocket to `wss://overup-api.duckdns.org/ws/...` (see §1). If the socket
+   can't connect, pages still update via polling.
 
 ## 6. Troubleshooting
 
@@ -118,5 +128,5 @@ OAUTH_REDIRECT_URL=https://overup-app.netlify.app/auth/github/callback
 | Login round-trip works but you land signed out | `FRONTEND_URL` or `OAUTH_REDIRECT_URL` still points at the old origin — both must use the Netlify URL, then redeploy the backend. Also confirm the GitHub OAuth App callback matches exactly. |
 | GitHub authorize page errors immediately | OAuth App callback URL ≠ `OAUTH_REDIRECT_URL`. |
 | Repo install redirect fails after choosing repos | GitHub App Setup URL still points at the API domain — it must be the Netlify URL (the cookie is on the Netlify origin). |
-| Live logs feel delayed | Expected: WebSockets can't traverse Netlify's proxy; the app polls instead (§1). Full streaming = same-origin hosting on the VPS. |
+| Live logs feel delayed / WS won't connect | The socket goes direct with a ticket (§1). Check: `REACT_APP_WS_ORIGIN` was set at build time, backend `FRONTEND_URL` equals the Netlify origin **exactly** (it is the WS Origin allow-list), and `wss://` on the API domain isn't blocked by the reverse proxy. While the socket is down the app polls, so data still updates. |
 | Old React favicon in the tab | Hard-refresh / clear the tab's favicon cache; favicons are cached aggressively. |

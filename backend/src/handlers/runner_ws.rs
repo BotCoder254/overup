@@ -149,8 +149,12 @@ pub async fn connect(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let Some((runner, is_bootstrap)) = authenticate(&state, &headers).await else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let (runner, is_bootstrap) = match authenticate(&state, &headers).await {
+        Ok(pair) => pair,
+        // Static category strings only (never dynamic detail) — the runner
+        // logs the body so operators can tell an expired registration token
+        // from a revoked/rotated one.
+        Err(reason) => return (StatusCode::UNAUTHORIZED, reason).into_response(),
     };
 
     ws.max_message_size(MAX_RUNNER_FRAME)
@@ -160,21 +164,36 @@ pub async fn connect(
 /// Bearer token -> SHA-256 -> non-revoked runner row. Tries the permanent
 /// credential first, then falls back to a still-valid bootstrap credential
 /// (the guided-wizard registration flow) — the returned bool marks which.
-async fn authenticate(state: &AppState, headers: &HeaderMap) -> Option<(Runner, bool)> {
-    let value = headers.get("authorization")?.to_str().ok()?;
-    let token = value.strip_prefix("Bearer ")?;
+/// Failures carry a static 401 category for the runner's logs.
+async fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<(Runner, bool), &'static str> {
+    let Some(token) = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+    else {
+        return Err("missing_token");
+    };
     if token.is_empty() || token.len() > 128 {
-        return None;
+        return Err("invalid_token");
     }
     let hash = session::hash_token(token);
     if let Some(runner) = db::runners::find_by_token_hash(&state.pool, &hash).await.ok().flatten() {
-        return Some((runner, false));
+        return Ok((runner, false));
     }
-    let runner = db::runners::find_by_bootstrap_token_hash(&state.pool, &hash)
+    if let Some(runner) = db::runners::find_by_bootstrap_token_hash(&state.pool, &hash)
         .await
         .ok()
-        .flatten()?;
-    Some((runner, true))
+        .flatten()
+    {
+        return Ok((runner, true));
+    }
+    if db::runners::bootstrap_token_hash_expired(&state.pool, &hash)
+        .await
+        .unwrap_or(false)
+    {
+        return Err("bootstrap_expired");
+    }
+    Err("invalid_token")
 }
 
 async fn handle(state: AppState, runner: Runner, is_bootstrap: bool, socket: WebSocket) {

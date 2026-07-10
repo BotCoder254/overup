@@ -22,6 +22,11 @@ export function Dialog({ open, onClose, title, description, children, footer, cl
   const titleId = useId();
   const panelRef = useRef<HTMLDivElement>(null);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
+  // Read through a ref so the focus effect below depends only on `open`:
+  // an inline `onClose` from the parent would otherwise re-run the effect on
+  // every parent render and steal focus from whatever the user is typing in.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
   useEffect(() => {
     if (!open) return undefined;
@@ -31,7 +36,7 @@ export function Dialog({ open, onClose, title, description, children, footer, cl
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.stopPropagation();
-        onClose();
+        onCloseRef.current();
         return;
       }
       // Containment: keep Tab cycling inside the panel.
@@ -56,7 +61,7 @@ export function Dialog({ open, onClose, title, description, children, footer, cl
       document.removeEventListener('keydown', onKeyDown);
       restoreFocusRef.current?.focus();
     };
-  }, [open, onClose]);
+  }, [open]);
 
   if (!open) return null;
 

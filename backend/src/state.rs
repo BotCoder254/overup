@@ -13,6 +13,7 @@ use crate::services::r2::R2;
 use crate::services::runner_hub::RunnerHub;
 use crate::services::scheduler::Scheduler;
 use crate::services::workspace_hub::WorkspaceHub;
+use crate::services::ws_ticket::WsTicketStore;
 
 /// GitHub OAuth client with the authorization and token endpoints configured.
 pub type OAuthClient =
@@ -38,6 +39,9 @@ pub struct AppState {
     pub scheduler: Arc<Scheduler>,
     /// Artifact storage; None disables artifact grants cleanly.
     pub r2: Option<Arc<R2>>,
+    /// One-time tickets for cross-origin browser WebSocket auth
+    /// (deployments whose proxy cannot forward upgrades, e.g. Netlify).
+    pub ws_tickets: Arc<WsTicketStore>,
 }
 
 impl AppState {
@@ -84,6 +88,7 @@ impl AppState {
             workspace_hub: Arc::new(WorkspaceHub::default()),
             scheduler: Arc::new(Scheduler::default()),
             r2,
+            ws_tickets: Arc::new(WsTicketStore::default()),
         })
     }
 }

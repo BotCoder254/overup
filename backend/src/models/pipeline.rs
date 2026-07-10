@@ -173,6 +173,83 @@ impl From<PipelineJob> for PipelineJobResponse {
     }
 }
 
+/// Queue-view row: an active job joined to its pipeline/repository identity
+/// plus the dependency-blocked flag computed in SQL (the same NOT-EXISTS
+/// predicate the scheduler's eligibility query uses).
+#[derive(Debug, sqlx::FromRow)]
+pub struct QueueJobRow {
+    #[sqlx(flatten)]
+    pub job: PipelineJob,
+    pub pipeline_number: i32,
+    pub repository_id: Uuid,
+    pub repo_full_name: String,
+    pub pipeline_workflow_id: Option<Uuid>,
+    pub workflow_name: String,
+    pub git_ref: String,
+    pub trigger: String,
+    pub blocked_by_needs: bool,
+}
+
+/// Slim queue DTO: deliberately excludes `plan` (no env surface at all) and
+/// carries a static, server-computed `queue_reason` category string.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueJobResponse {
+    pub id: Uuid,
+    pub pipeline_id: Uuid,
+    pub key: String,
+    pub name: Option<String>,
+    pub runs_on: Vec<String>,
+    pub needs: Vec<String>,
+    pub status: String,
+    pub conclusion: Option<String>,
+    pub stage: String,
+    pub runner_id: Option<Uuid>,
+    pub attempt: i32,
+    pub error_category: Option<String>,
+    pub queued_at: DateTime<Utc>,
+    pub assigned_at: Option<DateTime<Utc>>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub pipeline_number: i32,
+    pub repository_id: Uuid,
+    pub repo_full_name: String,
+    pub workflow_id: Option<Uuid>,
+    pub workflow_name: String,
+    pub git_ref: String,
+    pub trigger: String,
+    pub queue_reason: &'static str,
+}
+
+impl QueueJobResponse {
+    pub fn from_row(row: QueueJobRow, queue_reason: &'static str) -> Self {
+        Self {
+            id: row.job.id,
+            pipeline_id: row.job.pipeline_id,
+            key: row.job.job_key,
+            name: row.job.name,
+            runs_on: row.job.runs_on,
+            needs: row.job.needs,
+            status: row.job.status,
+            conclusion: row.job.conclusion,
+            stage: row.job.stage,
+            runner_id: row.job.runner_id,
+            attempt: row.job.attempt,
+            error_category: row.job.error_category,
+            queued_at: row.job.queued_at,
+            assigned_at: row.job.assigned_at,
+            started_at: row.job.started_at,
+            pipeline_number: row.pipeline_number,
+            repository_id: row.repository_id,
+            repo_full_name: row.repo_full_name,
+            workflow_id: row.pipeline_workflow_id,
+            workflow_name: row.workflow_name,
+            git_ref: row.git_ref,
+            trigger: row.trigger,
+            queue_reason,
+        }
+    }
+}
+
 /// Env keys that look confidential are masked in API responses even though
 /// plan env only ever comes from workflow YAML (defense in depth).
 pub fn looks_confidential(key: &str) -> bool {

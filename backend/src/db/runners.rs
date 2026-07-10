@@ -178,6 +178,22 @@ pub async fn find_by_bootstrap_token_hash(
     .await
 }
 
+/// Diagnostic lookup: does this hash match a bootstrap credential that has
+/// already expired (but not yet been purged)? Used only to pick the static
+/// 401 category the runner logs — never grants access.
+pub async fn bootstrap_token_hash_expired(pool: &PgPool, token_hash: &str) -> sqlx::Result<bool> {
+    let row: Option<(bool,)> = sqlx::query_as(
+        r#"
+        SELECT true FROM runners
+        WHERE bootstrap_token_hash = $1 AND bootstrap_expires_at <= now()
+        "#,
+    )
+    .bind(token_hash)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.is_some())
+}
+
 /// One-shot exchange: a bootstrap credential becomes the permanent one.
 /// The `WHERE bootstrap_token_hash IS NOT NULL` guard makes this atomic
 /// against a racing second connection with the same bootstrap token — only
