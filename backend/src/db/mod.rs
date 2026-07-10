@@ -1,4 +1,5 @@
 pub mod artifacts;
+pub mod dashboard;
 pub mod github_installations;
 pub mod oauth_states;
 pub mod pipeline_events;

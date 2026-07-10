@@ -20,6 +20,9 @@ target/
 # local agent settings
 .claude/
 
+# netlify CLI link state
+.netlify/
+
 # misc
 .DS_Store
 .env

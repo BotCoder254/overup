@@ -12,6 +12,7 @@ use crate::services::log_hub::LogHub;
 use crate::services::r2::R2;
 use crate::services::runner_hub::RunnerHub;
 use crate::services::scheduler::Scheduler;
+use crate::services::workspace_hub::WorkspaceHub;
 
 /// GitHub OAuth client with the authorization and token endpoints configured.
 pub type OAuthClient =
@@ -31,6 +32,8 @@ pub struct AppState {
     pub log_hub: Arc<LogHub>,
     /// Outbound channels to connected runners.
     pub runner_hub: Arc<RunnerHub>,
+    /// Live workspace-wide fan-out for the Dashboard and Runner Management pages.
+    pub workspace_hub: Arc<WorkspaceHub>,
     /// Wake handle for the scheduling loop.
     pub scheduler: Arc<Scheduler>,
     /// Artifact storage; None disables artifact grants cleanly.
@@ -78,6 +81,7 @@ impl AppState {
             github_app: Arc::new(github_app),
             log_hub: Arc::new(LogHub::default()),
             runner_hub: Arc::new(RunnerHub::default()),
+            workspace_hub: Arc::new(WorkspaceHub::default()),
             scheduler: Arc::new(Scheduler::default()),
             r2,
         })

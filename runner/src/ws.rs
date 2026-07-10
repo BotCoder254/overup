@@ -15,6 +15,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 use crate::artifacts::GrantWaiters;
+use crate::health::HealthSampler;
 use crate::{ActiveJob, CurrentJob, RunnerConfig, executor};
 
 const HEARTBEAT: Duration = Duration::from_secs(30);
@@ -31,6 +32,7 @@ pub enum Disconnect {
 pub async fn run_connection(
     config: &RunnerConfig,
     docker: Option<bollard::Docker>,
+    new_token: &mut Option<String>,
 ) -> anyhow::Result<Disconnect> {
     // http -> ws, https -> wss.
     let ws_url = format!("{}/runner/ws", config.server_url.replacen("http", "ws", 1));
@@ -61,7 +63,7 @@ pub async fn run_connection(
     .await?;
 
     // The first server frame must be hello_ack carrying our identity.
-    let (runner_id, heartbeat_secs) = tokio::time::timeout(HELLO_TIMEOUT, async {
+    let (runner_id, heartbeat_secs, permanent_token) = tokio::time::timeout(HELLO_TIMEOUT, async {
         loop {
             match stream.next().await {
                 Some(Ok(Message::Text(text))) => {
@@ -70,6 +72,7 @@ pub async fn run_connection(
                             runner_id,
                             heartbeat_interval_secs,
                             protocol_version,
+                            permanent_token,
                         }) => {
                             if protocol_version != protocol::PROTOCOL_VERSION {
                                 anyhow::bail!(
@@ -77,7 +80,7 @@ pub async fn run_connection(
                                     protocol::PROTOCOL_VERSION
                                 );
                             }
-                            return Ok((runner_id, heartbeat_interval_secs));
+                            return Ok((runner_id, heartbeat_interval_secs, permanent_token));
                         }
                         Ok(_) => continue,
                         Err(_) => anyhow::bail!("unparseable frame during handshake"),
@@ -93,6 +96,10 @@ pub async fn run_connection(
     .context("hello_ack timed out")??;
 
     tracing::info!(%runner_id, "connected to control plane");
+    if let Some(token) = permanent_token {
+        tracing::info!("received a permanent token from a bootstrap exchange");
+        *new_token = Some(token);
+    }
 
     let (out_tx, mut out_rx) = mpsc::channel::<RunnerMsg>(OUT_QUEUE);
     let grants = GrantWaiters::default();
@@ -106,6 +113,11 @@ pub async fn run_connection(
     };
     let mut heartbeat = tokio::time::interval(heartbeat_interval);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut health_sampler = HealthSampler::new();
+    // Refreshed on the heartbeat cadence; Ping-triggered replies reuse the
+    // last sample rather than resampling on every server ping.
+    let mut last_health: Option<protocol::RunnerHealth> = None;
+    let ctx = MsgContext { config, docker: &docker, runner_id, out_tx: &out_tx, grants: &grants, current: &current };
 
     loop {
         tokio::select! {
@@ -116,7 +128,9 @@ pub async fn run_connection(
             }
             _ = heartbeat.tick() => {
                 let busy_job_id = current.lock().unwrap().as_ref().map(|j| j.job_id);
-                send(&mut sink, &RunnerMsg::Heartbeat { busy_job_id }).await?;
+                let health = health_sampler.sample(&docker).await;
+                last_health = Some(health.clone());
+                send(&mut sink, &RunnerMsg::Heartbeat { busy_job_id, health: Some(health) }).await?;
             }
             frame = stream.next() => {
                 match frame {
@@ -125,9 +139,7 @@ pub async fn run_connection(
                             tracing::warn!("unparseable server frame; ignoring");
                             continue;
                         };
-                        if let Some(disconnect) = on_server_msg(
-                            config, &docker, runner_id, msg, &out_tx, &grants, &current,
-                        ) {
+                        if let Some(disconnect) = on_server_msg(&ctx, msg, &last_health) {
                             return Ok(disconnect);
                         }
                     }
@@ -146,19 +158,28 @@ pub async fn run_connection(
     }
 }
 
-fn on_server_msg(
-    config: &RunnerConfig,
-    docker: &Option<bollard::Docker>,
+/// Everything a connection-scoped inbound message handler needs, bundled to
+/// keep the function signature within clippy's argument-count lint.
+#[derive(Clone, Copy)]
+struct MsgContext<'a> {
+    config: &'a RunnerConfig,
+    docker: &'a Option<bollard::Docker>,
     runner_id: uuid::Uuid,
+    out_tx: &'a mpsc::Sender<RunnerMsg>,
+    grants: &'a GrantWaiters,
+    current: &'a CurrentJob,
+}
+
+fn on_server_msg(
+    ctx: &MsgContext<'_>,
     msg: ServerMsg,
-    out_tx: &mpsc::Sender<RunnerMsg>,
-    grants: &GrantWaiters,
-    current: &CurrentJob,
+    last_health: &Option<protocol::RunnerHealth>,
 ) -> Option<Disconnect> {
+    let MsgContext { config, docker, runner_id, out_tx, grants, current } = *ctx;
     match msg {
         ServerMsg::Ping => {
             let busy_job_id = current.lock().unwrap().as_ref().map(|j| j.job_id);
-            let _ = out_tx.try_send(RunnerMsg::Heartbeat { busy_job_id });
+            let _ = out_tx.try_send(RunnerMsg::Heartbeat { busy_job_id, health: last_health.clone() });
         }
         ServerMsg::JobAssign { payload_json, signature_hex } => {
             // Integrity + freshness first; the payload is not even parsed
@@ -222,6 +243,20 @@ fn on_server_msg(
             });
         }
         ServerMsg::HelloAck { .. } => {}
+        // Job assignment is always server-initiated; the runner never polls
+        // for work. So there is nothing to gate here — this is purely
+        // operator-visible logging.
+        ServerMsg::LifecycleChanged { status } => match status {
+            protocol::RunnerLifecycle::Disabled => {
+                tracing::info!("disabled by operator — will not receive new jobs");
+            }
+            protocol::RunnerLifecycle::Draining => {
+                tracing::info!("draining — finishing the current job, then going offline");
+            }
+            protocol::RunnerLifecycle::Resumed => {
+                tracing::info!("resumed — eligible for new jobs again");
+            }
+        },
     }
     None
 }

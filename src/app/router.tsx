@@ -12,13 +12,15 @@ import { WorkflowsPage } from '../features/workflows/pages/WorkflowsPage';
 import { WorkflowDetailPage } from '../features/workflows/pages/WorkflowDetailPage';
 import { PipelinesPage } from '../features/pipelines/pages/PipelinesPage';
 import { PipelineDetailPage } from '../features/pipelines/pages/PipelineDetailPage';
+import { RunnersPage } from '../features/runners/pages/RunnersPage';
+import { RunnerDetailPage } from '../features/runners/pages/RunnerDetailPage';
 import { NAV_ITEMS } from './navigation';
 import { ProtectedRoute } from './guards/ProtectedRoute';
 import { PublicOnlyRoute } from './guards/PublicOnlyRoute';
 import { WorkspaceRoute } from './guards/WorkspaceRoute';
 
 /** Segments with real pages; everything else still renders a placeholder. */
-const IMPLEMENTED_SEGMENTS = new Set(['repositories', 'workflows', 'pipelines']);
+const IMPLEMENTED_SEGMENTS = new Set(['repositories', 'workflows', 'pipelines', 'runners']);
 
 /** Legacy /dashboard entry point: forward to the slug-routed workspace. */
 function DashboardRedirect() {
@@ -56,6 +58,8 @@ export const router = createBrowserRouter([
               { path: 'workflows/:workflowId', element: <WorkflowDetailPage /> },
               { path: 'pipelines', element: <PipelinesPage /> },
               { path: 'pipelines/:pipelineId', element: <PipelineDetailPage /> },
+              { path: 'runners', element: <RunnersPage /> },
+              { path: 'runners/:runnerId', element: <RunnerDetailPage /> },
               ...NAV_ITEMS.filter(
                 (item) => item.segment !== '' && !IMPLEMENTED_SEGMENTS.has(item.segment),
               ).map((item) => ({

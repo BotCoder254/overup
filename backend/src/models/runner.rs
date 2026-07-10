@@ -8,7 +8,6 @@ use uuid::Uuid;
 #[derive(Debug, sqlx::FromRow)]
 pub struct Runner {
     pub id: Uuid,
-    #[allow(dead_code)] // scope column, filtered in queries
     pub workspace_id: Uuid,
     pub name: String,
     pub labels: Vec<String>,
@@ -19,9 +18,13 @@ pub struct Runner {
     pub created_by: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub revoked_at: Option<DateTime<Utc>>,
+    pub last_health: Option<serde_json::Value>,
+    #[allow(dead_code)] // reserved for the Runner Management dashboard
+    pub last_health_at: Option<DateTime<Utc>>,
+    pub draining_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunnerResponse {
     pub id: Uuid,
@@ -32,6 +35,8 @@ pub struct RunnerResponse {
     pub last_seen_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub revoked: bool,
+    pub last_health: Option<serde_json::Value>,
+    pub draining: bool,
 }
 
 impl From<Runner> for RunnerResponse {
@@ -45,6 +50,8 @@ impl From<Runner> for RunnerResponse {
             last_seen_at: row.last_seen_at,
             created_at: row.created_at,
             revoked: row.revoked_at.is_some(),
+            last_health: row.last_health,
+            draining: row.draining_at.is_some(),
         }
     }
 }

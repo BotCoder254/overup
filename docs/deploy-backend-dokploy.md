@@ -301,6 +301,16 @@ tested, recommended path):
 3. In Dokploy → Domains: Host `overup-api.duckdns.org`, Path `/`, Container Port
    `8080`, **HTTPS enabled**, Certificate **Let's Encrypt**. Ports 80 + 443 must be
    open (Let's Encrypt validates over port 80).
+
+   > **Firewall check — do this before blaming anything else.** From a machine
+   > that is *not* the VPS, run `curl -v --max-time 10 http://<your-domain>/`. If
+   > it *times out* (rather than getting any HTTP response), ports 80/443 are
+   > blocked — usually the VPS provider's edge firewall (open them in the provider
+   > panel) and/or `ufw` on the VPS (`ufw allow 80/tcp && ufw allow 443/tcp`).
+   > While they're blocked, Let's Encrypt cannot issue, Traefik falls back to its
+   > self-signed default certificate, browsers warn, and runners refuse to connect
+   > with `invalid peer certificate: UnknownIssuer`. Testing from the VPS itself
+   > proves nothing — local traffic often bypasses the edge firewall.
 4. Use `https://overup-api.duckdns.org` everywhere this guide says
    `https://api.example.com` — the env vars in §5 and the GitHub App URLs in §7.
    Keep `COOKIE_SECURE=true`; DuckDNS + Let's Encrypt is real HTTPS.
@@ -496,6 +506,8 @@ Most protections are already enforced **in the code** (see the security checklis
 | Symptom | Likely cause / fix |
 | --- | --- |
 | Dokploy: "Domain resolves to `X` but should point to `<VPS IP>`" | The hostname doesn't point at your VPS — a DNS problem, not a certificate one. Own domain: fix its `A` record. No domain: use a free DuckDNS subdomain, [§6.1](#61-no-domain-yet-use-a-free-duckdns-subdomain). |
+| The domain **times out** from outside (browser spins, `curl` hits `--max-time`) | Ports 80/443 are blocked by the VPS provider's firewall and/or `ufw` — see the firewall check in [§6.1](#61-no-domain-yet-use-a-free-duckdns-subdomain). DNS resolving correctly while connections time out is the signature of a firewall, not a DNS or app problem. |
+| Browser warns about the certificate / runners report `UnknownIssuer` | Traefik is serving its **default self-signed cert**: the domain's Certificate is "none", or Let's Encrypt issuance failed (port 80 closed, DNS not propagated). Set Certificate = Let's Encrypt and clear the firewall first. |
 | `Error: GITHUB_APP_PRIVATE_KEY_B64 is not valid base64` at startup | The raw PEM text was pasted into the variable. It must be the **base64 of the .pem file** as one line — conversion commands in [§5.1](#51-converting-the-github-app-private-key-to-github_app_private_key_b64). |
 | Build fails: `failed to load manifest for dependency 'protocol'` or `../protocol not found` | **Docker Context Path is wrong.** It must be `.` (repo root) with Docker File `backend/Dockerfile` — the build context has to contain both crates. |
 | Build fails on `sqlx::migrate!` | `backend/migrations/` missing from the context — check `.dockerignore` wasn't edited to exclude it. |

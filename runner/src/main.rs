@@ -9,7 +9,15 @@
 //!
 //! Configuration (environment):
 //!   OVERUP_URL                  control plane origin (default http://localhost:8080)
-//!   RUNNER_TOKEN                registration token (shown once at creation)
+//!   RUNNER_TOKEN                registration token (shown once at creation).
+//!                               When it is a short-lived bootstrap token
+//!                               (guided wizard registration), the runner
+//!                               receives a permanent token on first
+//!                               connect and persists it to RUNNER_TOKEN_FILE.
+//!   RUNNER_TOKEN_FILE           optional path to persist a permanent token
+//!                               received from a bootstrap exchange; read on
+//!                               startup in preference to RUNNER_TOKEN once
+//!                               it exists
 //!   RUNNER_JOB_SIGNING_KEY      shared HMAC key — must match the control plane
 //!   RUNNER_NAME                 display name sent in hello (default overup-runner)
 //!   RUNNER_LABELS               comma-separated labels (default self-hosted)
@@ -30,6 +38,7 @@
 
 mod artifacts;
 mod executor;
+mod health;
 mod ws;
 
 use std::sync::{Arc, Mutex};
@@ -91,6 +100,19 @@ fn optional(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
+/// Write a freshly-issued permanent token to disk, restricted to the owner
+/// (same convention as the `.env` file holding RUNNER_TOKEN today).
+fn persist_token(path: &str, token: &str) -> anyhow::Result<()> {
+    std::fs::write(path, token).with_context(|| format!("writing {path}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("chmod 600 {path}"))?;
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
@@ -120,11 +142,22 @@ async fn main() -> anyhow::Result<()> {
         other => anyhow::bail!("RUNNER_JOB_NETWORK must be bridge, none, or isolated (got {other})"),
     };
 
-    let config = RunnerConfig {
+    // A prior bootstrap exchange may have persisted a permanent token here;
+    // it takes priority over RUNNER_TOKEN (which, after a bootstrap-token
+    // first run, holds a now-consumed one-time credential).
+    let token_file = std::env::var("RUNNER_TOKEN_FILE").ok().filter(|p| !p.is_empty());
+    let initial_token = token_file
+        .as_deref()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map_or_else(|| required("RUNNER_TOKEN"), Ok)?;
+
+    let mut config = RunnerConfig {
         server_url: optional("OVERUP_URL", "http://localhost:8080")
             .trim_end_matches('/')
             .to_string(),
-        token: required("RUNNER_TOKEN")?,
+        token: initial_token,
         name: optional("RUNNER_NAME", "overup-runner"),
         labels: optional("RUNNER_LABELS", "self-hosted")
             .split(',')
@@ -172,7 +205,8 @@ async fn main() -> anyhow::Result<()> {
     let mut backoff = Duration::from_secs(1);
     loop {
         let connected_at = Instant::now();
-        match ws::run_connection(&config, docker.clone()).await {
+        let mut new_token = None;
+        match ws::run_connection(&config, docker.clone(), &mut new_token).await {
             Ok(ws::Disconnect::Revoked) => {
                 tracing::error!("this runner was revoked by the control plane; exiting");
                 return Ok(());
@@ -184,6 +218,24 @@ async fn main() -> anyhow::Result<()> {
                 tracing::warn!(error = ?error, "connection attempt failed");
             }
         }
+
+        if let Some(token) = new_token {
+            config.token = token.clone();
+            match &token_file {
+                Some(path) => match persist_token(path, &token) {
+                    Ok(()) => tracing::info!(path = %path, "permanent token persisted"),
+                    Err(error) => tracing::warn!(
+                        path = %path,
+                        error = ?error,
+                        "could not persist the new permanent token; it will only be used for this process"
+                    ),
+                },
+                None => tracing::warn!(
+                    "received a permanent token but RUNNER_TOKEN_FILE is not set; it will only be used for this process"
+                ),
+            }
+        }
+
         // A session that survived a while earns a fresh backoff.
         if connected_at.elapsed() > Duration::from_secs(60) {
             backoff = Duration::from_secs(1);
