@@ -1,0 +1,48 @@
+# Netlify configuration for the Overup frontend.
+# Full guide: docs/deploy-frontend-netlify.md
+#
+# The API and the auth flow are PROXIED (status = 200 rewrites) to the
+# backend so the HttpOnly session cookie stays first-party on this site's
+# origin — cross-site cookies are blocked by modern browsers, so pointing
+# the SPA directly at the API origin would break login everywhere.
+#
+# Known limitation: Netlify's proxy cannot forward WebSocket upgrades, so
+# live pipeline streaming uses the app's built-in REST polling fallback.
+
+[build]
+  command = "npm run build"
+  publish = "build"
+
+[build.environment]
+  # Same-origin: XHR stays relative and flows through the redirects below.
+  REACT_APP_API_ORIGIN = ""
+
+# --- Backend proxy (order matters: most specific first) ----------------------
+
+[[redirects]]
+  from = "/api/*"
+  to = "https://overup-api.duckdns.org/api/:splat"
+  status = 200
+  force = true
+
+# Covers /auth/github/login, /auth/github/callback, /auth/github/app/setup.
+# Deliberately NOT /auth/* — /auth/callback is a React route handled by the
+# SPA fallback below.
+[[redirects]]
+  from = "/auth/github/*"
+  to = "https://overup-api.duckdns.org/auth/github/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/auth/logout"
+  to = "https://overup-api.duckdns.org/auth/logout"
+  status = 200
+  force = true
+
+# --- SPA fallback -------------------------------------------------------------
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
