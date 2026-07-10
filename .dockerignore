@@ -1,6 +1,6 @@
-# Keep the Docker build context lean: the backend image only needs
-# backend/ + protocol/ (see backend/Dockerfile). Adjust if a frontend
-# or runner Dockerfile is added later.
+# Keep the Docker build context lean: this context serves both
+# backend/Dockerfile (backend/ + protocol/) and runner/Dockerfile
+# (runner/ + protocol/). Adjust if a frontend Dockerfile is added later.
 
 .git
 .claude
@@ -21,9 +21,6 @@ tsconfig.json
 backend/target
 protocol/target
 runner/target
-
-# Reference runner (deployed separately, not in this image)
-runner
 
 # Secrets — never allow env files or keys into an image layer
 **/.env

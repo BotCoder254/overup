@@ -38,7 +38,8 @@ The backend is a single self-contained binary:
 
 Runners are **not** part of this deployment. They run elsewhere (any machine with
 Docker), dial **out** to the backend over WebSocket (`/runner/ws`), and need no inbound
-ports — the backend being publicly reachable over HTTPS is enough.
+ports — the backend being publicly reachable over HTTPS is enough. Deploy one after
+the backend is live: see [deploy-runner.md](./deploy-runner.md).
 
 Traffic flow in production:
 
@@ -182,7 +183,8 @@ GITHUB_APP_SLUG=<your-app-slug>
 
 # --- Pipeline execution -------------------------------------------------------
 # Shared HMAC key that signs job payloads pushed to runners. >= 32 random
-# bytes; every runner must be started with the SAME value.
+# bytes; every runner must be started with the SAME value (it goes into the
+# runner's env too — see docs/deploy-runner.md).
 # Generate: openssl rand -hex 32
 RUNNER_JOB_SIGNING_KEY=<64-hex-chars>
 
@@ -436,5 +438,5 @@ Most protections are already enforced **in the code** (see the security checklis
 | Webhook deliveries show `401` | `GITHUB_WEBHOOK_SECRET` doesn't match the secret configured on the GitHub App. |
 | Webhook deliveries show `404` | Wrong Webhook URL — it's `/webhooks/github`, not under `/api`. |
 | `database connection` errors at boot | Wrong internal hostname (use the Dokploy service's internal host, not `localhost`), or the app and Postgres aren't on the same Docker network. |
-| Pipelines stay **Queued** forever | Expected until a runner is connected — runners are a separate deployment (see the runner section of the repo README / future runner guide). |
+| Pipelines stay **Queued** forever | Expected until a runner is connected — runners are a separate deployment: see [deploy-runner.md](./deploy-runner.md). Once one is online, also check its labels cover the workflow's `runs-on`. |
 | Frontend can't call the API (CORS errors) | `FRONTEND_URL` must be the exact origin serving the React app (scheme + host, no trailing slash). |
