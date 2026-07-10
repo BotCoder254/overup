@@ -6,8 +6,13 @@
 # origin — cross-site cookies are blocked by modern browsers, so pointing
 # the SPA directly at the API origin would break login everywhere.
 #
-# Known limitation: Netlify's proxy cannot forward WebSocket upgrades, so
-# live pipeline streaming uses the app's built-in REST polling fallback.
+# Netlify's proxy cannot forward WebSocket upgrades, so sockets connect
+# DIRECTLY to the API origin (REACT_APP_WS_ORIGIN below). The session cookie
+# can't ride that cross-origin upgrade; instead the app mints a one-time
+# 60-second ticket over the proxied REST API (cookie + CSRF + RBAC apply)
+# and presents it as ?ticket= on the upgrade. REST polling remains the
+# fallback while a socket is down. Requires the backend to run with
+# FRONTEND_URL set to exactly this site's origin (the WS Origin allow-list).
 
 [build]
   command = "npm run build"
@@ -16,6 +21,8 @@
 [build.environment]
   # Same-origin: XHR stays relative and flows through the redirects below.
   REACT_APP_API_ORIGIN = ""
+  # Direct WebSocket origin (see the ticket note above).
+  REACT_APP_WS_ORIGIN = "https://overup-api.duckdns.org"
 
 # --- Backend proxy (order matters: most specific first) ----------------------
 

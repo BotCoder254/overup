@@ -13,7 +13,7 @@ use tower_http::trace::TraceLayer;
 use crate::error::AppError;
 use crate::handlers::{
     auth, browser_ws, dashboard, dashboard_ws, github_installations, github_webhooks, health,
-    jobs, me, pipelines, repositories, runner_ws, runners, workflows, workspaces,
+    jobs, me, pipelines, repositories, runner_ws, runners, workflows, workspaces, ws_tickets,
 };
 use crate::middleware::{csrf, security_headers};
 use crate::state::AppState;
@@ -191,6 +191,9 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
             "/workspaces/{workspace_id}/dashboard/activity",
             get(dashboard::activity),
         )
+        // One-time WS auth tickets for deployments whose SPA proxy cannot
+        // forward upgrades (see handlers/ws_tickets.rs).
+        .route("/workspaces/{workspace_id}/ws-ticket", post(ws_tickets::create))
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES));
 
     // Editor validation accepts whole workflow files — its own, larger cap.

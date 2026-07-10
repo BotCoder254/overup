@@ -327,13 +327,19 @@ endpoint, region `auto`, presigned URLs; isolated in `services/r2.rs`), and the 
   `runner.created/revoked`, `artifact.uploaded` (with request ids where available)
 - **WebSocket surfaces live OUTSIDE the CSRF layer** (native WS can't send
   `X-Requested-With`) and defend themselves before upgrading. Browser WS
-  (`/ws/workspaces/{ws}/pipelines/{p}`): strict `Origin == FRONTEND_URL` allow-list (CORS
-  does not protect WebSockets), session-cookie auth via the `find_valid_user` path, then
-  `content.read` RBAC — all pre-upgrade; 4 KB inbound frame cap; unparseable input closes
+  (`/ws/workspaces/{ws}/pipelines/{p}` and `…/{ws}/dashboard`): strict
+  `Origin == FRONTEND_URL` allow-list FIRST (CORS does not protect WebSockets), then auth —
+  session cookie via the `find_valid_user` path (same-origin) OR a **one-time WS ticket**
+  (`?ticket=`, for deployments whose SPA proxy can't forward upgrades, e.g. Netlify: minted
+  by the authenticated+RBAC'd+CSRF'd `POST /api/workspaces/{ws}/ws-ticket`, 32 OS-RNG
+  bytes, hash-only in-memory storage, 60 s TTL, single-use via atomic remove, bound to
+  user+workspace — `services/ws_ticket.rs`), then `content.read` RBAC re-checked on both
+  paths — all pre-upgrade; 4 KB inbound frame cap; unparseable input closes
   the socket; broadcast lag emits `log_gap` (client resyncs over REST). Runner WS
   (`/runner/ws`): `Authorization: Bearer` token → SHA-256 hash lookup against non-revoked
-  runners (tokens are 32 OS-RNG bytes shown once, only hashes stored); 128 KB frame cap;
-  dedicated governors on both endpoints
+  runners (tokens are 32 OS-RNG bytes shown once, only hashes stored); auth failures carry
+  a static category (`invalid_token`/`bootstrap_expired`/`missing_token`) the runner logs
+  with remediation guidance; 128 KB frame cap; dedicated governors on both endpoints
 - **Job payload integrity:** every `job_assign` is HMAC-SHA256-signed over the exact
   transmitted JSON (`RUNNER_JOB_SIGNING_KEY`, ≥32 bytes); payloads embed the target
   `runner_id` and a 5-minute validity window; runners verify constant-time BEFORE parsing —

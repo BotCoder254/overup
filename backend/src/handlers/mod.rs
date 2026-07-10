@@ -13,3 +13,4 @@ pub mod runner_ws;
 pub mod runners;
 pub mod workflows;
 pub mod workspaces;
+pub mod ws_tickets;

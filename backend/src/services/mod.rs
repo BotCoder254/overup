@@ -15,3 +15,4 @@ pub mod session;
 pub mod workflow_parse;
 pub mod workspace;
 pub mod workspace_hub;
+pub mod ws_ticket;
