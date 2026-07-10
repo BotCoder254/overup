@@ -1,48 +1,100 @@
-import { LogOut } from 'lucide-react';
-import type { ReactNode } from 'react';
-import { Logo } from '../brand/Logo';
-import { Button } from '../ui/Button';
-import { useLogout, useMe } from '../../features/auth/hooks/useAuth';
+import { useEffect, useRef, useState } from 'react';
+import { Outlet, useLocation } from 'react-router-dom';
+import { cn } from '../../lib/cn';
+import { CommandPalette } from './CommandPalette';
+import { MobileTopBar } from './MobileTopBar';
+import { Sidebar } from './Sidebar';
 
-interface AppShellProps {
-  children: ReactNode;
-}
+/**
+ * The persistent application shell, mounted once as a layout route for the
+ * whole authenticated workspace: a fixed navigation sidebar on the left and a
+ * floating, independently scrolling content canvas on the right. Below lg the
+ * sidebar becomes an overlay drawer behind a hamburger in the mobile top bar.
+ */
+export function AppShell() {
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const drawerRef = useRef<HTMLDivElement>(null);
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
+  const location = useLocation();
 
-/** Minimal authenticated chrome: top bar with brand, identity, sign-out. */
-export function AppShell({ children }: AppShellProps) {
-  const { data: me } = useMe();
-  const logout = useLogout();
+  // Route changes swap only the canvas content; make sure the drawer is gone.
+  useEffect(() => {
+    setDrawerOpen(false);
+  }, [location.pathname]);
+
+  // Move focus into the drawer when it opens; back to the hamburger on close.
+  useEffect(() => {
+    if (drawerOpen) {
+      drawerRef.current
+        ?.querySelector<HTMLElement>('button, [href], input, [tabindex]:not([tabindex="-1"])')
+        ?.focus();
+    } else if (drawerRef.current?.contains(document.activeElement)) {
+      menuButtonRef.current?.focus();
+    }
+  }, [drawerOpen]);
 
   return (
-    <div className="flex min-h-screen flex-col bg-surface">
-      <header className="flex items-center justify-between gap-2 border-b border-steel/20 bg-canvas px-4 py-3 sm:px-6">
-        <Logo size="sm" className="text-charcoal" />
-        <div className="flex items-center gap-2 sm:gap-4">
-          <div className="flex items-center gap-2.5">
-            {me?.avatarUrl && (
-              <img
-                src={me.avatarUrl}
-                alt=""
-                className="h-8 w-8 rounded-full"
-                referrerPolicy="no-referrer"
-              />
-            )}
-            <span className="hidden text-sm font-medium sm:inline">
-              {me?.displayName ?? me?.username}
-            </span>
-          </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => logout.mutate()}
-            isLoading={logout.isPending}
-          >
-            {!logout.isPending && <LogOut className="h-4 w-4" aria-hidden="true" />}
-            Sign out
-          </Button>
+    <div className="flex h-dvh overflow-hidden bg-surface text-charcoal">
+      {/* Desktop sidebar */}
+      <div className="hidden w-[272px] shrink-0 lg:block">
+        <Sidebar onSearch={() => setPaletteOpen(true)} />
+      </div>
+
+      {/* Mobile drawer + backdrop */}
+      <div
+        className={cn('fixed inset-0 z-40 lg:hidden', !drawerOpen && 'pointer-events-none')}
+      >
+        <div
+          aria-hidden="true"
+          onClick={() => setDrawerOpen(false)}
+          className={cn(
+            'absolute inset-0 bg-navy/40 transition-opacity duration-200',
+            drawerOpen ? 'opacity-100' : 'opacity-0',
+          )}
+        />
+        <div
+          ref={drawerRef}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Navigation"
+          inert={!drawerOpen}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') setDrawerOpen(false);
+          }}
+          className={cn(
+            'absolute inset-y-0 left-0 w-[272px] bg-surface transition-transform duration-200 ease-out',
+            drawerOpen ? 'translate-x-0' : '-translate-x-full',
+          )}
+        >
+          <Sidebar
+            onNavigate={() => setDrawerOpen(false)}
+            onSearch={() => {
+              setDrawerOpen(false);
+              setPaletteOpen(true);
+            }}
+          />
         </div>
-      </header>
-      <main className="flex-1 p-4 sm:p-6">{children}</main>
+      </div>
+
+      {/* Content column: mobile top bar + floating canvas */}
+      <div className="flex min-w-0 flex-1 flex-col">
+        <MobileTopBar
+          ref={menuButtonRef}
+          drawerOpen={drawerOpen}
+          onMenu={() => setDrawerOpen(true)}
+          onSearch={() => setPaletteOpen(true)}
+        />
+        <div className="flex min-h-0 flex-1 flex-col p-2 pt-0 lg:p-3 lg:pl-0 lg:pt-3">
+          <main className="min-h-0 flex-1 overflow-y-auto rounded border border-steel/20 bg-canvas">
+            <div className="mx-auto max-w-6xl p-4 sm:p-6 lg:p-8">
+              <Outlet />
+            </div>
+          </main>
+        </div>
+      </div>
+
+      <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
     </div>
   );
 }

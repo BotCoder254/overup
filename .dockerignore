@@ -1,0 +1,38 @@
+# Keep the Docker build context lean: the backend image only needs
+# backend/ + protocol/ (see backend/Dockerfile). Adjust if a frontend
+# or runner Dockerfile is added later.
+
+.git
+.claude
+
+# Frontend (not part of the backend image)
+node_modules
+build
+coverage
+public
+src
+package.json
+package-lock.json
+tailwind.config.js
+postcss.config.js
+tsconfig.json
+
+# Rust build output (never ship host artifacts into the context)
+backend/target
+protocol/target
+runner/target
+
+# Reference runner (deployed separately, not in this image)
+runner
+
+# Secrets — never allow env files or keys into an image layer
+**/.env
+**/.env.*
+!**/.env.example
+*.pem
+*.key
+
+# Docs & local tooling
+docs
+docker-compose.yml
+README.md

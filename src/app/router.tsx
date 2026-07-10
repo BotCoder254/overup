@@ -1,12 +1,24 @@
 import { Navigate, createBrowserRouter } from 'react-router-dom';
+import { AppShell } from '../components/layout/AppShell';
+import { PlaceholderPage } from '../components/layout/PlaceholderPage';
 import { CallbackPage } from '../features/auth/pages/CallbackPage';
 import { OnboardingPage } from '../features/auth/pages/OnboardingPage';
 import { SignInPage } from '../features/auth/pages/SignInPage';
 import { useMe } from '../features/auth/hooks/useAuth';
 import { DashboardPage } from '../features/dashboard/pages/DashboardPage';
+import { RepositoriesPage } from '../features/repositories/pages/RepositoriesPage';
+import { RepositoryDetailPage } from '../features/repositories/pages/RepositoryDetailPage';
+import { WorkflowsPage } from '../features/workflows/pages/WorkflowsPage';
+import { WorkflowDetailPage } from '../features/workflows/pages/WorkflowDetailPage';
+import { PipelinesPage } from '../features/pipelines/pages/PipelinesPage';
+import { PipelineDetailPage } from '../features/pipelines/pages/PipelineDetailPage';
+import { NAV_ITEMS } from './navigation';
 import { ProtectedRoute } from './guards/ProtectedRoute';
 import { PublicOnlyRoute } from './guards/PublicOnlyRoute';
 import { WorkspaceRoute } from './guards/WorkspaceRoute';
+
+/** Segments with real pages; everything else still renders a placeholder. */
+const IMPLEMENTED_SEGMENTS = new Set(['repositories', 'workflows', 'pipelines']);
 
 /** Legacy /dashboard entry point: forward to the slug-routed workspace. */
 function DashboardRedirect() {
@@ -30,7 +42,30 @@ export const router = createBrowserRouter([
       { path: '/onboarding', element: <OnboardingPage /> },
       {
         element: <WorkspaceRoute />,
-        children: [{ path: '/w/:slug', element: <DashboardPage /> }],
+        children: [
+          {
+            // Layout route: the shell mounts once; navigation swaps only
+            // the content rendered in its canvas via <Outlet/>.
+            path: '/w/:slug',
+            element: <AppShell />,
+            children: [
+              { index: true, element: <DashboardPage /> },
+              { path: 'repositories', element: <RepositoriesPage /> },
+              { path: 'repositories/:repoId', element: <RepositoryDetailPage /> },
+              { path: 'workflows', element: <WorkflowsPage /> },
+              { path: 'workflows/:workflowId', element: <WorkflowDetailPage /> },
+              { path: 'pipelines', element: <PipelinesPage /> },
+              { path: 'pipelines/:pipelineId', element: <PipelineDetailPage /> },
+              ...NAV_ITEMS.filter(
+                (item) => item.segment !== '' && !IMPLEMENTED_SEGMENTS.has(item.segment),
+              ).map((item) => ({
+                path: item.segment,
+                element: <PlaceholderPage item={item} />,
+              })),
+              { path: '*', element: <Navigate to="." replace /> },
+            ],
+          },
+        ],
       },
       { path: '/dashboard', element: <DashboardRedirect /> },
     ],

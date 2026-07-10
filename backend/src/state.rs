@@ -7,6 +7,11 @@ use oauth2::{AuthUrl, ClientId, ClientSecret, EndpointNotSet, EndpointSet, Redir
 use sqlx::PgPool;
 
 use crate::config::Config;
+use crate::services::github_app::GitHubApp;
+use crate::services::log_hub::LogHub;
+use crate::services::r2::R2;
+use crate::services::runner_hub::RunnerHub;
+use crate::services::scheduler::Scheduler;
 
 /// GitHub OAuth client with the authorization and token endpoints configured.
 pub type OAuthClient =
@@ -21,6 +26,15 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub oauth: Arc<OAuthClient>,
     pub http: reqwest::Client,
+    pub github_app: Arc<GitHubApp>,
+    /// Live browser fan-out + log ingest (masking, caps).
+    pub log_hub: Arc<LogHub>,
+    /// Outbound channels to connected runners.
+    pub runner_hub: Arc<RunnerHub>,
+    /// Wake handle for the scheduling loop.
+    pub scheduler: Arc<Scheduler>,
+    /// Artifact storage; None disables artifact grants cleanly.
+    pub r2: Option<Arc<R2>>,
 }
 
 impl AppState {
@@ -40,11 +54,32 @@ impl AppState {
             .build()
             .context("failed to build HTTP client")?;
 
+        // Validates the App private key at startup so a bad PEM cannot
+        // surface later as a mid-request failure.
+        let github_app = GitHubApp::new(
+            config.github_app_client_id.clone(),
+            &config.github_app_private_key_pem,
+        )?;
+
+        let r2 = config.r2.as_ref().map(|r2| {
+            Arc::new(R2::new(
+                &r2.account_id,
+                &r2.access_key_id,
+                &r2.secret_access_key,
+                &r2.bucket,
+            ))
+        });
+
         Ok(Self {
             pool,
             config: Arc::new(config),
             oauth: Arc::new(oauth),
             http,
+            github_app: Arc::new(github_app),
+            log_hub: Arc::new(LogHub::default()),
+            runner_hub: Arc::new(RunnerHub::default()),
+            scheduler: Arc::new(Scheduler::default()),
+            r2,
         })
     }
 }
