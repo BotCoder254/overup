@@ -47,6 +47,11 @@ pub enum RunnerMsg {
     },
     Heartbeat {
         busy_job_id: Option<Uuid>,
+        /// Ambient host telemetry. Older runners omit it and newer servers
+        /// default it to `None`, so this addition never bumps
+        /// [`PROTOCOL_VERSION`].
+        #[serde(default)]
+        health: Option<RunnerHealth>,
     },
     /// Acknowledges a job_assign; the scheduler reverts unacked assignments.
     JobAck {
@@ -86,6 +91,31 @@ pub enum RunnerMsg {
         error_category: Option<String>,
         metrics: JobMetrics,
     },
+}
+
+/// Ambient host telemetry reported with `heartbeat`. Every field is
+/// optional so this can grow without ever bumping [`PROTOCOL_VERSION`] —
+/// same forward-compat convention as [`JobMetrics`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RunnerHealth {
+    /// Current CPU load in permille of one core (2500 = 2.5 cores).
+    #[serde(default)]
+    pub cpu_permille: Option<u64>,
+    #[serde(default)]
+    pub mem_used_bytes: Option<u64>,
+    #[serde(default)]
+    pub mem_total_bytes: Option<u64>,
+    #[serde(default)]
+    pub disk_used_bytes: Option<u64>,
+    #[serde(default)]
+    pub disk_total_bytes: Option<u64>,
+    #[serde(default)]
+    pub docker_version: Option<String>,
+    #[serde(default)]
+    pub os: Option<String>,
+    #[serde(default)]
+    pub uptime_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,6 +197,13 @@ pub enum ServerMsg {
         runner_id: Uuid,
         heartbeat_interval_secs: u64,
         protocol_version: u32,
+        /// Present exactly once: when this connection authenticated with a
+        /// short-lived bootstrap token, this is the permanent credential the
+        /// runner must persist and use for every future reconnect. Older
+        /// runners that don't look for this field simply ignore it, so this
+        /// addition never bumps [`PROTOCOL_VERSION`].
+        #[serde(default)]
+        permanent_token: Option<String>,
     },
     Ping,
     /// Signed job descriptor: `payload_json` parses to [`JobPayload`] only
@@ -194,6 +231,13 @@ pub enum ServerMsg {
     Error {
         code: String,
     },
+    /// An operator changed this runner's scheduling eligibility. Since job
+    /// assignment is always server-initiated (the runner never polls for
+    /// work), this is purely informational on the runner side — display
+    /// and logging only, never an accept/reject gate.
+    LifecycleChanged {
+        status: RunnerLifecycle,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,6 +246,16 @@ pub enum CancelReason {
     User,
     Timeout,
     PipelineCancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerLifecycle {
+    /// Stops taking new work immediately; reversible via `Resumed`.
+    Disabled,
+    /// Finishing the current job, then will not take new work.
+    Draining,
+    Resumed,
 }
 
 /// The signed job descriptor. Everything a runner needs to execute one job;
@@ -414,6 +468,19 @@ mod tests {
         assert_eq!(metrics.cpu_peak_permille, None);
         assert_eq!(metrics.mem_peak_bytes, None);
         assert_eq!(metrics.sample_count, None);
+    }
+
+    #[test]
+    fn old_shape_heartbeat_still_parses() {
+        // A heartbeat emitted by a pre-health-expansion runner: no `health`
+        // field at all. It must default to None, not fail to parse.
+        let json = r#"{"type":"heartbeat","busy_job_id":null}"#;
+        let parsed: RunnerMsg = serde_json::from_str(json).unwrap();
+        let RunnerMsg::Heartbeat { busy_job_id, health } = parsed else {
+            panic!("expected Heartbeat");
+        };
+        assert_eq!(busy_job_id, None);
+        assert_eq!(health, None);
     }
 
     #[test]

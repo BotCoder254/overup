@@ -111,17 +111,6 @@ export interface Artifact {
   expiresAt: string | null;
 }
 
-export interface Runner {
-  id: string;
-  name: string;
-  labels: string[];
-  status: 'offline' | 'idle' | 'busy';
-  version: string | null;
-  lastSeenAt: string | null;
-  createdAt: string;
-  revoked: boolean;
-}
-
 export interface PipelineListResponse {
   pipelines: Pipeline[];
   nextCursor: string | null;

@@ -12,8 +12,8 @@ use tower_http::trace::TraceLayer;
 
 use crate::error::AppError;
 use crate::handlers::{
-    auth, browser_ws, github_installations, github_webhooks, health, me, pipelines, repositories,
-    runner_ws, runners, workflows, workspaces,
+    auth, browser_ws, dashboard, dashboard_ws, github_installations, github_webhooks, health, me,
+    pipelines, repositories, runner_ws, runners, workflows, workspaces,
 };
 use crate::middleware::{csrf, security_headers};
 use crate::state::AppState;
@@ -161,9 +161,25 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
             "/workspaces/{workspace_id}/runners",
             get(runners::list).post(runners::create),
         )
+        .route("/workspaces/{workspace_id}/runners/bootstrap", post(runners::bootstrap))
         .route(
             "/workspaces/{workspace_id}/runners/{runner_id}",
-            delete(runners::revoke),
+            get(runners::detail).patch(runners::update).delete(runners::revoke),
+        )
+        .route(
+            "/workspaces/{workspace_id}/runners/{runner_id}/regenerate-token",
+            post(runners::regenerate_token),
+        )
+        .route("/workspaces/{workspace_id}/runners/{runner_id}/drain", post(runners::drain))
+        .route("/workspaces/{workspace_id}/runners/{runner_id}/disable", post(runners::disable))
+        .route("/workspaces/{workspace_id}/runners/{runner_id}/resume", post(runners::resume))
+        .route(
+            "/workspaces/{workspace_id}/dashboard/summary",
+            get(dashboard::summary),
+        )
+        .route(
+            "/workspaces/{workspace_id}/dashboard/activity",
+            get(dashboard::activity),
         )
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES));
 
@@ -220,6 +236,10 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
         .route(
             "/workspaces/{workspace_id}/pipelines/{pipeline_id}",
             get(browser_ws::connect),
+        )
+        .route(
+            "/workspaces/{workspace_id}/dashboard",
+            get(dashboard_ws::connect),
         )
         .layer(GovernorLayer::new(browser_ws_governor));
 

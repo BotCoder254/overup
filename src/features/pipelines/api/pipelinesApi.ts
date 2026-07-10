@@ -20,6 +20,8 @@ export interface PipelineFilters {
   createdAfter?: string;
   createdBefore?: string;
   cursor?: string;
+  /** Clamped 1-100 server-side; omitted uses the server's default page size. */
+  limit?: number;
 }
 
 export async function getPipelines(
@@ -37,6 +39,7 @@ export async function getPipelines(
   if (filters.createdAfter) searchParams.set('createdAfter', filters.createdAfter);
   if (filters.createdBefore) searchParams.set('createdBefore', filters.createdBefore);
   if (filters.cursor) searchParams.set('cursor', filters.cursor);
+  if (filters.limit) searchParams.set('limit', String(filters.limit));
   return api
     .get(`/api/workspaces/${workspaceId}/pipelines`, { searchParams })
     .json<PipelineListResponse>();

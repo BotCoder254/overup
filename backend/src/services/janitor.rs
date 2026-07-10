@@ -109,4 +109,13 @@ async fn pass(state: &AppState) {
             Err(error) => tracing::warn!(error = ?error, "failed to scan prunable archived jobs"),
         }
     }
+
+    // 5. Runner rows stuck mid-registration: the wizard's bootstrap token
+    //    expired before the runner ever connected, so no permanent identity
+    //    was established — nothing worth keeping.
+    match db::runners::purge_expired_bootstrap(&state.pool).await {
+        Ok(0) => {}
+        Ok(purged) => tracing::info!(purged, "purged abandoned runner bootstrap registrations"),
+        Err(error) => tracing::warn!(error = ?error, "failed to purge expired runner bootstrap tokens"),
+    }
 }

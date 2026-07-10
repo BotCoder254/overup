@@ -15,6 +15,7 @@ use crate::models::pipeline::{Pipeline, PipelineJob};
 use crate::models::repository::Repository;
 use crate::services::log_hub::BrowserEvent;
 use crate::services::pipeline_plan::{self, PlanError};
+use crate::services::workspace_hub::WorkspaceEvent;
 use crate::state::AppState;
 
 /// Trigger context shared by webhook pushes and manual dispatches.
@@ -69,6 +70,20 @@ pub async fn create_pipeline(
     };
     let (pipeline, _jobs) = db::pipelines::create(&state.pool, &new, &plans).await?;
 
+    // publish_pipeline only fires on later transitions (started/finished);
+    // the Dashboard's KPI strip and timeline need to see brand-new pipelines
+    // immediately too.
+    state.workspace_hub.publish(
+        pipeline.workspace_id,
+        WorkspaceEvent::PipelineUpdate {
+            id: pipeline.id,
+            status: pipeline.status.clone(),
+            conclusion: pipeline.conclusion.clone(),
+            started_at: pipeline.started_at,
+            finished_at: pipeline.finished_at,
+        },
+    );
+
     state.scheduler.poke();
     Ok(pipeline)
 }
@@ -86,6 +101,19 @@ fn publish_pipeline(state: &AppState, pipeline: &Pipeline) {
     state.log_hub.publish(
         pipeline.id,
         BrowserEvent::PipelineUpdate {
+            id: pipeline.id,
+            status: pipeline.status.clone(),
+            conclusion: pipeline.conclusion.clone(),
+            started_at: pipeline.started_at,
+            finished_at: pipeline.finished_at,
+        },
+    );
+    // The Dashboard/Runners workspace-wide feed only needs the materially
+    // meaningful transitions this helper already gates on (started,
+    // finished/failed/cancelled/timed-out) — not every per-job update.
+    state.workspace_hub.publish(
+        pipeline.workspace_id,
+        WorkspaceEvent::PipelineUpdate {
             id: pipeline.id,
             status: pipeline.status.clone(),
             conclusion: pipeline.conclusion.clone(),

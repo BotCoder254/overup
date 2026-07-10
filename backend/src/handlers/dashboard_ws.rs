@@ -1,0 +1,156 @@
+//! Workspace-wide browser WebSocket endpoint (`/ws/workspaces/{ws}/dashboard`).
+//!
+//! Feeds the Dashboard and Runner Management pages live deltas. Like
+//! `browser_ws.rs`, this lives outside the CSRF layer and defends itself
+//! before upgrading:
+//!   1. strict Origin allow-list (CORS does not protect WebSockets),
+//!   2. session-cookie authentication (the CurrentUser code path),
+//!   3. workspace RBAC (`content.read`).
+//!
+//! There is deliberately no step 4 "resource must exist" check the way the
+//! pipeline WS has one: this channel is workspace-wide, so membership
+//! (step 3) is the entire authorization boundary — there's no single
+//! resource below the workspace to scope to.
+
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{Path, State};
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use futures_util::{SinkExt, StreamExt};
+use serde::Deserialize;
+use tokio::sync::broadcast;
+use uuid::Uuid;
+
+use crate::db;
+use crate::models::user::User;
+use crate::services::{authz, session};
+use crate::state::AppState;
+
+/// Browsers only send tiny control frames.
+const MAX_BROWSER_FRAME: usize = 4 * 1024;
+
+/// Server-side keepalive: detects half-open sockets without waiting for a
+/// client message (browsers answer protocol pings automatically).
+const SERVER_PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ClientMsg {
+    /// Application-level keepalive; the client uses the pong to detect
+    /// half-open sockets (browser APIs expose no native ping).
+    Ping {},
+}
+
+/// GET /ws/workspaces/{workspace_id}/dashboard
+pub async fn connect(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<Uuid>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    // 1. Origin allow-list. A cross-site page can open a WebSocket with the
+    // victim's cookies; the Origin header is the reliable defense.
+    let origin_ok = headers
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|origin| origin == state.config.frontend_url);
+    if !origin_ok {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+
+    // 2. Session cookie -> live user (the CurrentUser code path).
+    let Some(user) = authenticate(&state, &headers).await else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+
+    // 3. Workspace RBAC; flat 403, existence never leaks.
+    if authz::require_permission(&state.pool, user.id, workspace_id, authz::CONTENT_READ)
+        .await
+        .is_err()
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+
+    ws.max_message_size(MAX_BROWSER_FRAME)
+        .on_upgrade(move |socket| handle(state, workspace_id, socket))
+}
+
+async fn authenticate(state: &AppState, headers: &HeaderMap) -> Option<User> {
+    let jar = axum_extra::extract::cookie::CookieJar::from_headers(headers);
+    let token = jar.get(&state.config.cookie_name)?.value().to_string();
+    db::sessions::find_valid_user(&state.pool, &session::hash_token(&token))
+        .await
+        .ok()
+        .flatten()
+}
+
+async fn handle(state: AppState, workspace_id: Uuid, socket: WebSocket) {
+    // Subscribe BEFORE sending the snapshot so no transition can fall into
+    // the gap between them.
+    let mut events = state.workspace_hub.subscribe(workspace_id);
+
+    let (mut sink, mut stream) = socket.split();
+
+    // The snapshot is deliberately a bare sentinel, not a duplicate of the
+    // REST summary/runners/pipelines payloads: the Dashboard and Runners
+    // pages already fetch their initial state over REST on mount, so this
+    // socket only needs to patch deltas from here on.
+    if sink
+        .send(Message::Text(r#"{"type":"snapshot"}"#.to_string().into()))
+        .await
+        .is_err()
+    {
+        return;
+    }
+
+    let mut ping_interval = tokio::time::interval(SERVER_PING_INTERVAL);
+    ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ping_interval.tick().await; // the first tick fires immediately; skip it
+
+    loop {
+        tokio::select! {
+            _ = ping_interval.tick() => {
+                if sink.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    break;
+                }
+            }
+            event = events.recv() => {
+                let payload = match event {
+                    Ok(event) => serde_json::to_string(&event).ok(),
+                    // Idempotent-by-id deltas: a lagged subscriber is
+                    // corrected by the next event or a normal REST refetch,
+                    // so there is no gap-resync frame to send here.
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                };
+                let Some(payload) = payload else { continue };
+                if sink.send(Message::Text(payload.into())).await.is_err() {
+                    break;
+                }
+            }
+            inbound = stream.next() => {
+                match inbound {
+                    Some(Ok(Message::Text(text))) => {
+                        let Ok(msg) = serde_json::from_str::<ClientMsg>(&text) else {
+                            break; // unparseable input closes the socket
+                        };
+                        match msg {
+                            ClientMsg::Ping {} => {
+                                if sink
+                                    .send(Message::Text(r#"{"type":"pong"}"#.to_string().into()))
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(_)) => {}
+                    Some(Err(_)) => break,
+                }
+            }
+        }
+    }
+}

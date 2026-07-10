@@ -17,7 +17,9 @@ use uuid::Uuid;
 
 use crate::db;
 use crate::models::pipeline::PipelineJob;
+use crate::models::runner::RunnerResponse;
 use crate::services::pipeline_run;
+use crate::services::workspace_hub::WorkspaceEvent;
 use crate::state::AppState;
 
 /// Runner must ack an assignment within this window.
@@ -86,9 +88,18 @@ async fn sweep_stale_runners(state: &AppState) -> anyhow::Result<()> {
     let stale = db::runners::find_stale(&state.pool, RUNNER_STALE_SECS).await?;
     for runner in stale {
         tracing::warn!(runner_id = %runner.id, "runner stopped heartbeating; orphaning its jobs");
-        state.runner_hub.unregister(runner.id);
-        db::runners::mark_offline(&state.pool, runner.id).await?;
-        pipeline_run::orphan_runner_jobs(state, runner.id).await?;
+        let (runner_id, workspace_id) = (runner.id, runner.workspace_id);
+        state.runner_hub.unregister(runner_id);
+        db::runners::mark_offline(&state.pool, runner_id).await?;
+        pipeline_run::orphan_runner_jobs(state, runner_id).await?;
+        // Sweep-interval scale, not chatty — the one server-initiated
+        // offline transition not already covered by a handler call site.
+        if let Some(updated) = db::runners::find_by_id(&state.pool, workspace_id, runner_id).await? {
+            state.workspace_hub.publish(
+                workspace_id,
+                WorkspaceEvent::RunnerUpdate { runner: RunnerResponse::from(updated) },
+            );
+        }
     }
     Ok(())
 }

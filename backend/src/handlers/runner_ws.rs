@@ -18,10 +18,24 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use crate::db;
-use crate::models::runner::Runner;
+use crate::models::runner::{Runner, RunnerResponse};
 use crate::services::log_hub::BrowserEvent;
+use crate::services::workspace_hub::WorkspaceEvent;
 use crate::services::{pipeline_run, session};
 use crate::state::AppState;
+
+/// Refetch a runner and publish its current state to the workspace-wide live
+/// feed. Used at connect/disconnect (low-frequency, once-per-connection
+/// events) — the heartbeat health path publishes the already-sanitized
+/// health directly instead, to avoid a query on every 30s tick.
+async fn publish_runner(state: &AppState, workspace_id: Uuid, runner_id: Uuid) {
+    if let Ok(Some(runner)) = db::runners::find_by_id(&state.pool, workspace_id, runner_id).await {
+        state.workspace_hub.publish(
+            workspace_id,
+            WorkspaceEvent::RunnerUpdate { runner: RunnerResponse::from(runner) },
+        );
+    }
+}
 
 /// Largest frame accepted from a runner (log chunks dominate).
 const MAX_RUNNER_FRAME: usize = 128 * 1024;
@@ -83,35 +97,89 @@ fn sanitize_metrics(metrics: &protocol::JobMetrics) -> Option<serde_json::Value>
     }
 }
 
+/// Ceilings for runner-reported host health. Same "clamp or drop, never
+/// trust free text" posture as [`sanitize_metrics`].
+const MAX_HEALTH_PERMILLE: u64 = 1_024_000; // 1024 cores
+const MAX_HEALTH_BYTES: u64 = 1 << 40; // 1 TiB
+const MAX_HEALTH_UPTIME_SECS: u64 = 10 * 365 * 24 * 3600; // 10 years
+const MAX_HEALTH_STRING_LEN: usize = 64;
+
+/// Length-cap and strip control characters from a runner-supplied string
+/// field before it can ever reach storage or the browser.
+fn sanitize_health_string(value: &str) -> Option<String> {
+    let cleaned: String = value.chars().filter(|c| !c.is_control()).collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.chars().take(MAX_HEALTH_STRING_LEN).collect())
+}
+
+fn sanitize_health(health: &protocol::RunnerHealth) -> Option<serde_json::Value> {
+    let mut map = serde_json::Map::new();
+    let mut put_num = |key: &str, value: Option<u64>, cap: u64| {
+        if let Some(v) = value
+            && v <= cap
+        {
+            map.insert(key.to_string(), serde_json::json!(v));
+        }
+    };
+    put_num("cpuPermille", health.cpu_permille, MAX_HEALTH_PERMILLE);
+    put_num("memUsedBytes", health.mem_used_bytes, MAX_HEALTH_BYTES);
+    put_num("memTotalBytes", health.mem_total_bytes, MAX_HEALTH_BYTES);
+    put_num("diskUsedBytes", health.disk_used_bytes, MAX_HEALTH_BYTES);
+    put_num("diskTotalBytes", health.disk_total_bytes, MAX_HEALTH_BYTES);
+    put_num("uptimeSecs", health.uptime_secs, MAX_HEALTH_UPTIME_SECS);
+    if let Some(v) = health.docker_version.as_deref().and_then(sanitize_health_string) {
+        map.insert("dockerVersion".to_string(), serde_json::json!(v));
+    }
+    if let Some(v) = health.os.as_deref().and_then(sanitize_health_string) {
+        map.insert("os".to_string(), serde_json::json!(v));
+    }
+    if map.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(map))
+    }
+}
+
 /// GET /runner/ws
 pub async fn connect(
     State(state): State<AppState>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let Some(runner) = authenticate(&state, &headers).await else {
+    let Some((runner, is_bootstrap)) = authenticate(&state, &headers).await else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
 
     ws.max_message_size(MAX_RUNNER_FRAME)
-        .on_upgrade(move |socket| handle(state, runner, socket))
+        .on_upgrade(move |socket| handle(state, runner, is_bootstrap, socket))
 }
 
-/// Bearer token -> SHA-256 -> non-revoked runner row.
-async fn authenticate(state: &AppState, headers: &HeaderMap) -> Option<Runner> {
+/// Bearer token -> SHA-256 -> non-revoked runner row. Tries the permanent
+/// credential first, then falls back to a still-valid bootstrap credential
+/// (the guided-wizard registration flow) — the returned bool marks which.
+async fn authenticate(state: &AppState, headers: &HeaderMap) -> Option<(Runner, bool)> {
     let value = headers.get("authorization")?.to_str().ok()?;
     let token = value.strip_prefix("Bearer ")?;
     if token.is_empty() || token.len() > 128 {
         return None;
     }
-    db::runners::find_by_token_hash(&state.pool, &session::hash_token(token))
+    let hash = session::hash_token(token);
+    if let Some(runner) = db::runners::find_by_token_hash(&state.pool, &hash).await.ok().flatten() {
+        return Some((runner, false));
+    }
+    let runner = db::runners::find_by_bootstrap_token_hash(&state.pool, &hash)
         .await
         .ok()
-        .flatten()
+        .flatten()?;
+    Some((runner, true))
 }
 
-async fn handle(state: AppState, runner: Runner, socket: WebSocket) {
+async fn handle(state: AppState, runner: Runner, is_bootstrap: bool, socket: WebSocket) {
     let runner_id = runner.id;
+    let workspace_id = runner.workspace_id;
     let (mut sink, mut stream) = socket.split();
 
     // First frame must be hello.
@@ -142,6 +210,31 @@ async fn handle(state: AppState, runner: Runner, socket: WebSocket) {
         let _ = sink.close().await;
         return;
     }
+    publish_runner(&state, workspace_id, runner_id).await;
+
+    // A bootstrap-authenticated connection must leave with a permanent
+    // credential — the bootstrap token is one-time and already close to
+    // being cleared server-side.
+    let permanent_token = if is_bootstrap {
+        let (token, token_hash) = session::generate_token();
+        match db::runners::exchange_bootstrap_token(&state.pool, runner_id, &token_hash).await {
+            Ok(true) => Some(token),
+            Ok(false) => {
+                // Lost a race with another connection using the same
+                // bootstrap token, or it was already exchanged/expired.
+                tracing::warn!(%runner_id, "bootstrap token exchange failed; closing");
+                let _ = sink.close().await;
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(%runner_id, error = ?error, "bootstrap token exchange error");
+                let _ = sink.close().await;
+                return;
+            }
+        }
+    } else {
+        None
+    };
 
     let (mut outbound, conn) = state.runner_hub.register(runner_id);
 
@@ -149,6 +242,7 @@ async fn handle(state: AppState, runner: Runner, socket: WebSocket) {
         runner_id,
         heartbeat_interval_secs: HEARTBEAT_INTERVAL_SECS,
         protocol_version: protocol::PROTOCOL_VERSION,
+        permanent_token,
     };
     if send_msg(&mut sink, &ack).await.is_err() {
         state.runner_hub.unregister_conn(runner_id, &conn);
@@ -190,7 +284,7 @@ async fn handle(state: AppState, runner: Runner, socket: WebSocket) {
                             break;
                         };
                         if let Err(error) =
-                            on_runner_msg(&state, runner_id, msg, &mut active_jobs).await
+                            on_runner_msg(&state, workspace_id, runner_id, msg, &mut active_jobs).await
                         {
                             tracing::warn!(%runner_id, error = ?error, "runner message handling failed");
                         }
@@ -216,6 +310,7 @@ async fn handle(state: AppState, runner: Runner, socket: WebSocket) {
             tracing::warn!(%runner_id, error = ?error, "orphan recovery failed");
         }
         state.scheduler.poke();
+        publish_runner(&state, workspace_id, runner_id).await;
     }
 }
 
@@ -231,11 +326,33 @@ async fn send_msg(
 
 async fn on_runner_msg(
     state: &AppState,
+    workspace_id: Uuid,
     runner_id: Uuid,
     msg: RunnerMsg,
     active_jobs: &mut HashMap<Uuid, Uuid>,
 ) -> anyhow::Result<()> {
-    db::runners::touch_last_seen(&state.pool, runner_id).await?;
+    match &msg {
+        RunnerMsg::Heartbeat { health: Some(health), .. } => {
+            match sanitize_health(health) {
+                Some(sanitized) => {
+                    db::runners::touch_last_seen_with_health(&state.pool, runner_id, &sanitized)
+                        .await?;
+                    // No refetch here — the sanitized health JSON is already
+                    // in hand, and this fires on a hot 30s-per-runner cadence.
+                    state.workspace_hub.publish(
+                        workspace_id,
+                        WorkspaceEvent::RunnerHealth {
+                            runner_id,
+                            health: sanitized,
+                            last_seen_at: chrono::Utc::now(),
+                        },
+                    );
+                }
+                None => db::runners::touch_last_seen(&state.pool, runner_id).await?,
+            }
+        }
+        _ => db::runners::touch_last_seen(&state.pool, runner_id).await?,
+    }
 
     match msg {
         RunnerMsg::Hello { .. } | RunnerMsg::Heartbeat { .. } => {}

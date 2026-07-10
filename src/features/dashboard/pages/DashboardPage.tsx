@@ -1,17 +1,165 @@
-import { Squirrel } from 'lucide-react';
+import { AlertTriangle, GitBranch, Squirrel } from 'lucide-react';
+import { useState } from 'react';
+import { useParams } from 'react-router-dom';
 import { PageHeader } from '../../../components/layout/PageHeader';
+import { Button } from '../../../components/ui/Button';
+import { Card, CardBody, CardHeader } from '../../../components/ui/Card';
 import { EmptyState } from '../../../components/ui/EmptyState';
+import type { DashboardRange } from '../../../types/dashboard';
+import { PipelinesTable } from '../../pipelines/components/PipelinesTable';
+import { useRunners } from '../../runners/hooks/useRunners';
+import { ActivityChart } from '../components/ActivityChart';
+import { KpiStrip } from '../components/KpiStrip';
+import { RunnerHealthPanel } from '../components/RunnerHealthPanel';
+import { SuccessRateChart } from '../components/SuccessRateChart';
+import { useDashboardActivity, useDashboardRecentPipelines, useDashboardSummary } from '../hooks/useDashboard';
+import { useWorkspaceStream } from '../hooks/useWorkspaceStream';
+
+const RANGES: { value: DashboardRange; label: string }[] = [
+  { value: '24h', label: '24h' },
+  { value: '7d', label: '7d' },
+  { value: '30d', label: '30d' },
+];
 
 export function DashboardPage() {
+  const { slug = '' } = useParams<{ slug: string }>();
+  const [range, setRange] = useState<DashboardRange>('24h');
+  const { connected } = useWorkspaceStream();
+
+  const summary = useDashboardSummary(range, connected);
+  const activity = useDashboardActivity(range, connected);
+  const recentPipelines = useDashboardRecentPipelines(connected);
+  const runners = useRunners(connected);
+
+  // A query with `retry: false` (see lib/queryClient.ts) settles into
+  // isError on the very first failed fetch — but only treat it as a hard
+  // failure when there's genuinely nothing to show. A background refetch
+  // failure that leaves stale-but-valid data in place should keep rendering
+  // the dashboard, not flip the whole page to an error screen.
+  const summaryFailed = summary.isError && !summary.data;
+  const runnersFailed = runners.isError && !runners.data;
+  const activityFailed = activity.isError && !activity.data;
+  const recentPipelinesFailed = recentPipelines.isError && !recentPipelines.data;
+  const criticalError = summaryFailed || runnersFailed;
+
+  const isEmptyWorkspace =
+    !summary.isLoading &&
+    !runners.isLoading &&
+    (summary.data?.pipelinesTotal ?? 0) === 0 &&
+    (runners.data?.length ?? 0) === 0;
+
   return (
     <>
-      <PageHeader title="Dashboard" />
-      <EmptyState
-        icon={Squirrel}
-        title="Pipelines are coming soon"
-        description="Your workspace is ready. Connect a repository to start building — pipeline runs, runners, and artifacts will appear here."
-        className="min-h-[50vh] border-0 bg-transparent"
+      <PageHeader
+        title="Dashboard"
+        description="Your workspace at a glance — recent runs, pipeline health, and runner status."
+        actions={
+          <div className="flex items-center gap-1 rounded border border-steel/20 bg-canvas p-0.5">
+            {RANGES.map((option) => (
+              <Button
+                key={option.value}
+                size="sm"
+                variant={range === option.value ? 'primary' : 'ghost'}
+                className="h-7 px-2.5 text-xs"
+                onClick={() => setRange(option.value)}
+              >
+                {option.label}
+              </Button>
+            ))}
+          </div>
+        }
       />
+
+      {criticalError ? (
+        <EmptyState
+          icon={AlertTriangle}
+          title="Couldn't load your dashboard"
+          description="Something went wrong fetching your workspace's pipelines and runners. Check your connection and try again."
+          className="min-h-[50vh] border-0 bg-transparent"
+          action={
+            <Button
+              size="sm"
+              onClick={() => {
+                void summary.refetch();
+                void runners.refetch();
+              }}
+            >
+              Try again
+            </Button>
+          }
+        />
+      ) : isEmptyWorkspace ? (
+        <EmptyState
+          icon={Squirrel}
+          title="Your workspace is ready"
+          description="Connect a repository and register a runner to start building — pipeline runs, runners, and artifacts will appear here."
+          className="min-h-[50vh] border-0 bg-transparent"
+        />
+      ) : (
+        <>
+          <KpiStrip summary={summary.data} loading={summary.isLoading} error={summaryFailed} />
+
+          <div className="mb-6 grid gap-6 lg:grid-cols-2">
+            <section>
+              <h2 className="mb-3 text-sm font-semibold text-charcoal">Recent pipelines</h2>
+              {recentPipelines.isLoading ? (
+                <div className="h-40 animate-pulse rounded border border-steel/20 bg-canvas" />
+              ) : recentPipelinesFailed ? (
+                <EmptyState
+                  icon={AlertTriangle}
+                  title="Couldn't load pipelines"
+                  description="Something went wrong fetching recent pipeline runs."
+                  className="min-h-0 border-0 bg-transparent py-10"
+                  action={
+                    <Button size="sm" variant="secondary" onClick={() => void recentPipelines.refetch()}>
+                      Try again
+                    </Button>
+                  }
+                />
+              ) : (recentPipelines.data?.pipelines.length ?? 0) === 0 ? (
+                <EmptyState
+                  icon={GitBranch}
+                  title="No pipeline runs yet"
+                  description="Dispatch a workflow to see its execution here."
+                  className="min-h-0 border-0 bg-transparent py-10"
+                />
+              ) : (
+                <PipelinesTable slug={slug} pipelines={recentPipelines.data!.pipelines} />
+              )}
+            </section>
+
+            <section>
+              <h2 className="mb-3 text-sm font-semibold text-charcoal">Runner health</h2>
+              <RunnerHealthPanel slug={slug} runners={runners.data ?? []} loading={runners.isLoading} />
+            </section>
+          </div>
+
+          <div className="grid gap-6 lg:grid-cols-2">
+            <Card>
+              <CardHeader>
+                <h2 className="text-sm font-semibold text-charcoal">Pipeline activity</h2>
+              </CardHeader>
+              <CardBody>
+                <ActivityChart
+                  buckets={activity.data ?? []}
+                  range={range}
+                  loading={activity.isLoading}
+                  error={activityFailed}
+                />
+              </CardBody>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <h2 className="text-sm font-semibold text-charcoal">Success rate</h2>
+              </CardHeader>
+              <CardBody>
+                <SuccessRateChart summary={summary.data} loading={summary.isLoading} error={summaryFailed} />
+              </CardBody>
+            </Card>
+          </div>
+        </>
+      )}
     </>
   );
 }
