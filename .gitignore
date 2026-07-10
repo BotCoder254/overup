@@ -8,6 +8,12 @@
 # testing
 /coverage
 
+# Rust build output (backend/, protocol/, runner/)
+target/
+
+# secrets — never commit private keys
+*.pem
+
 # production
 /build
 

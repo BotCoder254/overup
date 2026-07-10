@@ -1,4 +1,16 @@
 pub mod auth_flow;
+pub mod authz;
 pub mod github;
+pub mod github_app;
+pub mod janitor;
+pub mod log_archive;
+pub mod log_hub;
+pub mod pipeline_plan;
+pub mod pipeline_run;
+pub mod r2;
+pub mod repo_sync;
+pub mod runner_hub;
+pub mod scheduler;
 pub mod session;
+pub mod workflow_parse;
 pub mod workspace;

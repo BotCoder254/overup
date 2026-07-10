@@ -1,4 +1,12 @@
 pub mod auth;
+pub mod browser_ws;
+pub mod github_installations;
+pub mod github_webhooks;
 pub mod health;
 pub mod me;
+pub mod pipelines;
+pub mod repositories;
+pub mod runner_ws;
+pub mod runners;
+pub mod workflows;
 pub mod workspaces;

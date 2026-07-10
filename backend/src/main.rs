@@ -42,21 +42,38 @@ async fn main() -> anyhow::Result<()> {
         .context("failed to run database migrations")?;
 
     let state = AppState::new(pool.clone(), config.clone())?;
-    let router = routes::build_router(state)?;
 
-    // Periodic janitor: expired sessions and abandoned login transactions.
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(3600));
-        loop {
-            interval.tick().await;
-            if let Err(error) = db::sessions::delete_expired(&pool).await {
-                tracing::warn!(error = ?error, "failed to purge expired sessions");
-            }
-            if let Err(error) = db::oauth_states::delete_expired(&pool).await {
-                tracing::warn!(error = ?error, "failed to purge expired oauth states");
+    // Boot-time execution recovery: no runner can be connected yet, so
+    // anything marked online or in progress is a leftover from the previous
+    // process. Requeue first attempts, fail repeat offenders.
+    db::runners::mark_all_offline(&pool)
+        .await
+        .context("failed to reset runner statuses")?;
+    let (requeued, failed) = db::pipeline_jobs::requeue_all_orphans(&pool)
+        .await
+        .context("failed to recover orphaned jobs")?;
+    if !requeued.is_empty() || !failed.is_empty() {
+        tracing::info!(
+            requeued = requeued.len(),
+            failed = failed.len(),
+            "recovered orphaned pipeline jobs from previous run"
+        );
+        for job in &failed {
+            if let Err(error) = services::pipeline_run::maybe_finalize(&state, job.pipeline_id).await
+            {
+                tracing::warn!(error = ?error, "failed to finalize recovered pipeline");
             }
         }
-    });
+    }
+
+    // The scheduler loop: assignment, ack/timeout/stale sweeps.
+    tokio::spawn(services::scheduler::run(state.clone()));
+
+    // Hourly janitor: expired sessions/oauth states, artifact retention +
+    // R2 cleanup, archived log-chunk pruning.
+    tokio::spawn(services::janitor::run(state.clone()));
+
+    let router = routes::build_router(state)?;
 
     let listener = tokio::net::TcpListener::bind(&config.bind_addr)
         .await

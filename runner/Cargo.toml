@@ -1,0 +1,34 @@
+[package]
+name = "runner"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+# `ssl` (rustls + ring) enables remote TLS daemons: DOCKER_HOST=tcp://…:2376
+# with DOCKER_TLS_VERIFY=1 and DOCKER_CERT_PATH pointing at ca/cert/key.pem.
+bollard = { version = "0.21", features = ["ssl"] }
+chrono = { version = "0.4", features = ["serde"] }
+dotenvy = "0.15"
+flate2 = "1"
+futures-util = "0.3"
+hex = "0.4"
+protocol = { path = "../protocol" }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+serde_json = "1"
+sha2 = "0.10"
+tar = "0.4"
+tempfile = "3"
+tokio = { version = "1", features = [
+    "macros",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "time",
+    "fs",
+    "io-util",
+] }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }

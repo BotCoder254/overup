@@ -41,6 +41,14 @@ pub async fn security_headers(
         header::HeaderName::from_static("cross-origin-resource-policy"),
         HeaderValue::from_static("same-origin"),
     );
+    headers.insert(
+        header::HeaderName::from_static("x-permitted-cross-domain-policies"),
+        HeaderValue::from_static("none"),
+    );
+    headers.insert(
+        header::HeaderName::from_static("x-dns-prefetch-control"),
+        HeaderValue::from_static("off"),
+    );
 
     // HSTS only makes sense once the deployment actually serves HTTPS,
     // which is exactly what COOKIE_SECURE signals.

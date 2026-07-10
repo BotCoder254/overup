@@ -1,4 +1,14 @@
+pub mod artifacts;
+pub mod github_installations;
 pub mod oauth_states;
+pub mod pipeline_events;
+pub mod pipeline_jobs;
+pub mod pipeline_logs;
+pub mod pipelines;
+pub mod repositories;
+pub mod runners;
 pub mod sessions;
 pub mod users;
+pub mod webhook_deliveries;
+pub mod workflows;
 pub mod workspaces;

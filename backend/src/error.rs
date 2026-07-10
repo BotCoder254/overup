@@ -12,6 +12,8 @@ pub enum AppError {
     Unauthorized,
     #[error("forbidden")]
     Forbidden,
+    #[error("not found")]
+    NotFound,
     #[error("validation failed: {0}")]
     Validation(String),
     #[error("conflict: {0}")]
@@ -29,6 +31,7 @@ impl AppError {
         match self {
             AppError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
             AppError::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
+            AppError::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             AppError::Validation(_) => (StatusCode::UNPROCESSABLE_ENTITY, "validation_failed"),
             AppError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
             AppError::OAuth(_) => (StatusCode::BAD_GATEWAY, "oauth_failed"),

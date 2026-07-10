@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::http::{HeaderName, HeaderValue, Method, header};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Router, middleware as axum_middleware};
 use tower_governor::GovernorLayer;
 use tower_governor::governor::GovernorConfigBuilder;
@@ -11,11 +11,18 @@ use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetReques
 use tower_http::trace::TraceLayer;
 
 use crate::error::AppError;
-use crate::handlers::{auth, health, me, workspaces};
+use crate::handlers::{
+    auth, browser_ws, github_installations, github_webhooks, health, me, pipelines, repositories,
+    runner_ws, runners, workflows, workspaces,
+};
 use crate::middleware::{csrf, security_headers};
 use crate::state::AppState;
 
+/// Browser-facing surfaces: JSON API calls and OAuth redirects are small.
 const MAX_BODY_BYTES: usize = 64 * 1024;
+/// Webhook payloads (push events especially) and editor validation content
+/// legitimately exceed the browser budget.
+const LARGE_BODY_BYTES: usize = 1024 * 1024;
 const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 
 pub fn build_router(state: AppState) -> anyhow::Result<Router> {
@@ -32,12 +39,16 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
     let auth_routes = Router::new()
         .route("/github/login", get(auth::login))
         .route("/github/callback", get(auth::callback))
+        // GitHub App Setup URL: post-install browser redirect. Session
+        // cookie + server-side installation verification inside.
+        .route("/github/app/setup", get(github_installations::setup))
         .route("/logout", post(auth::logout))
-        .layer(GovernorLayer::new(governor_config));
+        .layer(GovernorLayer::new(governor_config))
+        .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES));
 
-    // General abuse protection for the API surface, plus a much stricter
-    // budget on workspace provisioning — it is an expensive, once-per-user
-    // operation and a natural target for automated creation attempts.
+    // General abuse protection for the API surface, plus much stricter
+    // budgets on expensive operations: workspace provisioning and manual
+    // repository syncs (each fans out into GitHub API calls).
     let api_governor = Arc::new(
         GovernorConfigBuilder::default()
             .per_second(5)
@@ -52,14 +63,165 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
             .finish()
             .expect("valid governor configuration"),
     );
+    let sync_governor = Arc::new(
+        GovernorConfigBuilder::default()
+            .per_second(1)
+            .burst_size(5)
+            .finish()
+            .expect("valid governor configuration"),
+    );
+    // Pipeline dispatch/rerun fan out into planning, token minting, and
+    // runner traffic — same strict budget as manual syncs.
+    let dispatch_governor = Arc::new(
+        GovernorConfigBuilder::default()
+            .per_second(1)
+            .burst_size(5)
+            .finish()
+            .expect("valid governor configuration"),
+    );
 
-    let api_routes = Router::new()
+    // Standard API routes live under the browser body budget. Every handler
+    // authenticates via CurrentUser and authorizes via workspace membership
+    // permissions (services::authz).
+    let api_standard = Router::new()
         .route("/me", get(me::get_me))
         .route(
             "/workspaces",
             post(workspaces::create_workspace).layer(GovernorLayer::new(workspace_governor)),
         )
+        .route(
+            "/workspaces/{workspace_id}/installations",
+            get(github_installations::list),
+        )
+        .route(
+            "/workspaces/{workspace_id}/installations/{installation_id}",
+            delete(github_installations::unlink),
+        )
+        .route(
+            "/workspaces/{workspace_id}/repositories",
+            get(repositories::list).post(repositories::import),
+        )
+        .route(
+            "/workspaces/{workspace_id}/repositories/available",
+            get(repositories::available),
+        )
+        .route(
+            "/workspaces/{workspace_id}/repositories/{repository_id}",
+            get(repositories::detail).delete(repositories::remove),
+        )
+        .route(
+            "/workspaces/{workspace_id}/repositories/{repository_id}/sync",
+            post(repositories::sync).layer(GovernorLayer::new(sync_governor)),
+        )
+        .route(
+            "/workspaces/{workspace_id}/workflows",
+            get(workflows::list),
+        )
+        .route(
+            "/workspaces/{workspace_id}/workflows/{workflow_id}",
+            get(workflows::detail),
+        )
+        .route(
+            "/workspaces/{workspace_id}/workflows/{workflow_id}/dispatch",
+            post(pipelines::dispatch).layer(GovernorLayer::new(dispatch_governor.clone())),
+        )
+        .route(
+            "/workspaces/{workspace_id}/pipelines",
+            get(pipelines::list),
+        )
+        .route(
+            "/workspaces/{workspace_id}/pipelines/{pipeline_id}",
+            get(pipelines::detail),
+        )
+        .route(
+            "/workspaces/{workspace_id}/pipelines/{pipeline_id}/cancel",
+            post(pipelines::cancel),
+        )
+        .route(
+            "/workspaces/{workspace_id}/pipelines/{pipeline_id}/rerun",
+            post(pipelines::rerun).layer(GovernorLayer::new(dispatch_governor)),
+        )
+        .route(
+            "/workspaces/{workspace_id}/pipelines/{pipeline_id}/jobs/{job_id}/logs",
+            get(pipelines::job_logs),
+        )
+        .route(
+            "/workspaces/{workspace_id}/pipelines/{pipeline_id}/jobs/{job_id}/logs/raw",
+            get(pipelines::job_logs_raw),
+        )
+        .route(
+            "/workspaces/{workspace_id}/pipelines/{pipeline_id}/artifacts",
+            get(pipelines::artifacts),
+        )
+        .route(
+            "/workspaces/{workspace_id}/artifacts/{artifact_id}/download",
+            get(pipelines::artifact_download),
+        )
+        .route(
+            "/workspaces/{workspace_id}/runners",
+            get(runners::list).post(runners::create),
+        )
+        .route(
+            "/workspaces/{workspace_id}/runners/{runner_id}",
+            delete(runners::revoke),
+        )
+        .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES));
+
+    // Editor validation accepts whole workflow files — its own, larger cap.
+    let api_validate = Router::new()
+        .route(
+            "/workspaces/{workspace_id}/workflows/validate",
+            post(workflows::validate),
+        )
+        .layer(RequestBodyLimitLayer::new(LARGE_BODY_BYTES));
+
+    let api_routes = Router::new()
+        .merge(api_standard)
+        .merge(api_validate)
         .layer(GovernorLayer::new(api_governor));
+
+    // GitHub webhooks: server-to-server, authenticated by HMAC signature —
+    // deliberately outside the CSRF layer and under the large body budget.
+    let webhook_governor = Arc::new(
+        GovernorConfigBuilder::default()
+            .per_second(10)
+            .burst_size(20)
+            .finish()
+            .expect("valid governor configuration"),
+    );
+    let webhook_routes = Router::new()
+        .route("/github", post(github_webhooks::receive))
+        .layer(GovernorLayer::new(webhook_governor))
+        .layer(RequestBodyLimitLayer::new(LARGE_BODY_BYTES));
+
+    // WebSocket surfaces live OUTSIDE the CSRF layer: native WebSockets
+    // cannot send the X-Requested-With header. Each endpoint authenticates
+    // itself before upgrading — runners with a bearer token, browsers with
+    // a strict Origin check + session cookie + workspace RBAC.
+    let runner_ws_governor = Arc::new(
+        GovernorConfigBuilder::default()
+            .per_second(1)
+            .burst_size(5)
+            .finish()
+            .expect("valid governor configuration"),
+    );
+    let runner_ws_routes = Router::new()
+        .route("/ws", get(runner_ws::connect))
+        .layer(GovernorLayer::new(runner_ws_governor));
+
+    let browser_ws_governor = Arc::new(
+        GovernorConfigBuilder::default()
+            .per_second(2)
+            .burst_size(10)
+            .finish()
+            .expect("valid governor configuration"),
+    );
+    let browser_ws_routes = Router::new()
+        .route(
+            "/workspaces/{workspace_id}/pipelines/{pipeline_id}",
+            get(browser_ws::connect),
+        )
+        .layer(GovernorLayer::new(browser_ws_governor));
 
     let cors = CorsLayer::new()
         .allow_origin(
@@ -71,25 +233,34 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
                 .map_err(anyhow::Error::new)?,
         )
         .allow_credentials(true)
-        .allow_methods([Method::GET, Method::POST])
+        .allow_methods([Method::GET, Method::POST, Method::DELETE])
         .allow_headers([
             header::CONTENT_TYPE,
             HeaderName::from_static("x-requested-with"),
         ]);
 
-    // Layers run top-down for requests: request-id -> tracing -> body limit
-    // -> CORS -> security headers -> CSRF -> route handler.
-    let router = Router::new()
-        .route("/healthz", get(health::healthz))
+    // The CSRF XHR-header check guards the browser-facing surfaces only;
+    // webhooks authenticate with HMAC instead. Body limits are per-scope
+    // (see the sub-routers above) because an outer global limit would cap
+    // webhook payloads at the browser budget.
+    let browser_routes = Router::new()
         .nest("/auth", auth_routes)
         .nest("/api", api_routes)
-        .layer(axum_middleware::from_fn(csrf::require_xhr_header))
+        .layer(axum_middleware::from_fn(csrf::require_xhr_header));
+
+    // Layers run top-down for requests: request-id -> tracing -> CORS ->
+    // security headers -> (per-scope: CSRF, body limits, governors) -> route.
+    let router = Router::new()
+        .route("/healthz", get(health::healthz))
+        .merge(browser_routes)
+        .nest("/webhooks", webhook_routes)
+        .nest("/runner", runner_ws_routes)
+        .nest("/ws", browser_ws_routes)
         .layer(axum_middleware::from_fn_with_state(
             state.clone(),
             security_headers::security_headers,
         ))
         .layer(cors)
-        .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
         .layer(TraceLayer::new_for_http())
         .layer(PropagateRequestIdLayer::new(X_REQUEST_ID))
         .layer(SetRequestIdLayer::new(X_REQUEST_ID, MakeRequestUuid))
