@@ -57,7 +57,7 @@ overup-backend ──▶ postgres service (internal dokploy-network, port 5432 N
 | VPS with Dokploy | Ports 80/443 open to the world; the Dokploy panel port (default 3000) ideally firewalled to your IP. |
 | Dokploy PostgreSQL service | Already created. Postgres 16 matches local dev (`docker-compose.yml`). |
 | GitHub connected to Dokploy | Done via Dokploy Settings → Git → GitHub (installs Dokploy's GitHub App on your account so it can clone + receive push events). |
-| DNS record | `A` record: `api.example.com → <VPS public IP>`. Create it **before** enabling HTTPS so Let's Encrypt validation succeeds. |
+| DNS record | `A` record: `api.example.com → <VPS public IP>`. Create it **before** enabling HTTPS so Let's Encrypt validation succeeds. **Don't own a domain? Use a free DuckDNS subdomain — see [§6.1](#61-no-domain-yet-use-a-free-duckdns-subdomain).** |
 | GitHub **OAuth App** | For user login. You'll update its callback URL to production in [§7](#7-point-the-github-apps-at-production). |
 | GitHub **App** | For repositories/workflows/webhooks. You'll update Setup URL + Webhook URL to production in [§7](#7-point-the-github-apps-at-production). |
 | `openssl` anywhere | To generate `RUNNER_JOB_SIGNING_KEY`. |
@@ -220,10 +220,39 @@ openssl rand -hex 32
 
 # Webhook secret (any strong random string works):
 openssl rand -hex 32
+```
 
-# Base64 the GitHub App private key (single line, no wrapping):
-base64 -w0 your-app.private-key.pem        # Linux
-base64 -i your-app.private-key.pem | tr -d '\n'   # macOS
+### 5.1 Converting the GitHub App private key to `GITHUB_APP_PRIVATE_KEY_B64`
+
+The value must be the **base64 encoding of the entire `.pem` file** (including the
+`-----BEGIN/END RSA PRIVATE KEY-----` lines), as a single line. Pasting the raw PEM
+text itself into the variable is the classic mistake — the PEM's header dashes,
+spaces, and line breaks are not valid base64, and the backend refuses to start with:
+
+```
+Error: GITHUB_APP_PRIVATE_KEY_B64 is not valid base64
+```
+
+Convert the downloaded key file on whatever machine you have:
+
+```bash
+# Linux (single line, no wrapping):
+base64 -w0 your-app.private-key.pem
+
+# macOS:
+base64 -i your-app.private-key.pem | tr -d '\n'
+
+# Windows PowerShell:
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("your-app.private-key.pem"))
+```
+
+Copy the entire one-line output (it starts with `LS0tLS1CRUdJTi...`, which is
+`-----BEGIN` encoded) into the variable — no quotes, no line breaks. Sanity check:
+decoding it must reproduce the PEM exactly:
+
+```bash
+echo "$GITHUB_APP_PRIVATE_KEY_B64" | base64 -d | head -1
+# -----BEGIN RSA PRIVATE KEY-----
 ```
 
 Notes:
@@ -256,21 +285,59 @@ terminates TLS and proxies to the container — including WebSocket upgrades for
 Do **not** additionally publish port 8080 in the application's port mappings — the only
 public entry point should be Traefik on 443.
 
+### 6.1 No domain yet? Use a free DuckDNS subdomain
+
+If Dokploy shows **"Domain resolves to `<some other IP>` but should point to
+`<your VPS IP>`"**, the hostname you entered does not point at your VPS — Traefik
+routes by hostname, so traffic never reaches you. Turning the certificate off does
+not work around it; the fix is always at the DNS level. If you don't own a domain,
+[DuckDNS](https://www.duckdns.org) hosts a free subdomain for you (this is the
+tested, recommended path):
+
+1. Go to **duckdns.org**, sign in (GitHub login works).
+2. Create a subdomain, e.g. `overup-api`, and set its IP to your VPS public IP
+   (e.g. `213.136.94.217`). DuckDNS publishes the `A` record for you — nothing to
+   configure on the VPS.
+3. In Dokploy → Domains: Host `overup-api.duckdns.org`, Path `/`, Container Port
+   `8080`, **HTTPS enabled**, Certificate **Let's Encrypt**. Ports 80 + 443 must be
+   open (Let's Encrypt validates over port 80).
+4. Use `https://overup-api.duckdns.org` everywhere this guide says
+   `https://api.example.com` — the env vars in §5 and the GitHub App URLs in §7.
+   Keep `COOKIE_SECURE=true`; DuckDNS + Let's Encrypt is real HTTPS.
+
+Quick-and-dirty alternative (testing only): IP-embedded domains like
+`api.213-136-94-217.sslip.io` or `api-213-136-94-217.traefik.me` resolve to the
+embedded IP with zero signup — but Let's Encrypt usually rate-limits these shared
+domains, leaving you on plain HTTP, which forces `COOKIE_SECURE=false` and `http://`
+callbacks. Fine for a smoke test, not for real use. A paid domain later is a drop-in
+replacement: update the Dokploy domain, the §5 env vars, and the §7 GitHub URLs, then
+redeploy.
+
 ## 7. Point the GitHub Apps at production
 
 Both apps were registered with `localhost` URLs during development. Update them (or
 register separate production apps — recommended so local dev keeps working):
 
+All URLs below use your real backend domain — whatever you configured in §6. With
+the DuckDNS setup from §6.1 that means replacing `https://api.example.com` with
+`https://overup-api.duckdns.org` everywhere (shown in parentheses).
+
 **OAuth App** (GitHub → Settings → Developer settings → OAuth Apps):
 
-- Homepage URL: `https://app.example.com`
+- Homepage URL: `https://app.example.com` (or your frontend's future domain; any
+  placeholder is fine until it's deployed — GitHub doesn't validate it)
 - Authorization callback URL: `https://api.example.com/auth/github/callback`
-  — must match `OAUTH_REDIRECT_URL` **exactly** (the backend enforces an allow-list of one).
+  (DuckDNS: `https://overup-api.duckdns.org/auth/github/callback`)
+  — must match `OAUTH_REDIRECT_URL` **exactly**, scheme and host included (the
+  backend enforces an allow-list of one).
 
 **GitHub App** (GitHub → Settings → Developer settings → GitHub Apps):
 
-- Setup URL: `https://api.example.com/auth/github/app/setup` (keep "Redirect on update" checked)
-- **Webhook URL: `https://api.example.com/webhooks/github`** — production is publicly
+- Setup URL: `https://api.example.com/auth/github/app/setup`
+  (DuckDNS: `https://overup-api.duckdns.org/auth/github/app/setup`) — keep
+  "Redirect on update" checked
+- **Webhook URL: `https://api.example.com/webhooks/github`**
+  (DuckDNS: `https://overup-api.duckdns.org/webhooks/github`) — production is publicly
   reachable, so the smee.io/cloudflared tunnel from local dev is no longer needed.
 - Webhook secret: the exact `GITHUB_WEBHOOK_SECRET` value you set in §5.
 - Permissions stay least-privilege: Metadata (read) + Contents (read).
@@ -428,6 +495,8 @@ Most protections are already enforced **in the code** (see the security checklis
 
 | Symptom | Likely cause / fix |
 | --- | --- |
+| Dokploy: "Domain resolves to `X` but should point to `<VPS IP>`" | The hostname doesn't point at your VPS — a DNS problem, not a certificate one. Own domain: fix its `A` record. No domain: use a free DuckDNS subdomain, [§6.1](#61-no-domain-yet-use-a-free-duckdns-subdomain). |
+| `Error: GITHUB_APP_PRIVATE_KEY_B64 is not valid base64` at startup | The raw PEM text was pasted into the variable. It must be the **base64 of the .pem file** as one line — conversion commands in [§5.1](#51-converting-the-github-app-private-key-to-github_app_private_key_b64). |
 | Build fails: `failed to load manifest for dependency 'protocol'` or `../protocol not found` | **Docker Context Path is wrong.** It must be `.` (repo root) with Docker File `backend/Dockerfile` — the build context has to contain both crates. |
 | Build fails on `sqlx::migrate!` | `backend/migrations/` missing from the context — check `.dockerignore` wasn't edited to exclude it. |
 | Container starts then exits immediately | Read the runtime log's first error line: usually a missing/invalid env var (the config loader names it) or an unreachable `DATABASE_URL`. |
