@@ -11,6 +11,7 @@ use crate::services::github_app::GitHubApp;
 use crate::services::log_hub::LogHub;
 use crate::services::r2::R2;
 use crate::services::runner_hub::RunnerHub;
+use crate::services::runner_provisioner::RunnerProvisioner;
 use crate::services::scheduler::Scheduler;
 use crate::services::workspace_hub::WorkspaceHub;
 use crate::services::ws_ticket::WsTicketStore;
@@ -42,6 +43,10 @@ pub struct AppState {
     /// One-time tickets for cross-origin browser WebSocket auth
     /// (deployments whose proxy cannot forward upgrades, e.g. Netlify).
     pub ws_tickets: Arc<WsTicketStore>,
+    /// Hosted-runner container spawner; None means the feature is
+    /// unavailable (not configured, or Docker unreachable at startup).
+    /// Initialized asynchronously in main after construction.
+    pub runner_provisioner: Option<Arc<RunnerProvisioner>>,
 }
 
 impl AppState {
@@ -89,6 +94,8 @@ impl AppState {
             scheduler: Arc::new(Scheduler::default()),
             r2,
             ws_tickets: Arc::new(WsTicketStore::default()),
+            // Requires async Docker probing; main fills it in right after.
+            runner_provisioner: None,
         })
     }
 }

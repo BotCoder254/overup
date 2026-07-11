@@ -4,10 +4,12 @@ import { toast } from 'sonner';
 import { useWorkspaceId } from '../../repositories/hooks/useRepositories';
 import {
   bootstrapRunner,
+  createHostedRunner,
   disableRunner,
   drainRunner,
   getRunnerDetail,
   getRunners,
+  getRunnersList,
   regenerateRunnerToken,
   resumeRunner,
   revokeRunner,
@@ -57,6 +59,36 @@ export function useRunnerDetail(runnerId: string | undefined, streamConnected: b
       if (streamConnected) return false;
       const status = query.state.data?.status;
       return status === 'idle' || status === 'busy' ? pollWhileDisconnected : false;
+    },
+  });
+}
+
+/**
+ * Whether this deployment can provision hosted runners. Changes only on a
+ * server redeploy, so one fetch per session is plenty.
+ */
+export function useHostedRunnerAvailable() {
+  const workspaceId = useWorkspaceId();
+  return useQuery({
+    queryKey: ['workspaces', workspaceId ?? '', 'runners', 'hosted-available'] as const,
+    queryFn: async () => (await getRunnersList(workspaceId!)).hostedAvailable,
+    enabled: Boolean(workspaceId),
+    staleTime: Infinity,
+  });
+}
+
+export function useCreateHostedRunner() {
+  const workspaceId = useWorkspaceId();
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (input: { name: string; labels: string[] }) =>
+      createHostedRunner(workspaceId!, input),
+    onSuccess: () => {
+      if (workspaceId) void queryClient.invalidateQueries({ queryKey: runnersKey(workspaceId) });
+    },
+    onError: (error) => {
+      toast.error(describeError(error, 'Could not provision the hosted runner.'));
     },
   });
 }

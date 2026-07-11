@@ -1,9 +1,18 @@
 import { api } from '../../../lib/api';
 import type { Runner } from '../../../types/runner';
 
+export interface RunnersListResponse {
+  runners: Runner[];
+  /** Whether this deployment can provision hosted runners itself. */
+  hostedAvailable: boolean;
+}
+
+export async function getRunnersList(workspaceId: string): Promise<RunnersListResponse> {
+  return api.get(`/api/workspaces/${workspaceId}/runners`).json<RunnersListResponse>();
+}
+
 export async function getRunners(workspaceId: string): Promise<Runner[]> {
-  const body = await api.get(`/api/workspaces/${workspaceId}/runners`).json<{ runners: Runner[] }>();
-  return body.runners;
+  return (await getRunnersList(workspaceId)).runners;
 }
 
 export async function getRunnerDetail(workspaceId: string, runnerId: string): Promise<Runner> {
@@ -27,6 +36,20 @@ export async function bootstrapRunner(
   return api
     .post(`/api/workspaces/${workspaceId}/runners/bootstrap`, { json: input })
     .json<BootstrapResult>();
+}
+
+/**
+ * "Create and wait": the server provisions a runner container itself. No
+ * token ever reaches the browser — it is injected into the container.
+ */
+export async function createHostedRunner(
+  workspaceId: string,
+  input: { name: string; labels: string[] },
+): Promise<Runner> {
+  const body = await api
+    .post(`/api/workspaces/${workspaceId}/runners/hosted`, { json: input })
+    .json<{ runner: Runner }>();
+  return body.runner;
 }
 
 export async function updateRunner(

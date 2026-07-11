@@ -25,4 +25,12 @@ export interface Runner {
   revoked: boolean;
   lastHealth: RunnerHealth | null;
   draining: boolean;
+  /** Hosted runner provisioned by the control plane itself. */
+  managed: boolean;
+  /**
+   * Static failure category when background provisioning of a hosted runner
+   * failed (image_pull_failed, container_create_failed,
+   * container_start_failed, provision_timeout); null otherwise.
+   */
+  provisionError: string | null;
 }

@@ -112,7 +112,24 @@ async fn pass(state: &AppState) {
 
     // 5. Runner rows stuck mid-registration: the wizard's bootstrap token
     //    expired before the runner ever connected, so no permanent identity
-    //    was established — nothing worth keeping.
+    //    was established — nothing worth keeping. Hosted (managed) runners
+    //    first get their containers deprovisioned, while the rows still
+    //    hold the container ids.
+    if let Some(provisioner) = &state.runner_provisioner {
+        match db::runners::find_expired_bootstrap_managed(&state.pool).await {
+            Ok(orphans) => {
+                for (runner_id, container_id) in orphans {
+                    let Some(container_id) = container_id else { continue };
+                    if let Err(error) = provisioner.deprovision(runner_id, &container_id).await {
+                        tracing::warn!(%runner_id, error = ?error, "failed to deprovision abandoned hosted runner");
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(error = ?error, "failed to scan abandoned hosted runners")
+            }
+        }
+    }
     match db::runners::purge_expired_bootstrap(&state.pool).await {
         Ok(0) => {}
         Ok(purged) => tracing::info!(purged, "purged abandoned runner bootstrap registrations"),

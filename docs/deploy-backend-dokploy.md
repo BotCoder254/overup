@@ -195,6 +195,20 @@ MAX_LOG_BYTES_PER_JOB=10485760
 MAX_ARTIFACT_BYTES=104857600
 MAX_ARTIFACTS_PER_JOB=10
 
+# --- Hosted runners (OPTIONAL — "create and wait", zero-install) --------------
+# Lets the control plane provision runner containers on its own Docker host;
+# the Runners wizard then offers "Hosted on this server". Full reference:
+# docs/deploy-runner.md §2.1.
+#RUNNER_PROVISIONER=docker
+# URL runner containers reach the API on — never localhost; on a single host
+# with Docker's default bridge http://172.17.0.1:8080 usually works, else
+# the public API origin (https://api.example.com).
+#RUNNER_PROVISIONER_OVERUP_URL=
+#RUNNER_IMAGE=ghcr.io/botcoder254/overup-runner:latest
+# DOCKER_HOST injected into runner containers for job execution; unset
+# mounts /var/run/docker.sock into them (root-equivalent on the host).
+#RUNNER_PROVISIONER_DOCKER_HOST=
+
 # --- Cloudflare R2 (OPTIONAL — all four or none) ------------------------------
 # Without these, pipelines run fine; artifact uploads are denied and logs
 # stay in Postgres (no archival/pruning).
@@ -355,6 +369,29 @@ the DuckDNS setup from §6.1 that means replacing `https://api.example.com` with
 
 If you registered fresh production apps, remember the env vars in §5 must carry the
 **production** app's client id/secret/key/slug — not the dev app's.
+
+### 7.1 Troubleshooting: install ends in `{"error":true,"message":"Missing state"}`
+
+That flat JSON error is **not produced by the current backend** — every path in the
+OAuth callback and the App setup handler is a 302 redirect, and install redirects that
+land on the callback without a `state` parameter are forwarded to the setup handler
+automatically. Seeing it means the deployed build is stale or the App points at the
+wrong endpoint. Fix in this order:
+
+1. **Redeploy the backend** so the running build is current, then verify:
+
+   ```bash
+   curl -sI "https://api.example.com/auth/github/callback?installation_id=123&setup_action=install"
+   # expect: HTTP/2 302 with location: /auth/github/app/setup?...
+   ```
+
+   A JSON body instead of a redirect = the old build is still running.
+2. **Check the GitHub App's Setup URL** is exactly
+   `https://api.example.com/auth/github/app/setup` with "Redirect on update" checked.
+3. **Uncheck "Request user authorization (OAuth) during installation"** in the GitHub
+   App settings. When checked, GitHub sends installs to the OAuth callback with no
+   `state` — the current backend tolerates that detour, but the correct configuration
+   avoids it entirely.
 
 ## 8. First deploy & verification
 

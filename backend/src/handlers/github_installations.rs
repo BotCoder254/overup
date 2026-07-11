@@ -56,6 +56,14 @@ pub async fn setup(
         }
     };
 
+    // An org member *requested* an install: there is no installation yet and
+    // nothing to verify or link — the org owner must approve first. Send the
+    // user back with an informational marker rather than a failure.
+    if params.setup_action.as_deref() == Some("request") {
+        tracing::info!("github app install requested; awaiting org approval");
+        return Redirect::to(&format!("{frontend}/?info=install_pending")).into_response();
+    }
+
     let Some(raw_id) = params.installation_id else {
         return fail("missing installation_id");
     };

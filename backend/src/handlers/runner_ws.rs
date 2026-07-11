@@ -262,6 +262,13 @@ async fn handle(state: AppState, runner: Runner, is_bootstrap: bool, socket: Web
         heartbeat_interval_secs: HEARTBEAT_INTERVAL_SECS,
         protocol_version: protocol::PROTOCOL_VERSION,
         permanent_token,
+        // Payload-verification key, delivered post-auth over the socket so
+        // runners need no manual RUNNER_JOB_SIGNING_KEY copy. The key
+        // originates as a UTF-8 env string (config.rs), so the conversion is
+        // lossless.
+        job_signing_key: Some(
+            String::from_utf8_lossy(&state.config.runner_job_signing_key).into_owned(),
+        ),
     };
     if send_msg(&mut sink, &ack).await.is_err() {
         state.runner_hub.unregister_conn(runner_id, &conn);

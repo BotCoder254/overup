@@ -1,3 +1,4 @@
+pub mod artifacts;
 pub mod auth;
 pub mod browser_ws;
 pub mod dashboard;

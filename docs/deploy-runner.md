@@ -26,8 +26,15 @@ deployment options: **Docker (recommended)**, **as a Dokploy Application**, and
   the backend restarts or the network drops. It exits permanently only when the
   control plane revokes it.
 - **Signed payloads.** Every job assignment is HMAC-SHA256-signed by the backend and
-  verified by the runner *before parsing* — which is why `RUNNER_JOB_SIGNING_KEY`
-  must be **byte-for-byte identical** on both sides.
+  verified by the runner *before parsing*. The verification key is delivered
+  automatically over the authenticated connection on every connect (in memory only),
+  so `RUNNER_JOB_SIGNING_KEY` no longer needs to be copied by hand — set it only to
+  pin the key locally, in which case it must be **byte-for-byte identical** to the
+  backend's.
+- **Hosted runners.** Deployments with `RUNNER_PROVISIONER=docker` set on the
+  backend can skip this entire guide: the "Register runner" dialog offers
+  "Hosted on this server", which provisions the container automatically —
+  create and wait. See §2.1 for how to enable it.
 - **No R2 credentials needed.** Artifact uploads and source-tarball downloads use
   short-lived presigned/scoped URLs minted by the backend.
 
@@ -42,8 +49,14 @@ Docker daemon with your control plane.
 Runners belong to a workspace. Creating one returns the registration token
 **exactly once** (only its SHA-256 hash is stored — it cannot be shown again).
 
-Until the Runner Management UI ships, use the API. It's session-authenticated, so
-grab your session cookie from the browser (DevTools → Application → Cookies →
+**The easy path is the Runners page wizard**: Runners → "Register runner" walks you
+through name/labels, generates the complete `docker run` command (token included),
+and waits live for the first connection. On deployments with the provisioner enabled
+(§2.1) it also offers "Hosted on this server" — no install step and no token ever
+shown.
+
+The raw API remains available for scripting. It's session-authenticated, so grab
+your session cookie from the browser (DevTools → Application → Cookies →
 `overup_session`, or `__Host-overup_session` in production) after logging in:
 
 ```bash
@@ -72,6 +85,33 @@ revoke + create a new runner).
 values are a **subset** of the runner's labels. If your workflows say
 `runs-on: ubuntu-latest`, the runner must carry the `ubuntu-latest` label.
 
+### 2.1 Hosted runners (zero-install)
+
+With the provisioner enabled, the backend creates and manages runner containers on
+its own Docker host — end users never see a token or edit an env file. Set on the
+**backend** (see `backend/.env.example`):
+
+| Variable | Required | Default | Meaning |
+| --- | --- | --- | --- |
+| `RUNNER_PROVISIONER` | yes | unset (off) | `docker` enables the feature. The backend needs Docker access (`DOCKER_HOST`/`DOCKER_TLS_VERIFY`/`DOCKER_CERT_PATH` honored; default local socket). |
+| `RUNNER_PROVISIONER_OVERUP_URL` | yes | — | URL runner containers use to reach the API. Must be reachable **from inside a container** — never `localhost`. Single host with the default bridge: `http://172.17.0.1:8080`; otherwise the public API origin. |
+| `RUNNER_IMAGE` | no | `ghcr.io/botcoder254/overup-runner:latest` | Runner image the provisioner pulls and runs. |
+| `RUNNER_PROVISIONER_DOCKER_HOST` | no | unset | `DOCKER_HOST` injected into runner containers for job execution. Unset mounts `/var/run/docker.sock` into them instead — root-equivalent on the host; prefer a TLS-secured `tcp://…:2376` daemon when isolation matters. |
+
+Flow: "Register runner" → "Hosted on this server" → the backend responds instantly
+and provisions in the background (the first image pull can take minutes). The wizard
+polls the runner: a `provision_error` category (`image_pull_failed`,
+`container_create_failed`, `container_start_failed`, `provision_timeout`) surfaces as
+a failure with a "Try again" action. The one-time bootstrap token is injected
+directly into the container environment (never shown in the browser), exchanged for
+a permanent credential on first connect, and persisted in the container's data
+volume. Revoking the runner deprovisions its container and volume; abandoned
+bootstraps are cleaned up by the hourly janitor.
+
+At startup the backend probes `RUNNER_PROVISIONER_OVERUP_URL/healthz` and logs a
+warning if it looks unreachable or points at localhost — check the backend logs
+if hosted runners provision but never connect.
+
 ## 3. Environment reference
 
 Copy [`runner/.env.example`](../runner/.env.example) and fill it in. Everything the
@@ -81,7 +121,7 @@ runner reads:
 | --- | --- | --- | --- |
 | `OVERUP_URL` | recommended | `http://localhost:8080` | Backend origin. `http→ws`, `https→wss`. Production: `https://api.example.com`. |
 | `RUNNER_TOKEN` | **yes** | — | Registration token from §2 (shown once). |
-| `RUNNER_JOB_SIGNING_KEY` | **yes** | — | HMAC key for job-payload verification, ≥ 32 bytes. **Must equal the backend's `RUNNER_JOB_SIGNING_KEY` exactly.** |
+| `RUNNER_JOB_SIGNING_KEY` | no | *(delivered by the server)* | Optional local pin for the job-payload verification key, ≥ 32 bytes. Unset = use the key the control plane delivers in `hello_ack` (re-received each connect). If set, **must equal the backend's `RUNNER_JOB_SIGNING_KEY` exactly** and takes precedence. |
 | `RUNNER_NAME` | no | `overup-runner` | Display name sent at connect. |
 | `RUNNER_LABELS` | recommended | `self-hosted` | Comma-separated. Must cover your workflows' `runs-on` values. |
 | `RUNNER_CAP_DROP` | no | `true` | Drop ALL capabilities in job containers (`no-new-privileges` is always on regardless). |
@@ -96,8 +136,9 @@ runner reads:
 | `DOCKER_CERT_PATH` | with remote | — | Directory with `ca.pem`/`cert.pem`/`key.pem`. |
 | `RUST_LOG` | no | `info` | Log filter. |
 
-The runner refuses to start if `RUNNER_TOKEN` or `RUNNER_JOB_SIGNING_KEY` is missing,
-or if the signing key is shorter than 32 bytes.
+The runner refuses to start if `RUNNER_TOKEN` is missing (unless `RUNNER_TOKEN_FILE`
+already holds a persisted permanent token), or if a locally set signing key is
+shorter than 32 bytes.
 
 ## 4. Option A — Docker (recommended)
 
@@ -155,7 +196,8 @@ docker run -d \
 ```
 
 In the env file set at minimum: `OVERUP_URL=https://api.example.com`, `RUNNER_TOKEN`,
-`RUNNER_JOB_SIGNING_KEY` (same as backend), `RUNNER_LABELS`.
+`RUNNER_LABELS`. (The signing key is delivered automatically on connect;
+`RUNNER_JOB_SIGNING_KEY` is only needed to pin it locally.)
 
 ### 4.4 Or Docker Compose
 
@@ -202,7 +244,8 @@ Application from the same repository:
 ```env
 OVERUP_URL=https://api.example.com
 RUNNER_TOKEN=<token from §2>
-RUNNER_JOB_SIGNING_KEY=<same value as the backend app>
+# Optional — the signing key arrives automatically on connect. Set only to pin:
+#RUNNER_JOB_SIGNING_KEY=<same value as the backend app>
 RUNNER_NAME=dokploy-runner-1
 RUNNER_LABELS=self-hosted,linux,x64,ubuntu-latest
 RUST_LOG=info
@@ -302,11 +345,13 @@ own host) or are best avoided until you're comfortable with the mount semantics.
   `RUNNER_JOB_NETWORK=isolated` (per-job throwaway network) and `RUNNER_JOB_USER` +
   `RUNNER_JOB_READONLY_ROOTFS=true` for stricter setups; loosen limits only when a
   workload demands it.
-- **Secrets:** `RUNNER_TOKEN` and `RUNNER_JOB_SIGNING_KEY` live only in the env file
-  (root-owned, `chmod 600`) or Dokploy's Environment tab — never in git
-  (`.gitignore`/`.dockerignore` exclude `.env*` as a backstop). The token is
-  per-runner and instantly revocable; the signing key is shared — rotating it means
-  updating the backend and **every** runner together.
+- **Secrets:** `RUNNER_TOKEN` (and `RUNNER_JOB_SIGNING_KEY`, if you pin it) live only
+  in the env file (root-owned, `chmod 600`) or Dokploy's Environment tab — never in
+  git (`.gitignore`/`.dockerignore` exclude `.env*` as a backstop). The token is
+  per-runner and instantly revocable. The signing key is shared and delivered to
+  authenticated runners over wss on every connect, so rotating it means restarting
+  the backend with the new value — runners pick it up on reconnect (pinned runners
+  must be updated by hand).
 - **Checkout tokens** inside job payloads are short-lived (1 h), scoped to
   `contents:read`, and automatically masked out of all job logs by the backend.
 - **Keep the base images fresh:** rebuild the runner image periodically to pick up
@@ -329,14 +374,16 @@ own host) or are best avoided until you're comfortable with the mount semantics.
 
 | Symptom | Likely cause / fix |
 | --- | --- |
-| Runner exits: `missing required environment variable …` | `RUNNER_TOKEN` or `RUNNER_JOB_SIGNING_KEY` unset in the env file / Environment tab. |
-| Runner exits: `RUNNER_JOB_SIGNING_KEY must be at least 32 bytes` | Use the full `openssl rand -hex 32` output (64 hex chars). |
+| Runner exits: `missing required environment variable …` | `RUNNER_TOKEN` unset in the env file / Environment tab (and no persisted token at `RUNNER_TOKEN_FILE`). |
+| Runner exits: `RUNNER_JOB_SIGNING_KEY must be at least 32 bytes` | Only possible with a locally pinned key — use the full `openssl rand -hex 32` output (64 hex chars), or unset it to use the delivered key. |
 | `invalid peer certificate: UnknownIssuer` on every connect attempt | The API domain is serving **Traefik's default self-signed certificate**, not a real one — the runner (rustls + webpki roots) correctly refuses it. Causes: the Dokploy domain's Certificate is set to "none", or Let's Encrypt could never issue because **ports 80/443 are closed** in the VPS/provider firewall. Fix: open 80+443, set Certificate = Let's Encrypt in Dokploy's Domains tab, then check `curl -v https://<api-domain>/healthz` from another machine — the issuer must be Let's Encrypt (`R1x`/`E5`-style), not `TRAEFIK DEFAULT CERT`. The runner reconnects by itself (≤ 60 s backoff) once the cert is real. Never work around this by disabling verification. |
 | Connection rejected / immediately closed at connect | Wrong or **revoked** `RUNNER_TOKEN` (only the hash is stored — if you lost the token, revoke the runner and create a new one). |
 | `this runner was revoked by the control plane; exiting` | Expected after `DELETE …/runners/{id}` — the process exits permanently; deploy a new runner with a new token. |
-| Connects fine, but every job fails instantly around payload verification | `RUNNER_JOB_SIGNING_KEY` differs from the backend's — signed payloads fail constant-time verification and are never executed. Also check for stray whitespace/quotes in the env file. |
+| Connects fine, but every job fails instantly around payload verification | A locally pinned `RUNNER_JOB_SIGNING_KEY` differs from the backend's — signed payloads fail constant-time verification and are never executed. Unset it (the delivered key always matches) or fix stray whitespace/quotes in the env file. |
 | `docker engine unreachable; jobs will fail` | Socket not mounted, socket group not granted (`--group-add`), or `DOCKER_HOST` wrong. The runner stays connected but jobs fail cleanly until Docker is reachable. |
 | Jobs run but `/workspace` is empty (checkout "succeeded") | **The identical-path rule (§4.2):** `/opt/overup/work` isn't mounted host↔container at the same path, so the host daemon bind-mounted a different (empty) directory. |
 | Pipelines stay **Queued** with the runner online | Labels don't cover the job's `runs-on` (subset rule), or the single job slot is busy — check `RUNNER_LABELS` against the workflow, or add runners. |
 | `wss` connect fails through the proxy | `OVERUP_URL` must be the public origin (`https://api.example.com`); Traefik/Dokploy proxies WebSockets natively — check the URL and TLS cert before suspecting the proxy. |
 | Job containers can't reach the network | `RUNNER_JOB_NETWORK=none` set, or `isolated` combined with a workload expecting the default bridge. |
+| Hosted runner: wizard shows "Provisioning failed" | The `provision_error` category names the stage: `image_pull_failed` (check `RUNNER_IMAGE` + registry access on the server), `container_create_failed`/`container_start_failed` (check the server's Docker daemon and the container's logs), `provision_timeout` (very slow pull — pre-pull the image and retry). Docker detail is in the backend logs. |
+| Hosted runner: provisions fine but never connects (wizard times out) | `RUNNER_PROVISIONER_OVERUP_URL` isn't reachable from inside the container — never `localhost`; use `http://172.17.0.1:8080` (default bridge) or the public API origin. The backend logs a startup warning when its healthz probe of that URL fails. Check the runner container's own logs: `docker logs overup-runner-<runner-id>`. |

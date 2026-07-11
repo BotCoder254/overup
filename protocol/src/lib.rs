@@ -204,6 +204,14 @@ pub enum ServerMsg {
         /// addition never bumps [`PROTOCOL_VERSION`].
         #[serde(default)]
         permanent_token: Option<String>,
+        /// Job-payload HMAC verification key, delivered to every
+        /// authenticated runner over the (TLS) socket so operators no longer
+        /// have to copy `RUNNER_JOB_SIGNING_KEY` by hand. Runners hold it in
+        /// memory only and re-receive it on every connect; a locally
+        /// configured key always takes precedence. Optional for the same
+        /// forward-compat reason as `permanent_token`.
+        #[serde(default)]
+        job_signing_key: Option<String>,
     },
     Ping,
     /// Signed job descriptor: `payload_json` parses to [`JobPayload`] only
@@ -481,6 +489,48 @@ mod tests {
         };
         assert_eq!(busy_job_id, None);
         assert_eq!(health, None);
+    }
+
+    #[test]
+    fn old_shape_hello_ack_still_parses() {
+        // A hello_ack emitted by a pre-key-delivery server: no
+        // `job_signing_key` (and no `permanent_token`). Both must default to
+        // None, not fail to parse.
+        let json = format!(
+            r#"{{"type":"hello_ack","runner_id":"{}","heartbeat_interval_secs":30,"protocol_version":1}}"#,
+            Uuid::nil()
+        );
+        let parsed: ServerMsg = serde_json::from_str(&json).unwrap();
+        let ServerMsg::HelloAck {
+            permanent_token,
+            job_signing_key,
+            ..
+        } = parsed
+        else {
+            panic!("expected HelloAck");
+        };
+        assert_eq!(permanent_token, None);
+        assert_eq!(job_signing_key, None);
+    }
+
+    #[test]
+    fn hello_ack_round_trips_job_signing_key() {
+        let msg = ServerMsg::HelloAck {
+            runner_id: Uuid::nil(),
+            heartbeat_interval_secs: 30,
+            protocol_version: PROTOCOL_VERSION,
+            permanent_token: None,
+            job_signing_key: Some("0123456789abcdef0123456789abcdef".into()),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ServerMsg = serde_json::from_str(&json).unwrap();
+        let ServerMsg::HelloAck { job_signing_key, .. } = parsed else {
+            panic!("expected HelloAck");
+        };
+        assert_eq!(
+            job_signing_key.as_deref(),
+            Some("0123456789abcdef0123456789abcdef")
+        );
     }
 
     #[test]
