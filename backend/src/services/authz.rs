@@ -15,6 +15,9 @@ pub const CONTENT_WRITE: &str = "content.write";
 pub const SECRETS_READ: &str = "secrets.read";
 /// Create/replace/delete secrets. Owner + admin roles only.
 pub const SECRETS_MANAGE: &str = "secrets.manage";
+/// Create/rename/delete environments (listing rides content.read — the
+/// metadata isn't sensitive). Owner + admin roles only.
+pub const ENVIRONMENTS_MANAGE: &str = "environments.manage";
 
 pub async fn require_permission(
     pool: &PgPool,

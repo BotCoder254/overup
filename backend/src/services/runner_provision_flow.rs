@@ -36,9 +36,11 @@ const PER_INSTANCE_TIMEOUT: Duration = Duration::from_secs(120);
 /// conflicts by the handler, logged by the auto-provision hook).
 #[derive(Debug)]
 pub enum HostedDenied {
-    /// No live provisioner on this deployment (unset, or Docker unreachable
-    /// at boot).
+    /// Hosted runners are not configured on this deployment.
     Unavailable,
+    /// Configured, but the provisioner has no live Docker connection right
+    /// now (the reconnect loop will restore it).
+    DockerDown,
     NameTaken,
     QuotaExceeded,
 }
@@ -73,6 +75,11 @@ pub async fn start_hosted_provision(
     let Some(cfg) = state.config.runner_provisioner.as_ref() else {
         return Ok(Err(HostedDenied::Unavailable));
     };
+    // Refuse up front while Docker is unreachable: pending rows created now
+    // would only sit until the janitor purges them as failed.
+    if !provisioner.available().await {
+        return Ok(Err(HostedDenied::DockerDown));
+    }
 
     let outcome = db::runners::create_hosted_pending(
         &state.pool,
@@ -135,7 +142,7 @@ pub async fn start_hosted_provision(
                 tracing::error!(
                     %workspace_id,
                     category = error.category(),
-                    error = ?error.detail(),
+                    detail = %error.detail(),
                     "hosted runner image pull failed"
                 );
                 for (runner_id, name, _) in &batch {
@@ -249,7 +256,7 @@ pub async fn start_hosted_provision(
                     tracing::error!(
                         %workspace_id, %runner_id,
                         category = error.category(),
-                        error = ?error.detail(),
+                        detail = %error.detail(),
                         "hosted runner provisioning failed"
                     );
                     fail_instance(&task_state, workspace_id, *runner_id, name, error.category())

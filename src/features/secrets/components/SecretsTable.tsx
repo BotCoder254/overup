@@ -7,11 +7,9 @@ import { TBody, THead, Table, Td, Th, Tr } from '../../../components/ui/Table';
 import type { Secret, SecretScope } from '../../../types/secret';
 
 export function secretScopeBadge(scope: SecretScope) {
-  return scope === 'repository' ? (
-    <Badge variant="info">Repository</Badge>
-  ) : (
-    <Badge variant="primary">Workspace</Badge>
-  );
+  if (scope === 'repository') return <Badge variant="info">Repository</Badge>;
+  if (scope === 'environment') return <Badge variant="success">Environment</Badge>;
+  return <Badge variant="primary">Workspace</Badge>;
 }
 
 interface SecretsTableProps {
@@ -33,11 +31,11 @@ export function SecretsTable({ slug, secrets }: SecretsTableProps) {
         <Tr>
           <Th>Name</Th>
           <Th>Scope</Th>
-          <Th className="hidden md:table-cell">Repository</Th>
+          <Th className="hidden md:table-cell">Target</Th>
           <Th className="hidden md:table-cell">Created by</Th>
           <Th>Last used</Th>
           <Th className="hidden lg:table-cell">Uses</Th>
-          <Th className="hidden sm:table-cell">Updated</Th>
+          <Th className="hidden sm:table-cell">Rotated</Th>
         </Tr>
       </THead>
       <TBody>
@@ -60,7 +58,7 @@ export function SecretsTable({ slug, secrets }: SecretsTableProps) {
             </Td>
             <Td>{secretScopeBadge(secret.scope)}</Td>
             <Td className="hidden max-w-[200px] truncate text-xs text-steel md:table-cell">
-              {secret.repositoryName ?? '—'}
+              {secret.repositoryName ?? secret.environmentName ?? '—'}
             </Td>
             <Td className="hidden text-xs text-steel md:table-cell">
               {secret.creatorLogin ?? '—'}
@@ -79,9 +77,9 @@ export function SecretsTable({ slug, secrets }: SecretsTableProps) {
             </Td>
             <Td
               className="hidden text-xs text-steel sm:table-cell"
-              title={format(new Date(secret.updatedAt), 'PPpp')}
+              title={format(new Date(secret.valueSetAt), 'PPpp')}
             >
-              {format(new Date(secret.updatedAt), 'PP')}
+              {formatDistanceToNow(new Date(secret.valueSetAt), { addSuffix: true })}
             </Td>
           </Tr>
         ))}

@@ -1,10 +1,11 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Button } from '../../../components/ui/Button';
 import { Dialog } from '../../../components/ui/Dialog';
 import { FormField } from '../../../components/ui/FormField';
 import { Input } from '../../../components/ui/Input';
 import { Textarea } from '../../../components/ui/Textarea';
 import { useRepositories } from '../../repositories/hooks/useRepositories';
+import { useEnvironmentsCatalog } from '../../environments/hooks/useEnvironments';
 import type { Secret } from '../../../types/secret';
 import { useCreateSecret, useReplaceSecretValue } from '../hooks/useSecrets';
 
@@ -56,7 +57,15 @@ interface SecretFormDialogProps {
   open: boolean;
   onClose: () => void;
   /** When set, the dialog replaces this secret's value instead of creating. */
-  replaceTarget?: Pick<Secret, 'id' | 'name' | 'scope' | 'repositoryName'> | null;
+  replaceTarget?: Pick<
+    Secret,
+    'id' | 'name' | 'scope' | 'repositoryName' | 'environmentName'
+  > | null;
+  /**
+   * When set (e.g. opened from an environment detail page), the new secret
+   * is pre-scoped to this environment.
+   */
+  presetEnvironment?: { id: string; name: string } | null;
 }
 
 /**
@@ -65,8 +74,17 @@ interface SecretFormDialogProps {
  * over TLS, encrypted server-side, and can never be viewed again — the
  * dialog confirms success without echoing anything back.
  */
-export function SecretFormDialog({ open, onClose, replaceTarget }: SecretFormDialogProps) {
+export function SecretFormDialog({
+  open,
+  onClose,
+  replaceTarget,
+  presetEnvironment,
+}: SecretFormDialogProps) {
   const repositories = useRepositories();
+  const environments = useEnvironmentsCatalog();
+  const environmentOptions = (environments.data?.pages ?? []).flatMap(
+    (page) => page.environments,
+  );
   const create = useCreateSecret();
   const replace = useReplaceSecretValue();
   const replacing = Boolean(replaceTarget);
@@ -74,8 +92,17 @@ export function SecretFormDialog({ open, onClose, replaceTarget }: SecretFormDia
   const [name, setName] = useState('');
   const [value, setValue] = useState('');
   const [description, setDescription] = useState('');
-  const [scope, setScope] = useState<'workspace' | 'repository'>('workspace');
+  const [scope, setScope] = useState<'workspace' | 'repository' | 'environment'>('workspace');
   const [repositoryId, setRepositoryId] = useState('');
+  const [environmentId, setEnvironmentId] = useState('');
+
+  // Pre-scope to the environment the dialog was opened from.
+  useEffect(() => {
+    if (open && presetEnvironment) {
+      setScope('environment');
+      setEnvironmentId(presetEnvironment.id);
+    }
+  }, [open, presetEnvironment]);
 
   // Stable close that also resets state, read via the Dialog's onClose ref
   // so keystroke re-renders never disturb its focus effect.
@@ -85,16 +112,23 @@ export function SecretFormDialog({ open, onClose, replaceTarget }: SecretFormDia
     setDescription('');
     setScope('workspace');
     setRepositoryId('');
+    setEnvironmentId('');
     onClose();
   }, [onClose]);
 
   const nameProblem = nameError(name);
   const valueProblem = valueError(value);
   const missingRepo = !replacing && scope === 'repository' && !repositoryId;
+  const missingEnvironment = !replacing && scope === 'environment' && !environmentId;
   const invalid =
     Boolean(valueProblem) ||
     !value ||
-    (!replacing && (Boolean(nameProblem) || !name || missingRepo || description.length > 500));
+    (!replacing &&
+      (Boolean(nameProblem) ||
+        !name ||
+        missingRepo ||
+        missingEnvironment ||
+        description.length > 500));
   const pending = create.isPending || replace.isPending;
 
   const submit = () => {
@@ -109,6 +143,7 @@ export function SecretFormDialog({ open, onClose, replaceTarget }: SecretFormDia
         value,
         description: description.trim() || undefined,
         repositoryId: scope === 'repository' ? repositoryId : undefined,
+        environmentId: scope === 'environment' ? environmentId : undefined,
       },
       { onSuccess: close },
     );
@@ -193,8 +228,52 @@ export function SecretFormDialog({ open, onClose, replaceTarget }: SecretFormDia
                     </span>
                   </span>
                 </label>
+                <label className="flex items-start gap-2 text-sm text-charcoal">
+                  <input
+                    type="radio"
+                    name="secret-scope"
+                    className="mt-0.5 accent-primary"
+                    checked={scope === 'environment'}
+                    onChange={() => setScope('environment')}
+                  />
+                  <span>
+                    Environment
+                    <span className="block text-xs text-steel">
+                      Only for jobs declaring the environment in YAML; overrides repository and
+                      workspace secrets of the same name.
+                    </span>
+                  </span>
+                </label>
               </div>
             </fieldset>
+
+            {scope === 'environment' && (
+              <FormField
+                id="secret-environment"
+                label="Environment"
+                error={
+                  missingEnvironment
+                    ? 'Choose the environment this secret belongs to.'
+                    : undefined
+                }
+              >
+                {(aria) => (
+                  <select
+                    {...aria}
+                    className="h-9 w-full rounded border border-steel/30 bg-canvas px-2 text-sm text-charcoal focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                    value={environmentId}
+                    onChange={(event) => setEnvironmentId(event.target.value)}
+                  >
+                    <option value="">Select an environment…</option>
+                    {environmentOptions.map((environment) => (
+                      <option key={environment.id} value={environment.id}>
+                        {environment.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </FormField>
+            )}
 
             {scope === 'repository' && (
               <FormField
@@ -227,7 +306,9 @@ export function SecretFormDialog({ open, onClose, replaceTarget }: SecretFormDia
             <span className="font-mono text-charcoal">{replaceTarget.name}</span> ·{' '}
             {replaceTarget.scope === 'repository'
               ? `repository secret (${replaceTarget.repositoryName ?? 'unknown'})`
-              : 'workspace secret'}{' '}
+              : replaceTarget.scope === 'environment'
+                ? `environment secret (${replaceTarget.environmentName ?? 'unknown'})`
+                : 'workspace secret'}{' '}
             — name and scope are immutable.
           </p>
         )}

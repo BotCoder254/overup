@@ -25,7 +25,9 @@ export function RunnersPage() {
   const [regenTarget, setRegenTarget] = useState<Runner | null>(null);
   const [revokeTarget, setRevokeTarget] = useState<Runner | null>(null);
 
-  const list = runners.data ?? [];
+  // Revoked rows are hidden everywhere; keep the empty state consistent
+  // with what RunnersTable actually renders.
+  const list = (runners.data ?? []).filter((runner) => !runner.revoked);
 
   return (
     <>

@@ -23,14 +23,27 @@ fn is_unique_violation(err: &sqlx::Error, constraint: &str) -> bool {
 /// Meta columns + joins shared by the catalog and detail selects.
 const META_SELECT: &str = r#"
     SELECT s.id, s.workspace_id, s.repository_id, r.full_name AS repository_name,
+           s.environment_id, e.name AS environment_name,
            s.name, s.description,
            cu.username AS creator_login, uu.username AS updater_login,
-           s.created_at, s.updated_at, s.last_used_at, s.usage_count
+           s.created_at, s.updated_at, s.value_set_at, s.last_used_at, s.usage_count
     FROM secrets s
     LEFT JOIN repositories r ON r.id = s.repository_id
+    LEFT JOIN environments e ON e.id = s.environment_id
     LEFT JOIN users cu ON cu.id = s.created_by
     LEFT JOIN users uu ON uu.id = s.updated_by
 "#;
+
+/// Three-way scope label for audit metadata.
+fn scope_label(repository_id: Option<Uuid>, environment_id: Option<Uuid>) -> &'static str {
+    if repository_id.is_some() {
+        "repository"
+    } else if environment_id.is_some() {
+        "environment"
+    } else {
+        "workspace"
+    }
+}
 
 pub enum InsertOutcome {
     Created(Box<SecretMeta>),
@@ -46,6 +59,7 @@ pub async fn insert(
     id: Uuid,
     workspace_id: Uuid,
     repository_id: Option<Uuid>,
+    environment_id: Option<Uuid>,
     name: &str,
     description: Option<&str>,
     enc: &EncryptedSecret,
@@ -57,15 +71,16 @@ pub async fn insert(
     let inserted = sqlx::query(
         r#"
         INSERT INTO secrets
-            (id, workspace_id, repository_id, name, description,
+            (id, workspace_id, repository_id, environment_id, name, description,
              ciphertext, nonce, wrapped_dek, dek_nonce, key_version,
              created_by, updated_by)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12)
         "#,
     )
     .bind(id)
     .bind(workspace_id)
     .bind(repository_id)
+    .bind(environment_id)
     .bind(name)
     .bind(description)
     .bind(&enc.ciphertext)
@@ -81,7 +96,8 @@ pub async fn insert(
         Ok(_) => {}
         Err(err)
             if is_unique_violation(&err, "secrets_ws_name_key")
-                || is_unique_violation(&err, "secrets_repo_name_key") =>
+                || is_unique_violation(&err, "secrets_repo_name_key")
+                || is_unique_violation(&err, "secrets_env_name_key") =>
         {
             return Ok(InsertOutcome::DuplicateName);
         }
@@ -100,8 +116,9 @@ pub async fn insert(
     .bind(id)
     .bind(serde_json::json!({
         "name": name,
-        "scope": if repository_id.is_some() { "repository" } else { "workspace" },
+        "scope": scope_label(repository_id, environment_id),
         "repositoryId": repository_id,
+        "environmentId": environment_id,
     }))
     .bind(request_id)
     .execute(&mut *tx)
@@ -133,7 +150,8 @@ pub async fn replace_value(
         r#"
         UPDATE secrets
         SET ciphertext = $3, nonce = $4, wrapped_dek = $5, dek_nonce = $6,
-            key_version = $7, updated_by = $8, updated_at = now()
+            key_version = $7, updated_by = $8, updated_at = now(),
+            value_set_at = now()
         WHERE workspace_id = $1 AND id = $2
         RETURNING name
         "#,
@@ -232,15 +250,16 @@ pub async fn delete(
 ) -> sqlx::Result<Option<String>> {
     let mut tx = pool.begin().await?;
 
-    let deleted: Option<(String, Option<Uuid>)> = sqlx::query_as(
-        "DELETE FROM secrets WHERE workspace_id = $1 AND id = $2 RETURNING name, repository_id",
+    let deleted: Option<(String, Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
+        "DELETE FROM secrets WHERE workspace_id = $1 AND id = $2 \
+         RETURNING name, repository_id, environment_id",
     )
     .bind(workspace_id)
     .bind(secret_id)
     .fetch_optional(&mut *tx)
     .await?;
 
-    let Some((name, repository_id)) = deleted else {
+    let Some((name, repository_id, environment_id)) = deleted else {
         return Ok(None);
     };
 
@@ -256,8 +275,9 @@ pub async fn delete(
     .bind(secret_id)
     .bind(serde_json::json!({
         "name": name,
-        "scope": if repository_id.is_some() { "repository" } else { "workspace" },
+        "scope": scope_label(repository_id, environment_id),
         "repositoryId": repository_id,
+        "environmentId": environment_id,
     }))
     .bind(request_id)
     .execute(&mut *tx)
@@ -284,9 +304,10 @@ pub async fn find_meta(
 /// Validated filters for the catalog list. Every string field is
 /// allow-listed or pre-escaped by the handler — never raw input.
 pub struct CatalogFilter {
-    /// Pre-validated: `workspace` | `repository`.
+    /// Pre-validated: `workspace` | `repository` | `environment`.
     pub scope: Option<String>,
     pub repository_id: Option<Uuid>,
+    pub environment_id: Option<Uuid>,
     /// Pre-escaped ILIKE pattern matched against name AND description.
     pub search_pattern: Option<String>,
     pub cursor: Option<(DateTime<Utc>, Uuid)>,
@@ -308,19 +329,23 @@ pub async fn list_catalog(
         {META_SELECT}
         WHERE s.workspace_id = $1
           AND ($2::text IS NULL
-               OR ($2 = 'workspace'  AND s.repository_id IS NULL)
-               OR ($2 = 'repository' AND s.repository_id IS NOT NULL))
+               OR ($2 = 'workspace'   AND s.repository_id IS NULL
+                                      AND s.environment_id IS NULL)
+               OR ($2 = 'repository'  AND s.repository_id IS NOT NULL)
+               OR ($2 = 'environment' AND s.environment_id IS NOT NULL))
           AND ($3::uuid IS NULL OR s.repository_id = $3)
-          AND ($4::text IS NULL OR s.name ILIKE $4 ESCAPE '\'
-                                OR s.description ILIKE $4 ESCAPE '\')
-          AND ($5::timestamptz IS NULL OR (s.created_at, s.id) < ($5, $6))
+          AND ($4::uuid IS NULL OR s.environment_id = $4)
+          AND ($5::text IS NULL OR s.name ILIKE $5 ESCAPE '\'
+                                OR s.description ILIKE $5 ESCAPE '\')
+          AND ($6::timestamptz IS NULL OR (s.created_at, s.id) < ($6, $7))
         ORDER BY s.created_at DESC, s.id DESC
-        LIMIT $7
+        LIMIT $8
         "#,
     ))
     .bind(workspace_id)
     .bind(&filter.scope)
     .bind(filter.repository_id)
+    .bind(filter.environment_id)
     .bind(&filter.search_pattern)
     .bind(cursor_at)
     .bind(cursor_id)
@@ -335,29 +360,39 @@ pub struct SecretsSummary {
     pub total: i64,
     pub workspace_scoped: i64,
     pub repository_scoped: i64,
+    pub environment_scoped: i64,
     pub used_last_30d: i64,
     pub never_used: i64,
     pub created_last_30d: i64,
     pub distinct_repositories: i64,
     pub total_injections: i64,
+    /// Values not rotated (created or replaced) within the stale window.
+    pub stale: i64,
 }
+
+/// Days after which an unrotated value counts as stale in the summary.
+pub const SECRET_STALE_DAYS: i64 = 90;
 
 pub async fn summary(pool: &PgPool, workspace_id: Uuid) -> sqlx::Result<SecretsSummary> {
     sqlx::query_as::<_, SecretsSummary>(
         r#"
         SELECT COUNT(*)                                                  AS total,
-               COUNT(*) FILTER (WHERE repository_id IS NULL)             AS workspace_scoped,
+               COUNT(*) FILTER (WHERE repository_id IS NULL
+                                  AND environment_id IS NULL)            AS workspace_scoped,
                COUNT(*) FILTER (WHERE repository_id IS NOT NULL)         AS repository_scoped,
+               COUNT(*) FILTER (WHERE environment_id IS NOT NULL)        AS environment_scoped,
                COUNT(*) FILTER (WHERE last_used_at > now() - interval '30 days') AS used_last_30d,
                COUNT(*) FILTER (WHERE last_used_at IS NULL)              AS never_used,
                COUNT(*) FILTER (WHERE created_at > now() - interval '30 days')   AS created_last_30d,
                COUNT(DISTINCT repository_id) FILTER (WHERE repository_id IS NOT NULL) AS distinct_repositories,
-               COALESCE(SUM(usage_count), 0)::bigint                     AS total_injections
+               COALESCE(SUM(usage_count), 0)::bigint                     AS total_injections,
+               COUNT(*) FILTER (WHERE value_set_at < now() - make_interval(days => $2::int)) AS stale
         FROM secrets
         WHERE workspace_id = $1
         "#,
     )
     .bind(workspace_id)
+    .bind(SECRET_STALE_DAYS as i32)
     .fetch_one(pool)
     .await
 }
@@ -386,13 +421,16 @@ impl SecretCipherRow {
     }
 }
 
-/// All secrets applicable to one repository's pipelines, with precedence
-/// baked into SQL: a repository-scoped secret shadows a workspace-scoped
-/// secret of the same name (DISTINCT ON keeps the repo row first).
+/// All secrets applicable to one job's dispatch, with precedence baked into
+/// SQL: environment > repository > workspace for same-named secrets
+/// (DISTINCT ON keeps the highest-precedence row first). Environment-scoped
+/// rows only participate when the job's plan named an environment that
+/// resolved to `environment_id`.
 pub async fn resolve_for_dispatch(
     pool: &PgPool,
     workspace_id: Uuid,
     repository_id: Uuid,
+    environment_id: Option<Uuid>,
 ) -> sqlx::Result<Vec<SecretCipherRow>> {
     sqlx::query_as::<_, SecretCipherRow>(
         r#"
@@ -400,33 +438,43 @@ pub async fn resolve_for_dispatch(
                id, name, ciphertext, nonce, wrapped_dek, dek_nonce, key_version
         FROM secrets
         WHERE workspace_id = $1
-          AND (repository_id IS NULL OR repository_id = $2)
-        ORDER BY name, (repository_id IS NOT NULL) DESC
+          AND ((repository_id IS NULL AND environment_id IS NULL)
+               OR repository_id = $2
+               OR ($3::uuid IS NOT NULL AND environment_id = $3))
+        ORDER BY name,
+                 (environment_id IS NOT NULL) DESC,
+                 (repository_id IS NOT NULL) DESC
         "#,
     )
     .bind(workspace_id)
     .bind(repository_id)
+    .bind(environment_id)
     .fetch_all(pool)
     .await
 }
 
-/// Whether any secret applies to this repository — the fail-closed check
+/// Whether any secret applies to this dispatch — the fail-closed check
 /// when the master key is not configured (rows exist that dispatch cannot
 /// decrypt).
 pub async fn any_for_dispatch(
     pool: &PgPool,
     workspace_id: Uuid,
     repository_id: Uuid,
+    environment_id: Option<Uuid>,
 ) -> sqlx::Result<bool> {
     let row: Option<(i32,)> = sqlx::query_as(
         r#"
         SELECT 1 FROM secrets
-        WHERE workspace_id = $1 AND (repository_id IS NULL OR repository_id = $2)
+        WHERE workspace_id = $1
+          AND ((repository_id IS NULL AND environment_id IS NULL)
+               OR repository_id = $2
+               OR ($3::uuid IS NOT NULL AND environment_id = $3))
         LIMIT 1
         "#,
     )
     .bind(workspace_id)
     .bind(repository_id)
+    .bind(environment_id)
     .fetch_optional(pool)
     .await?;
     Ok(row.is_some())

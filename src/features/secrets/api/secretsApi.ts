@@ -11,6 +11,7 @@ export interface SecretsCatalogFilters {
   q?: string;
   scope?: string;
   repositoryId?: string;
+  environmentId?: string;
   cursor?: string;
 }
 
@@ -56,7 +57,9 @@ export interface CreateSecretInput {
   /** Sent once over TLS; the server stores only ciphertext. */
   value: string;
   description?: string;
+  /** Mutually exclusive with environmentId. */
   repositoryId?: string;
+  environmentId?: string;
 }
 
 export async function createSecret(

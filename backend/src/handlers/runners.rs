@@ -127,7 +127,10 @@ pub async fn list(
         .map(RunnerResponse::from)
         .collect();
 
-    let hosted_available = state.runner_provisioner.is_some();
+    let hosted_available = match &state.runner_provisioner {
+        Some(provisioner) => provisioner.available().await,
+        None => false,
+    };
     // Remaining hosted-runner quota (min of the per-workspace and global
     // headroom); null when this deployment has no provisioner.
     let hosted_remaining = match (hosted_available, state.config.runner_provisioner.as_ref()) {
@@ -312,6 +315,10 @@ pub async fn create_hosted(
             return Err(AppError::Conflict(
                 "hosted runners are not available on this deployment",
             ));
+        }
+        Err(runner_provision_flow::HostedDenied::DockerDown) => {
+            // Static category the wizard maps to remediation copy.
+            return Err(AppError::Conflict("hosted_runner_unavailable"));
         }
         Err(runner_provision_flow::HostedDenied::NameTaken) => {
             return Err(AppError::Conflict("a runner with this name already exists"));

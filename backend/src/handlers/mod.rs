@@ -3,6 +3,7 @@ pub mod auth;
 pub mod browser_ws;
 pub mod dashboard;
 pub mod dashboard_ws;
+pub mod environments;
 pub mod github_installations;
 pub mod github_webhooks;
 pub mod health;

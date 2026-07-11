@@ -42,11 +42,17 @@ async fn main() -> anyhow::Result<()> {
         .context("failed to run database migrations")?;
 
     let mut state = AppState::new(pool.clone(), config.clone())?;
-    // Optional hosted-runner provisioner: probes Docker once; unavailable
-    // (None) degrades to a clean 409 on the hosted-runner endpoint.
-    state.runner_provisioner =
-        services::runner_provisioner::RunnerProvisioner::init(config.runner_provisioner.clone())
-            .await;
+    // Optional hosted-runner provisioner. Constructed whenever configured;
+    // its reconnect loop owns the Docker connection, so a daemon outage (at
+    // boot or later) degrades to a clean 409 on the hosted-runner endpoint
+    // and recovers automatically — never a permanently disabled feature.
+    state.runner_provisioner = config
+        .runner_provisioner
+        .clone()
+        .map(services::runner_provisioner::RunnerProvisioner::new);
+    if let Some(provisioner) = state.runner_provisioner.clone() {
+        tokio::spawn(provisioner.run_reconnect_loop());
+    }
 
     // Boot-time execution recovery: no runner can be connected yet, so
     // anything marked online or in progress is a leftover from the previous

@@ -8,11 +8,17 @@
 //! the job-payload signing key is NOT injected — it is delivered over the
 //! authenticated WebSocket in hello_ack. Tokens are never logged.
 //!
-//! Docker access: `connect_with_defaults` honors DOCKER_HOST /
-//! DOCKER_TLS_VERIFY / DOCKER_CERT_PATH, same as the runner crate. Note the
-//! trust boundary: whoever controls that Docker daemon controls the host —
-//! only point this at the daemon the control plane itself runs on, or a
-//! TLS-secured one (never an unauthenticated tcp://2375).
+//! Docker access: an ordered candidate probe — the explicit
+//! RUNNER_PROVISIONER_DOCKER_SOCKET endpoint, then DOCKER_HOST (+
+//! DOCKER_TLS_VERIFY / DOCKER_CERT_PATH via bollard's standard resolution,
+//! same as the runner crate), then the well-known local socket locations
+//! including rootless Docker's. The connection is held behind a reconnect
+//! loop: Docker being down never disables the feature for the process
+//! lifetime, it just makes hosted runners unavailable until the daemon is
+//! reachable again. Note the trust boundary: whoever controls that Docker
+//! daemon controls the host — only point this at the daemon the control
+//! plane itself runs on, or a TLS-secured one (never an unauthenticated
+//! tcp://2375).
 
 use anyhow::Context;
 use bollard::Docker;
@@ -31,7 +37,13 @@ use crate::config::RunnerProvisionerConfig;
 use crate::services::runner_profiles::ResourceLimits;
 
 pub struct RunnerProvisioner {
-    docker: Docker,
+    /// Live daemon handle; `None` while disconnected. Populated (and
+    /// re-populated after an outage) by [`Self::run_reconnect_loop`].
+    docker: tokio::sync::RwLock<Option<Docker>>,
+    /// Network runner containers actually join: `cfg.network` when it exists
+    /// or could be created on the current connection, `bridge` as the
+    /// per-connection fallback (re-evaluated on every reconnect).
+    network: tokio::sync::RwLock<String>,
     cfg: RunnerProvisionerConfig,
 }
 
@@ -65,6 +77,9 @@ pub struct ProvisionParams<'a> {
 /// users; the Docker detail stays in tracing logs only.
 #[derive(Debug)]
 pub enum ProvisionError {
+    /// The provisioner currently has no live Docker connection (the
+    /// reconnect loop will restore it once the daemon is reachable).
+    DockerUnavailable,
     ImagePull(bollard::errors::Error),
     ContainerCreate(bollard::errors::Error),
     ContainerStart(bollard::errors::Error),
@@ -73,15 +88,21 @@ pub enum ProvisionError {
 impl ProvisionError {
     pub fn category(&self) -> &'static str {
         match self {
+            Self::DockerUnavailable => "docker_unavailable",
             Self::ImagePull(_) => "image_pull_failed",
             Self::ContainerCreate(_) => "container_create_failed",
             Self::ContainerStart(_) => "container_start_failed",
         }
     }
 
-    pub fn detail(&self) -> &bollard::errors::Error {
+    /// Human-readable detail for tracing logs only — never persisted or
+    /// sent to clients.
+    pub fn detail(&self) -> String {
         match self {
-            Self::ImagePull(e) | Self::ContainerCreate(e) | Self::ContainerStart(e) => e,
+            Self::DockerUnavailable => "no live docker connection".to_string(),
+            Self::ImagePull(e) | Self::ContainerCreate(e) | Self::ContainerStart(e) => {
+                format!("{e:?}")
+            }
         }
     }
 }
@@ -94,28 +115,222 @@ fn volume_name(runner_id: Uuid) -> String {
     format!("overup-runner-{runner_id}-data")
 }
 
-impl RunnerProvisioner {
-    /// Connect and ping at startup. Degrades cleanly (like R2): when Docker
-    /// is unreachable the feature is simply unavailable, never a crash.
-    pub async fn init(cfg: Option<RunnerProvisionerConfig>) -> Option<std::sync::Arc<Self>> {
-        let mut cfg = cfg?;
-        let docker = match Docker::connect_with_defaults() {
-            Ok(docker) => docker,
-            Err(error) => {
-                tracing::warn!(error = ?error, "hosted-runner provisioner disabled: docker connection failed");
-                return None;
-            }
-        };
-        if let Err(error) = docker.ping().await {
-            tracing::warn!(error = ?error, "hosted-runner provisioner disabled: docker unreachable");
-            return None;
-        }
+/// How long a disconnected provisioner waits between connection attempts.
+const RECONNECT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+/// How often a connected provisioner pings the daemon to detect an outage.
+const HEALTH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+/// Connect timeout (seconds) for explicit socket/pipe endpoints — matches
+/// bollard's own default.
+const CONNECT_TIMEOUT_SECS: u64 = 120;
 
-        // Preflight the connect-back URL. Misconfiguration here is otherwise
-        // silent: every hosted runner provisions fine but never connects.
-        // Warnings only — the server-side view can't fully prove what a
-        // container will see, so this is never fatal.
-        let url = &cfg.overup_url;
+/// Connect + ping one candidate; a handle that cannot answer a ping is as
+/// good as no handle.
+async fn ping_checked(docker: Docker) -> Result<Docker, String> {
+    match docker.ping().await {
+        Ok(_) => Ok(docker),
+        Err(error) => Err(format!("connected but ping failed ({error})")),
+    }
+}
+
+/// bollard's standard resolution: DOCKER_HOST (+ DOCKER_TLS_VERIFY /
+/// DOCKER_CERT_PATH) or the platform default socket/pipe.
+async fn connect_defaults() -> Result<Docker, String> {
+    match Docker::connect_with_defaults() {
+        Ok(docker) => ping_checked(docker).await,
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+/// The explicit RUNNER_PROVISIONER_DOCKER_SOCKET endpoint: a unix socket
+/// path (optionally unix://-prefixed) or, on Windows dev machines, a named
+/// pipe. Remote TCP daemons must go through DOCKER_HOST so TLS handling
+/// stays on bollard's audited path.
+async fn connect_explicit(raw: &str) -> Result<Docker, String> {
+    #[cfg(unix)]
+    return match Docker::connect_with_unix(
+        raw.strip_prefix("unix://").unwrap_or(raw),
+        CONNECT_TIMEOUT_SECS,
+        bollard::API_DEFAULT_VERSION,
+    ) {
+        Ok(docker) => ping_checked(docker).await,
+        Err(error) => Err(error.to_string()),
+    };
+    #[cfg(windows)]
+    return match Docker::connect_with_named_pipe(
+        raw.strip_prefix("npipe://").unwrap_or(raw),
+        CONNECT_TIMEOUT_SECS,
+        bollard::API_DEFAULT_VERSION,
+    ) {
+        Ok(docker) => ping_checked(docker).await,
+        Err(error) => Err(error.to_string()),
+    };
+}
+
+/// Well-known local socket locations, probed when neither the explicit
+/// endpoint nor DOCKER_HOST produced a connection: the standard daemon
+/// sockets, then rootless Docker's per-user runtime sockets.
+#[cfg(unix)]
+fn unix_socket_candidates() -> Vec<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let mut paths = vec![
+        PathBuf::from("/var/run/docker.sock"),
+        PathBuf::from("/run/docker.sock"),
+    ];
+    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR")
+        && !dir.is_empty()
+    {
+        paths.push(PathBuf::from(dir).join("docker.sock"));
+    }
+    // Rootless Docker under a systemd service that doesn't export
+    // XDG_RUNTIME_DIR: derive the runtime dir from our own uid.
+    if let Ok(meta) = std::fs::metadata("/proc/self") {
+        use std::os::unix::fs::MetadataExt;
+        paths.push(PathBuf::from(format!("/run/user/{}/docker.sock", meta.uid())));
+    }
+    paths.dedup();
+    paths
+}
+
+/// Try every candidate in order; `Ok((handle, via))` on the first ping
+/// success, `Err(attempts)` with one line per endpoint tried otherwise.
+async fn try_connect(cfg: &RunnerProvisionerConfig) -> Result<(Docker, String), Vec<String>> {
+    let mut attempts: Vec<String> = Vec::new();
+
+    if let Some(raw) = cfg.docker_socket.as_deref() {
+        let label = format!("RUNNER_PROVISIONER_DOCKER_SOCKET={raw}");
+        match connect_explicit(raw).await {
+            Ok(docker) => return Ok((docker, label)),
+            Err(reason) => attempts.push(format!("{label}: {reason}")),
+        }
+    }
+
+    if let Ok(host) = std::env::var("DOCKER_HOST")
+        && !host.is_empty()
+    {
+        let label = format!("DOCKER_HOST={host}");
+        match connect_defaults().await {
+            Ok(docker) => return Ok((docker, label)),
+            Err(reason) => attempts.push(format!("{label}: {reason}")),
+        }
+    }
+
+    #[cfg(unix)]
+    for path in unix_socket_candidates() {
+        let label = path.display().to_string();
+        if !path.exists() {
+            attempts.push(format!("{label}: socket not present"));
+            continue;
+        }
+        match connect_explicit(&label).await {
+            Ok(docker) => return Ok((docker, label)),
+            Err(reason) => attempts.push(format!("{label}: {reason}")),
+        }
+    }
+
+    // Windows dev fallback: the platform default named pipe.
+    #[cfg(windows)]
+    {
+        let label = "local Docker named pipe".to_string();
+        match connect_defaults().await {
+            Ok(docker) => return Ok((docker, label)),
+            Err(reason) => attempts.push(format!("{label}: {reason}")),
+        }
+    }
+
+    Err(attempts)
+}
+
+impl RunnerProvisioner {
+    /// Construct without connecting: liveness is owned by
+    /// [`Self::run_reconnect_loop`], so a Docker outage at boot (or any time
+    /// after) degrades cleanly to "hosted runners unavailable" instead of
+    /// disabling the feature for the process lifetime.
+    pub fn new(cfg: RunnerProvisionerConfig) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            docker: tokio::sync::RwLock::new(None),
+            network: tokio::sync::RwLock::new(cfg.network.clone()),
+            cfg,
+        })
+    }
+
+    /// Whether a live Docker connection currently exists — the signal behind
+    /// `hostedAvailable` and every janitor/auto-provision gate.
+    pub async fn available(&self) -> bool {
+        self.docker.read().await.is_some()
+    }
+
+    /// Clone out the current handle (bollard's `Docker` is a cheap clone
+    /// around a shared transport).
+    async fn handle(&self) -> Option<Docker> {
+        self.docker.read().await.clone()
+    }
+
+    /// Owns the connection lifecycle: while disconnected, probe the
+    /// candidates every [`RECONNECT_INTERVAL`]; while connected, ping every
+    /// [`HEALTH_INTERVAL`] and drop the handle on failure. Logging is
+    /// edge-triggered — one warn per outage, one info per recovery.
+    pub async fn run_reconnect_loop(self: std::sync::Arc<Self>) {
+        let mut warned = false;
+        loop {
+            if let Some(docker) = self.handle().await {
+                tokio::time::sleep(HEALTH_INTERVAL).await;
+                if let Err(error) = docker.ping().await {
+                    *self.docker.write().await = None;
+                    tracing::warn!(
+                        error = %error,
+                        "hosted-runner provisioner: docker connection lost — reconnecting"
+                    );
+                }
+                continue;
+            }
+
+            match try_connect(&self.cfg).await {
+                Ok((docker, via)) => {
+                    // Ensure the dedicated runner network exists (a
+                    // user-defined bridge isolates runner containers from
+                    // unrelated ones on the default bridge). Failure degrades
+                    // to the default bridge — it never disables the feature.
+                    let mut network = self.cfg.network.clone();
+                    if network != "bridge" && !Self::ensure_network(&docker, &network).await {
+                        network = "bridge".to_string();
+                    }
+                    *self.network.write().await = network.clone();
+                    *self.docker.write().await = Some(docker);
+                    warned = false;
+                    tracing::info!(
+                        via = %via,
+                        image = %self.cfg.image,
+                        network = %network,
+                        "hosted-runner provisioner connected"
+                    );
+                    self.preflight_overup_url().await;
+                }
+                Err(attempts) => {
+                    if !warned {
+                        warned = true;
+                        tracing::warn!(
+                            attempts = %attempts.join("; "),
+                            "hosted-runner provisioner: docker unreachable — retrying every 30s. \
+                             Remediation: ensure the backend user is in the `docker` group; if \
+                             the backend runs in a container, mount /var/run/docker.sock into \
+                             it; for rootless Docker set \
+                             RUNNER_PROVISIONER_DOCKER_SOCKET=$XDG_RUNTIME_DIR/docker.sock; a \
+                             remote daemon needs DOCKER_HOST (+ DOCKER_TLS_VERIFY / \
+                             DOCKER_CERT_PATH)"
+                        );
+                    }
+                    tokio::time::sleep(RECONNECT_INTERVAL).await;
+                }
+            }
+        }
+    }
+
+    /// Preflight the connect-back URL after every successful (re)connect.
+    /// Misconfiguration here is otherwise silent: every hosted runner
+    /// provisions fine but never connects. Warnings only — the server-side
+    /// view can't fully prove what a container will see, so never fatal.
+    async fn preflight_overup_url(&self) {
+        let url = &self.cfg.overup_url;
         if url.contains("localhost") || url.contains("127.0.0.1") || url.contains("[::1]") {
             tracing::warn!(
                 overup_url = %url,
@@ -123,39 +338,28 @@ impl RunnerProvisioner {
                  the container itself, not this server; hosted runners will provision but never \
                  connect (use the server's LAN/public URL or host.docker.internal)"
             );
-        } else {
-            let probe = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(5))
-                .build()
-                .ok();
-            if let Some(client) = probe {
-                match client.get(format!("{url}/healthz")).send().await {
-                    Ok(resp) if resp.status().is_success() => {}
-                    Ok(resp) => tracing::warn!(
-                        overup_url = %url,
-                        status = %resp.status(),
-                        "RUNNER_PROVISIONER_OVERUP_URL healthz probe returned a non-success status"
-                    ),
-                    Err(error) => tracing::warn!(
-                        overup_url = %url,
-                        error = %error,
-                        "RUNNER_PROVISIONER_OVERUP_URL healthz probe failed — hosted runner \
-                         containers may not be able to reach the control plane on this URL"
-                    ),
-                }
+            return;
+        }
+        let probe = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .ok();
+        if let Some(client) = probe {
+            match client.get(format!("{url}/healthz")).send().await {
+                Ok(resp) if resp.status().is_success() => {}
+                Ok(resp) => tracing::warn!(
+                    overup_url = %url,
+                    status = %resp.status(),
+                    "RUNNER_PROVISIONER_OVERUP_URL healthz probe returned a non-success status"
+                ),
+                Err(error) => tracing::warn!(
+                    overup_url = %url,
+                    error = %error,
+                    "RUNNER_PROVISIONER_OVERUP_URL healthz probe failed — hosted runner \
+                     containers may not be able to reach the control plane on this URL"
+                ),
             }
         }
-
-        // Ensure the dedicated runner network exists (a user-defined bridge
-        // isolates runner containers from unrelated ones on the default
-        // bridge). Failure degrades to the default bridge with a warning —
-        // it never disables the whole feature.
-        if cfg.network != "bridge" && !Self::ensure_network(&docker, &cfg.network).await {
-            cfg.network = "bridge".to_string();
-        }
-
-        tracing::info!(image = %cfg.image, network = %cfg.network, "hosted-runner provisioner ready");
-        Some(std::sync::Arc::new(Self { docker, cfg }))
     }
 
     /// Make sure the named runner network exists. Returns `false` when it
@@ -205,7 +409,10 @@ impl RunnerProvisioner {
     /// finish the potentially minutes-long pull BEFORE minting any bootstrap
     /// credential — no plaintext token ever waits on this.
     pub async fn ensure_image(&self) -> Result<(), ProvisionError> {
-        let mut pull = self.docker.create_image(
+        let Some(docker) = self.handle().await else {
+            return Err(ProvisionError::DockerUnavailable);
+        };
+        let mut pull = docker.create_image(
             Some(
                 CreateImageOptionsBuilder::default()
                     .from_image(&self.cfg.image)
@@ -223,6 +430,9 @@ impl RunnerProvisioner {
     /// Create and start one runner container. The image must already be
     /// present ([`Self::ensure_image`]). Returns the container id.
     pub async fn provision(&self, params: ProvisionParams<'_>) -> Result<String, ProvisionError> {
+        let Some(docker) = self.handle().await else {
+            return Err(ProvisionError::DockerUnavailable);
+        };
         let ProvisionParams {
             runner_id,
             workspace_id,
@@ -270,7 +480,7 @@ impl RunnerProvisioner {
             memory: Some(limits.memory_bytes),
             nano_cpus: Some(limits.nano_cpus),
             pids_limit: Some(limits.pids_limit),
-            network_mode: Some(self.cfg.network.clone()),
+            network_mode: Some(self.network.read().await.clone()),
             ..Default::default()
         };
         let body = ContainerCreateBody {
@@ -289,8 +499,7 @@ impl RunnerProvisioner {
             ..Default::default()
         };
 
-        let container = self
-            .docker
+        let container = docker
             .create_container(
                 Some(
                     CreateContainerOptionsBuilder::default()
@@ -302,14 +511,12 @@ impl RunnerProvisioner {
             .await
             .map_err(ProvisionError::ContainerCreate)?
             .id;
-        if let Err(error) = self
-            .docker
+        if let Err(error) = docker
             .start_container(&container, None::<StartContainerOptions>)
             .await
         {
             // Never leave a created-but-unstartable container behind.
-            let _ = self
-                .docker
+            let _ = docker
                 .remove_container(
                     &container,
                     Some(RemoveContainerOptionsBuilder::default().force(true).build()),
@@ -327,15 +534,16 @@ impl RunnerProvisioner {
     /// was ever returned). Container names are deterministic per runner, so
     /// any partially-created container/volume can still be found and removed.
     pub async fn cleanup_partial(&self, runner_id: Uuid) {
-        let _ = self
-            .docker
+        let Some(docker) = self.handle().await else {
+            return;
+        };
+        let _ = docker
             .remove_container(
                 &container_name(runner_id),
                 Some(RemoveContainerOptionsBuilder::default().force(true).build()),
             )
             .await;
-        let _ = self
-            .docker
+        let _ = docker
             .remove_volume(&volume_name(runner_id), None::<RemoveVolumeOptions>)
             .await;
     }
@@ -344,8 +552,10 @@ impl RunnerProvisioner {
     /// identified by the `overup.managed=true` label — the janitor's
     /// reconciliation input.
     pub async fn list_managed_containers(&self) -> anyhow::Result<Vec<ManagedContainer>> {
-        let containers = self
-            .docker
+        let Some(docker) = self.handle().await else {
+            anyhow::bail!("docker daemon unavailable");
+        };
+        let containers = docker
             .list_containers(Some(
                 ListContainersOptionsBuilder::default()
                     .all(true)
@@ -384,7 +594,10 @@ impl RunnerProvisioner {
     /// whose `overup.runner_id` label is missing/unparseable, where the
     /// data-volume name cannot be derived.
     pub async fn remove_container(&self, container_id: &str) -> anyhow::Result<()> {
-        self.docker
+        let Some(docker) = self.handle().await else {
+            anyhow::bail!("docker daemon unavailable");
+        };
+        docker
             .remove_container(
                 container_id,
                 Some(RemoveContainerOptionsBuilder::default().force(true).build()),
@@ -397,7 +610,10 @@ impl RunnerProvisioner {
     /// Restart a stopped managed container (daemon restarts / manual stops;
     /// crashes are already covered by the unless-stopped restart policy).
     pub async fn start_container(&self, container_id: &str) -> anyhow::Result<()> {
-        self.docker
+        let Some(docker) = self.handle().await else {
+            anyhow::bail!("docker daemon unavailable");
+        };
+        docker
             .start_container(container_id, None::<StartContainerOptions>)
             .await
             .context("starting managed runner container failed")?;
@@ -407,22 +623,23 @@ impl RunnerProvisioner {
     /// Best-effort teardown: stop (10 s grace), force-remove the container,
     /// then its data volume.
     pub async fn deprovision(&self, runner_id: Uuid, container_id: &str) -> anyhow::Result<()> {
-        let _ = self
-            .docker
+        let Some(docker) = self.handle().await else {
+            anyhow::bail!("docker daemon unavailable");
+        };
+        let _ = docker
             .stop_container(
                 container_id,
                 Some(StopContainerOptionsBuilder::default().t(10).build()),
             )
             .await;
-        self.docker
+        docker
             .remove_container(
                 container_id,
                 Some(RemoveContainerOptionsBuilder::default().force(true).build()),
             )
             .await
             .context("runner container removal failed")?;
-        if let Err(error) = self
-            .docker
+        if let Err(error) = docker
             .remove_volume(&volume_name(runner_id), None::<RemoveVolumeOptions>)
             .await
         {

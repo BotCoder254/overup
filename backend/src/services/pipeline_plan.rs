@@ -22,7 +22,7 @@ pub struct PlannedJob {
     pub name: Option<String>,
     pub runs_on: Vec<String>,
     pub needs: Vec<String>,
-    /// `{ image, env, steps: [{name, run, shell}], notices: [..] }`
+    /// `{ image, env, steps: [{name, run, shell}], environment, notices }`
     pub plan: serde_json::Value,
     pub position: i32,
 }
@@ -126,6 +126,10 @@ pub fn build_plans(raw_content: &str, default_image: &str) -> Result<Vec<Planned
                 "image": image,
                 "env": env,
                 "steps": steps,
+                // Name only — the scheduler resolves it to an environment
+                // (and its secrets) live at dispatch, so rotated values and
+                // renames apply to reruns automatically.
+                "environment": job.environment,
                 "notices": notices,
             }),
             position: job.position,
@@ -243,6 +247,47 @@ jobs:
         assert_eq!(test.needs, vec!["build".to_string()]);
         assert_eq!(test.plan["image"], "ubuntu:22.04");
         assert_eq!(test.plan["steps"][0]["shell"], "bash");
+    }
+
+    #[test]
+    fn environment_snapshots_into_plan() {
+        // GitHub's two forms: bare string and map-with-name.
+        let with_env = r#"
+on: push
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps: [{ run: echo deploy }]
+  stage:
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+      url: https://stage.example.com
+    steps: [{ run: echo stage }]
+  plain:
+    runs-on: ubuntu-latest
+    steps: [{ run: echo plain }]
+"#;
+        let plans = build_plans(with_env, "ubuntu:24.04").ok().unwrap();
+        assert_eq!(plans[0].plan["environment"], "production");
+        assert_eq!(plans[1].plan["environment"], "staging");
+        assert!(plans[2].plan["environment"].is_null());
+    }
+
+    #[test]
+    fn malformed_environment_is_a_warning_not_an_error() {
+        let malformed = r#"
+on: push
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: [not, a, string]
+    steps: [{ run: echo deploy }]
+"#;
+        // Still plans (warning severity), with no environment captured.
+        let plans = build_plans(malformed, "ubuntu:24.04").ok().unwrap();
+        assert!(plans[0].plan["environment"].is_null());
     }
 
     #[test]

@@ -7,10 +7,12 @@ GitHub-OAuth authentication subsystem, the **Repository + Workflow Management mo
 workspace with dependency graph), and the **Pipeline Execution subsystem** (event-driven
 scheduler, HMAC-signed runner WebSocket protocol, live log streaming, Cloudflare R2
 artifacts, a reference Docker runner in `runner/`, and the full Pipelines UI), and the
-**Secrets Management module** (envelope-encrypted write-only workspace/repository secrets,
-dispatch-time injection with unconditional log masking, dedicated `secrets.read`/
-`secrets.manage` RBAC, full catalog + detail UI). Matrix expansion and PR/cron triggers
-build on this foundation.
+**Secrets Management module** (envelope-encrypted write-only workspace/repository/
+environment secrets, dispatch-time injection with unconditional log masking, dedicated
+`secrets.read`/`secrets.manage` RBAC, full catalog + detail UI), and the **Environments
+module** (named deployment targets bound from workflow YAML `environment:`, acting as the
+highest-precedence secrets scope with `environments.manage` RBAC and a catalog + detail
+UI). Matrix expansion and PR/cron triggers build on this foundation.
 
 ## Architecture
 
@@ -127,9 +129,31 @@ DEK per secret, AES-256-GCM for the value, DEK wrapped by the 32-byte `SECRETS_M
 from env; the row UUID rides as AEAD associated data so a ciphertext moved onto another
 row fails authentication), and stored ciphertext-only in `secrets` — there is no read-back
 API, no UI reveal, and no plaintext escrow (key loss = re-enter values). Scopes: workspace
-(NULL `repository_id`) and repository; a repo secret shadows a workspace secret of the
-same name (`DISTINCT ON` in `db::secrets::resolve_for_dispatch`), and both override
-workflow-YAML env. Injection happens ONLY in `services/scheduler.rs::dispatch`: decrypt
+(NULL `repository_id`/`environment_id`), repository, and environment — mutually exclusive
+columns (CHECK `secrets_scope_exclusive`); same-named secrets shadow each other with
+precedence **environment > repository > workspace** (one three-tier `DISTINCT ON` in
+`db::secrets::resolve_for_dispatch`), and all override workflow-YAML env.
+
+**Environments** (`environments` table + `db/environments.rs` + `handlers/environments.rs`
++ `models/environment.rs`, migration `20260711300002`) are workspace-level metadata plus
+the highest-precedence secrets scope — no approval gates yet. A job binds one with the
+YAML `environment: <name>` key (string or `{name: …}` map, captured by
+`workflow_parse.rs` into `ParsedJob.environment` and snapshotted as the NAME ONLY into
+`plan.environment` by `pipeline_plan.rs`); the scheduler resolves the name
+case-insensitively at dispatch (`db::environments::find_by_name` rides the `lower(name)`
+unique index), so renames and rotated environment secrets apply to reruns automatically.
+An unknown name never fails the job — it dispatches without environment secrets, and
+pipeline creation appends a visible plan notice (deliberately no auto-create: YAML must
+not mint workspace resources past RBAC). Names are NFC-normalized and slug-safe
+(`^[A-Za-z0-9][A-Za-z0-9._-]*$`, ≤100 chars, case-insensitive uniqueness). Deleting an
+environment cascades to its secrets with the full audit trail in one transaction (one
+`secret.deleted` row per cascaded secret + `environment.deleted` with the count); the API
+returns `{deletedSecrets}` and the confirm dialog states the count. RBAC: reads ride
+`content.read`; mutations need `environments.manage` (owner/admin, backfilled by
+migration). Rotation visibility: `secrets.value_set_at` (migration `20260711300003`)
+moves only on create/value-replace — the summary exposes a `stale` count
+(`SECRET_STALE_DAYS` = 90, returned as `staleAfterDays`) surfaced as a KPI cell, a
+posture-card nudge, and "Rotated <relative>" columns. Injection happens ONLY in `services/scheduler.rs::dispatch`: decrypt
 into `Zeroizing` buffers, merge into the signed `JobPayload.env`, register every plaintext
 as a log mask (unconditionally — `looks_confidential` only gates YAML env) BEFORE
 `sign_job_payload`/`runner_hub.send`, then bump `last_used_at`/`usage_count` (warn-only).
@@ -188,6 +212,9 @@ overup/
 │   │   ├── secrets/            # write-only encrypted secrets: catalog + posture column,
 │   │   │                       #   create/replace dialog (value never echoed), detail
 │   │   │                       #   page with audit history
+│   │   ├── environments/       # deployment environments: catalog (summary strip +
+│   │   │                       #   URL-synced search + keyset infinite scroll), detail
+│   │   │                       #   page with scoped secrets + audit, create/edit dialog
 │   │   └── dashboard/          # dashboard page; runners/etc. slot in here
 │   ├── lib/                    # api (ky), cn, env, queryClient, slug
 │   └── types/                  # shared API types (Me, Workspace, Repository, Workflow,
@@ -204,7 +231,9 @@ overup/
     │                           #   webhook_deliveries), workflows(+workflow_jobs),
     │                           #   pipelines(+runners/pipeline_jobs/pipeline_events/
     │                           #   pipeline_log_chunks/artifacts/pipeline_counters),
-    │                           #   secrets (ciphertext-only + RBAC backfill)
+    │                           #   secrets (ciphertext-only + RBAC backfill),
+    │                           #   environments (+secrets.environment_id scope +
+    │                           #   RBAC backfill), secret value_set_at rotation clock
     └── src/
         ├── main.rs             # bootstrap: env, tracing, pool, migrate, orphan recovery,
         │                       #   scheduler spawn, janitor, serve
@@ -446,6 +475,21 @@ endpoint, region `auto`, presigned URLs; isolated in `services/r2.rs`), and the 
   UPPER_SNAKE_CASE with reserved platform prefixes; values are 8 B–32 KB so the log
   masker always covers them. Mutations need `secrets.manage` (owner/admin), metadata
   reads `secrets.read` — both backfilled into existing workspaces by migration
+- **Environments are a third, mutually exclusive secrets scope** (CHECK constraint;
+  precedence environment > repository > workspace collapsed in SQL). Environment secrets
+  ride the identical hardened dispatch path (Zeroizing decrypt, unconditional masking,
+  fail-closed `secrets_unavailable`). YAML `environment:` names resolve live and
+  case-insensitively at dispatch; unknown names skip env secrets with a plan-time notice
+  — never implicit creation (RBAC boundary) and never a job failure. Environment
+  mutations need `environments.manage` (owner/admin, migration-backfilled), write
+  `environment.created/updated/deleted` audit rows in-transaction, and a delete cascade
+  audits every removed secret. A secret create with an `environmentId` from another
+  workspace gets the same flat error as a bad `repositoryId` — no existence oracle
+- Hosted-runner Docker access is held behind a reconnect loop with candidate probing
+  (explicit socket env → DOCKER_HOST+TLS → well-known local/rootless sockets) — outages
+  degrade to `hosted_runner_unavailable` (static category) instead of disabling the
+  feature, quota rows are never created while Docker is down, and remediation hints live
+  in one edge-triggered warn (never per-request log spray)
 
 ## Running locally
 
@@ -488,8 +532,26 @@ RUNNER_LABELS=self-hosted,linux,x64,ubuntu-latest cargo run
 #   RUNNER_PROVISIONER=docker
 #   RUNNER_PROVISIONER_OVERUP_URL=<URL runner containers reach the API on>
 #   RUNNER_IMAGE=ghcr.io/botcoder254/overup-runner:latest   (default)
-#   RUNNER_PROVISIONER_DOCKER_HOST=<daemon for job execution; unset mounts
+#   RUNNER_PROVISIONER_DOCKER_SOCKET=<explicit unix socket / named pipe for
+#                                   the provisioner's OWN Docker connection;
+#                                   usually unset>
+#   RUNNER_PROVISIONER_DOCKER_HOST=<daemon for job execution INSIDE runner
+#                                   containers; unset mounts
 #                                   /var/run/docker.sock — root-equivalent>
+# The provisioner's own connection probes candidates in order:
+# RUNNER_PROVISIONER_DOCKER_SOCKET → DOCKER_HOST (+TLS vars) →
+# /var/run/docker.sock → /run/docker.sock → rootless
+# $XDG_RUNTIME_DIR/docker.sock and /run/user/<uid>/docker.sock. It is held
+# behind a reconnect loop (retry every 30 s while down, health-ping every
+# 60 s while up): Docker being unreachable — at boot or later — never
+# disables the feature for the process lifetime; hostedAvailable reflects
+# LIVE state and recovers without a restart. While down: hosted create
+# 409s with static category hosted_runner_unavailable, janitor Docker
+# reconciliation skips (DB-only purges still run), and workspace
+# auto-provision skips warn-only. The one edge-triggered warn lists every
+# endpoint tried + remediation (docker group membership; socket mount for a
+# containerized backend; RUNNER_PROVISIONER_DOCKER_SOCKET for rootless;
+# DOCKER_HOST for remote daemons).
 #   RUNNER_AUTO_PROVISION=true       auto-create one hosted runner ("hosted-1",
 #                                    labels self-hosted,linux,x64,ubuntu-latest)
 #                                    when a workspace is created — warn-only,

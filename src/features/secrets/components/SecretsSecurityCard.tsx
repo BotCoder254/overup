@@ -25,13 +25,21 @@ function PostureRow({
 interface SecretsSecurityCardProps {
   /** From the summary endpoint: whether SECRETS_MASTER_KEY is configured. */
   encryptionConfigured: boolean | undefined;
+  /** Values not rotated within the stale window, and that window in days. */
+  stale?: number;
+  staleAfterDays?: number;
 }
 
 /**
  * Security posture card: states plainly how the subsystem protects values.
- * Doubles as the warning surface when the deployment has no master key.
+ * Doubles as the warning surface when the deployment has no master key or
+ * when values are overdue for rotation.
  */
-export function SecretsSecurityCard({ encryptionConfigured }: SecretsSecurityCardProps) {
+export function SecretsSecurityCard({
+  encryptionConfigured,
+  stale,
+  staleAfterDays,
+}: SecretsSecurityCardProps) {
   return (
     <Card>
       <CardHeader>
@@ -45,6 +53,17 @@ export function SecretsSecurityCard({ encryptionConfigured }: SecretsSecurityCar
               <span className="font-medium">Encryption is not configured.</span> Set
               SECRETS_MASTER_KEY on the control plane to store secrets. Pipelines for
               repositories that already have secrets fail closed until the key returns.
+            </p>
+          </div>
+        )}
+        {typeof stale === 'number' && stale > 0 && (
+          <div className="mb-2 flex items-start gap-2 rounded border border-steel/20 bg-surface p-3">
+            <ShieldOff size={16} aria-hidden="true" className="mt-0.5 shrink-0 text-steel" />
+            <p className="text-xs text-charcoal">
+              <span className="font-medium">
+                {stale} secret{stale === 1 ? '' : 's'} not rotated in {staleAfterDays ?? 90}+ days.
+              </span>{' '}
+              Rotate by replacing the value — reruns pick up the new value automatically.
             </p>
           </div>
         )}

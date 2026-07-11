@@ -41,16 +41,34 @@ pub async fn create_pipeline(
     raw_content: &str,
     ctx: &TriggerContext<'_>,
 ) -> AppResult<Pipeline> {
-    let plans = pipeline_plan::build_plans(raw_content, &state.config.default_job_image).map_err(
-        |err| match err {
+    let mut plans = pipeline_plan::build_plans(raw_content, &state.config.default_job_image)
+        .map_err(|err| match err {
             PlanError::Invalid => {
                 AppError::Validation("workflow has validation errors and cannot run".into())
             }
             PlanError::NoRunnableJobs => {
                 AppError::Validation("workflow defines no runnable jobs".into())
             }
-        },
-    )?;
+        })?;
+
+    // Environments resolve live by name at dispatch (deliberately not
+    // failed or auto-created here): an unknown name simply means no
+    // environment secrets, which deserves a visible notice on the plan.
+    for plan in &mut plans {
+        let Some(name) = plan.plan["environment"].as_str().map(str::to_string) else {
+            continue;
+        };
+        if db::environments::find_by_name(&state.pool, repository.workspace_id, &name)
+            .await?
+            .is_none()
+            && let Some(notices) = plan.plan["notices"].as_array_mut()
+        {
+            notices.push(serde_json::json!(format!(
+                "environment `{name}` is not defined in this workspace; \
+                 environment secrets will not be injected"
+            )));
+        }
+    }
 
     let new = db::pipelines::NewPipeline {
         workspace_id: repository.workspace_id,

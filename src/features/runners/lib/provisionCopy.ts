@@ -16,9 +16,15 @@ export const PROVISION_FAILURE_COPY: Record<string, string> = {
     'The server could not prepare the runner credential. Try again.',
   container_missing:
     'The runner container disappeared from the Docker host. Revoke this runner and create a new one.',
+  docker_unavailable:
+    "The server lost its Docker connection while provisioning. It reconnects automatically — try again shortly.",
   revoked: 'This runner was revoked before it connected.',
 };
 
 /** Quota-refusal copy shared by the wizard pre-check and the 409 handler. */
 export const HOSTED_QUOTA_COPY =
   'Hosted runner limit reached for this deployment. Revoke an existing hosted runner to free a slot.';
+
+/** 409 `hosted_runner_unavailable`: Docker is down server-side right now. */
+export const HOSTED_UNAVAILABLE_COPY =
+  "The server's Docker daemon is unreachable right now, so hosted runners are temporarily unavailable. It reconnects automatically — try again shortly.";

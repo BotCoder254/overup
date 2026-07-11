@@ -33,7 +33,8 @@ export interface Runner {
   /**
    * Static failure category when background provisioning of a hosted runner
    * failed (image_pull_failed, container_create_failed,
-   * container_start_failed, provision_timeout); null otherwise.
+   * container_start_failed, provision_timeout, docker_unavailable); null
+   * otherwise.
    */
   provisionError: string | null;
   /** Sizing preset for hosted runners; null for self-hosted rows. */

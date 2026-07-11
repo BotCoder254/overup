@@ -1,17 +1,20 @@
 import { Search } from 'lucide-react';
 import { useRepositories } from '../../repositories/hooks/useRepositories';
+import { useEnvironmentsCatalog } from '../../environments/hooks/useEnvironments';
 
 /** UI-level filter state for the secrets catalog. */
 export interface SecretFilterState {
   q: string;
   scope: string;
   repositoryId: string;
+  environmentId: string;
 }
 
 export const EMPTY_SECRET_FILTERS: SecretFilterState = {
   q: '',
   scope: '',
   repositoryId: '',
+  environmentId: '',
 };
 
 const controlClasses =
@@ -30,6 +33,10 @@ interface SecretFiltersProps {
  */
 export function SecretFilters({ value, onChange }: SecretFiltersProps) {
   const repositories = useRepositories();
+  const environments = useEnvironmentsCatalog();
+  const environmentOptions = (environments.data?.pages ?? []).flatMap(
+    (page) => page.environments,
+  );
 
   return (
     <div className="mb-4 flex flex-wrap items-center gap-2">
@@ -60,11 +67,20 @@ export function SecretFilters({ value, onChange }: SecretFiltersProps) {
         id="secret-scope-filter"
         className={`${controlClasses} w-full sm:w-auto`}
         value={value.scope}
-        onChange={(event) => onChange({ scope: event.target.value })}
+        onChange={(event) =>
+          onChange({
+            scope: event.target.value,
+            // A stale target filter from another scope would silently
+            // exclude everything — clear the one that no longer applies.
+            ...(event.target.value !== 'repository' ? { repositoryId: '' } : {}),
+            ...(event.target.value !== 'environment' ? { environmentId: '' } : {}),
+          })
+        }
       >
         <option value="">All scopes</option>
         <option value="workspace">Workspace</option>
         <option value="repository">Repository</option>
+        <option value="environment">Environment</option>
       </select>
 
       <label className="sr-only" htmlFor="secret-repo-filter">
@@ -83,6 +99,27 @@ export function SecretFilters({ value, onChange }: SecretFiltersProps) {
           </option>
         ))}
       </select>
+
+      {value.scope === 'environment' && (
+        <>
+          <label className="sr-only" htmlFor="secret-environment-filter">
+            Filter by environment
+          </label>
+          <select
+            id="secret-environment-filter"
+            className={`${controlClasses} w-full sm:w-auto`}
+            value={value.environmentId}
+            onChange={(event) => onChange({ environmentId: event.target.value })}
+          >
+            <option value="">All environments</option>
+            {environmentOptions.map((environment) => (
+              <option key={environment.id} value={environment.id}>
+                {environment.name}
+              </option>
+            ))}
+          </select>
+        </>
+      )}
     </div>
   );
 }
