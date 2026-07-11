@@ -89,7 +89,7 @@ export function EnvironmentFormDialog({ open, onClose, editTarget }: Environment
           ? 'Workflow jobs bind to environments by name at dispatch time — renaming changes which jobs receive this environment’s secrets from the next run onward.'
           : 'A named secrets scope for deployments. Reference it from workflow YAML with `environment: <name>` — its secrets are injected with the highest precedence.'
       }
-      className="max-w-lg"
+      className="max-w-xl"
       footer={
         <>
           <Button size="sm" variant="ghost" onClick={close}>

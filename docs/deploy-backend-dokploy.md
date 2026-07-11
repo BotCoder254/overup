@@ -302,29 +302,37 @@ Dokploy: Application → **Advanced → Mounts** → *Add Mount* → type **Bind
 Host Path `/var/run/docker.sock`, Mount Path `/var/run/docker.sock`. (Raw Docker /
 Compose equivalents in §9.)
 
-**Step 2 — grant the socket's group to the container user.**
-The socket is `root:docker` mode `660`, so uid 10001 gets `permission denied` until it
-carries the socket's gid. Find the gid on the VPS:
+**Step 2 — grant uid 10001 access to the socket.**
+The socket is `root:docker` mode `660`, so after step 1 the warn changes to
+`connected but ping failed (… client error (Connect))` (or `permission denied`) until
+uid 10001 may open it. Dokploy's Application type has **no group-add field**, so the
+recommended, verified fix is a host-side ACL — run on the VPS:
 
 ```bash
-stat -c %g /var/run/docker.sock     # e.g. 988
+sudo apt-get install -y acl                      # if setfacl is missing
+sudo setfacl -m u:10001:rw /var/run/docker.sock
+getfacl /var/run/docker.sock                     # must show "user:10001:rw-"
 ```
 
-Then grant it, whichever fits how you run the container:
+No redeploy needed: within ~30 s the reconnect loop prints
+`hosted-runner provisioner connected` and the Runners wizard's hosted path goes live.
 
-- **Dokploy Compose service** (or any compose file): add to the backend service
-  ```yaml
-  group_add:
-    - "988"        # the gid from stat, as a string
-  ```
-- **Raw `docker run`**: add `--group-add $(stat -c %g /var/run/docker.sock)`.
-- **Dokploy Application type**: if your Dokploy version doesn't expose a
-  group-add/groups field in the advanced container settings, switch the backend to a
-  **Compose** service (§9.3) — same image, same env, plus the `group_add` above.
+The daemon recreates the socket on every start, which drops the ACL — persist it with
+a systemd drop-in (required, or a reboot silently re-breaks hosted runners):
 
-Redeploy and watch the runtime log: within ~30 s the reconnect loop prints
-`hosted-runner provisioner connected` and the Runners wizard's hosted path goes live —
-no backend restart needed beyond the redeploy.
+```bash
+sudo mkdir -p /etc/systemd/system/docker.service.d
+sudo tee /etc/systemd/system/docker.service.d/overup-socket-acl.conf <<'EOF'
+[Service]
+ExecStartPost=/usr/bin/setfacl -m u:10001:rw /var/run/docker.sock
+EOF
+sudo systemctl daemon-reload
+```
+
+The full staged runbook (symptom → stage → fix → verification) is
+[fix-hosted-runner-docker-socket.md](./fix-hosted-runner-docker-socket.md). If you
+run the backend with raw `docker run` or as a Compose service instead of an
+Application, `--group-add` / `group_add` do the same job natively — see §9.
 
 Security note: the Docker socket is **root-equivalent on the host**. That is inherent
 to hosted runners (the provisioner's documented trust boundary — it must control the
@@ -641,8 +649,9 @@ Most protections are already enforced **in the code** (see the security checklis
 | Health check keeps failing but logs look fine | Confirm `BIND_ADDR=0.0.0.0:8080` (binding `127.0.0.1` inside the container breaks both Traefik and the healthcheck). |
 | Login loop / cookie never set | `COOKIE_SECURE=true` while testing over plain HTTP (the `__Host-` cookie requires HTTPS), or `FRONTEND_URL` doesn't match the real frontend origin. |
 | GitHub redirects to an error after authorize | `OAUTH_REDIRECT_URL` ≠ the callback URL registered on the OAuth App (must match exactly, scheme included). |
-| `hosted-runner provisioner: docker unreachable — retrying every 30s` with `socket not present` on every path | The Docker socket isn't mounted into the backend container — Docker on the VPS host is invisible from inside it. Add the bind mount + `group_add` per [§5.2](#52-hosted-runners-giving-the-backend-docker-access) and redeploy. |
-| Same warn but the attempt line says `permission denied` | Socket is mounted but uid 10001 can't open it — the `group_add`/`--group-add` step of [§5.2](#52-hosted-runners-giving-the-backend-docker-access) is missing or uses the wrong gid (`stat -c %g /var/run/docker.sock`). |
+| `hosted-runner provisioner: docker unreachable — retrying every 30s` with `socket not present` on every path | The Docker socket isn't mounted into the backend container — Docker on the VPS host is invisible from inside it. Add the bind mount per [§5.2](#52-hosted-runners-giving-the-backend-docker-access) step 1 and redeploy. |
+| Same warn but the attempt line says `connected but ping failed (… client error (Connect))` or `permission denied` | Socket is mounted but uid 10001 can't open it — run the host ACL of [§5.2](#52-hosted-runners-giving-the-backend-docker-access) step 2 (`setfacl -m u:10001:rw /var/run/docker.sock` + the systemd drop-in). No redeploy needed; recovers within 30 s. |
+| Hosted runners worked, then broke after a reboot or `systemctl restart docker` | The socket ACL wasn't persisted — the daemon recreates the socket on start. Add the systemd drop-in from [§5.2](#52-hosted-runners-giving-the-backend-docker-access) step 2, then re-run the `setfacl` once. |
 | Webhook deliveries show `401` | `GITHUB_WEBHOOK_SECRET` doesn't match the secret configured on the GitHub App. |
 | Webhook deliveries show `404` | Wrong Webhook URL — it's `/webhooks/github`, not under `/api`. |
 | `database connection` errors at boot | Wrong internal hostname (use the Dokploy service's internal host, not `localhost`), or the app and Postgres aren't on the same Docker network. |

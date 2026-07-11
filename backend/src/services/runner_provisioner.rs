@@ -118,8 +118,11 @@ fn volume_name(runner_id: Uuid) -> String {
     format!("overup-runner-{runner_id}-data")
 }
 
-/// Drain one `create_image` pull to completion (idempotent: an image already
-/// present in the daemon resolves immediately).
+/// Drain one `create_image` pull to completion. NOT a no-op for images the
+/// daemon already holds: the daemon still consults the registry, so a denied
+/// or unreachable registry fails the pull even when a local copy of the tag
+/// exists — callers that can proceed on a local copy pair this with
+/// [`image_present`].
 async fn pull_image(docker: &Docker, image: &str) -> Result<(), bollard::errors::Error> {
     let mut pull = docker.create_image(
         Some(CreateImageOptionsBuilder::default().from_image(image).build()),
@@ -130,6 +133,12 @@ async fn pull_image(docker: &Docker, image: &str) -> Result<(), bollard::errors:
         progress?;
     }
     Ok(())
+}
+
+/// Whether the daemon already holds `image` locally (any error — including
+/// 404 — counts as absent).
+async fn image_present(docker: &Docker, image: &str) -> bool {
+    docker.inspect_image(image).await.is_ok()
 }
 
 /// How long a disconnected provisioner waits between connection attempts.
@@ -482,17 +491,29 @@ impl RunnerProvisioner {
         }
     }
 
-    /// Pull the runner image if missing (idempotent: a present image resolves
-    /// immediately). Kept separate from [`Self::provision`] so the caller can
-    /// finish the potentially minutes-long pull BEFORE minting any bootstrap
+    /// Make the runner image available: registry pull first (keeps `:latest`
+    /// fresh), falling back to a locally present copy of the tag when the
+    /// pull fails (denied/unreachable registry, air-gapped host, image built
+    /// directly on the daemon). Fails only when the image is absent locally
+    /// too. Kept separate from [`Self::provision`] so the caller can finish
+    /// the potentially minutes-long pull BEFORE minting any bootstrap
     /// credential — no plaintext token ever waits on this.
     pub async fn ensure_image(&self) -> Result<(), ProvisionError> {
         let Some(docker) = self.handle().await else {
             return Err(ProvisionError::DockerUnavailable);
         };
-        pull_image(&docker, &self.cfg.image)
-            .await
-            .map_err(ProvisionError::ImagePull)
+        match pull_image(&docker, &self.cfg.image).await {
+            Ok(()) => Ok(()),
+            Err(error) if image_present(&docker, &self.cfg.image).await => {
+                tracing::warn!(
+                    image = %self.cfg.image,
+                    error = ?error,
+                    "registry pull failed — using the locally present image"
+                );
+                Ok(())
+            }
+            Err(error) => Err(ProvisionError::ImagePull(error)),
+        }
     }
 
     /// Warm the daemon's image cache after a successful (re)connect: the
@@ -524,6 +545,14 @@ impl RunnerProvisioner {
                         image = %image,
                         elapsed_ms = started.elapsed().as_millis() as u64,
                         "pre-pulled image into the docker daemon"
+                    ),
+                    // A locally built/loaded copy satisfies the warm-up; the
+                    // failed registry check isn't worth a warning on every
+                    // reconnect.
+                    Err(error) if image_present(&docker, image).await => tracing::info!(
+                        image = %image,
+                        error = ?error,
+                        "image already present locally — registry pull failed, skipping"
                     ),
                     Err(error) => tracing::warn!(
                         image = %image,
