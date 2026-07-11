@@ -6,8 +6,11 @@ GitHub-OAuth authentication subsystem, the **Repository + Workflow Management mo
 (GitHub App integration, webhook-driven sync, workflow YAML parsing/validation, Monaco
 workspace with dependency graph), and the **Pipeline Execution subsystem** (event-driven
 scheduler, HMAC-signed runner WebSocket protocol, live log streaming, Cloudflare R2
-artifacts, a reference Docker runner in `runner/`, and the full Pipelines UI). Runner
-Management UI, secrets, matrix expansion, and PR/cron triggers build on this foundation.
+artifacts, a reference Docker runner in `runner/`, and the full Pipelines UI), and the
+**Secrets Management module** (envelope-encrypted write-only workspace/repository secrets,
+dispatch-time injection with unconditional log masking, dedicated `secrets.read`/
+`secrets.manage` RBAC, full catalog + detail UI). Matrix expansion and PR/cron triggers
+build on this foundation.
 
 ## Architecture
 
@@ -113,6 +116,35 @@ while disconnected). The xterm `LogViewer` adds regex + case-sensitive search to
 per-chunk timestamp display, and copy-to-clipboard; line numbers are deliberately out of
 scope (xterm has no gutter).
 
+**Secrets Management (encrypted credentials).** The control plane is the sole cryptographic
+authority; GitHub plays no part. Secrets are **write-only**: the plaintext leaves the
+browser once (TLS POST), is validated (`handlers/secrets.rs`: NFC-normalized
+UPPER_SNAKE_CASE names `^[A-Z_][A-Z0-9_]*$` ≤200 chars, reserved prefixes
+`OVERUP_/GITHUB_/RUNNER_/DOCKER_` + well-known env names rejected, values 8 B–32 KB —
+the 8-byte floor guarantees every value clears the log masker's `MIN_MASK_LEN`), wrapped
+in `zeroize::Zeroizing`, envelope-encrypted (`services/secrets_crypto.rs`: fresh 32-byte
+DEK per secret, AES-256-GCM for the value, DEK wrapped by the 32-byte `SECRETS_MASTER_KEY`
+from env; the row UUID rides as AEAD associated data so a ciphertext moved onto another
+row fails authentication), and stored ciphertext-only in `secrets` — there is no read-back
+API, no UI reveal, and no plaintext escrow (key loss = re-enter values). Scopes: workspace
+(NULL `repository_id`) and repository; a repo secret shadows a workspace secret of the
+same name (`DISTINCT ON` in `db::secrets::resolve_for_dispatch`), and both override
+workflow-YAML env. Injection happens ONLY in `services/scheduler.rs::dispatch`: decrypt
+into `Zeroizing` buffers, merge into the signed `JobPayload.env`, register every plaintext
+as a log mask (unconditionally — `looks_confidential` only gates YAML env) BEFORE
+`sign_job_payload`/`runner_hub.send`, then bump `last_used_at`/`usage_count` (warn-only).
+Secrets never touch `pipeline_jobs.plan` or `pipeline_events`, so reruns pick up rotated
+values automatically. Fail-closed: decrypt failure OR stored secrets with no master key →
+job fails with static `secrets_unavailable` (the `checkout_unavailable` pattern). RBAC:
+`secrets.read` (owner/admin/member — metadata, audit, usage only) and `secrets.manage`
+(owner/admin — create/replace/delete); the migration backfills both into existing
+workspaces' `role_permissions` since the Rust arrays only run at provisioning. Every
+mutation writes `secret.created/updated/deleted` audit rows (metadata never holds values)
+inside the mutating transaction. Frontend: `features/secrets/` mirrors the artifacts
+catalog (summary strip + URL-synced filters + keyset infinite scroll + detail page with
+audit history) plus a create/replace dialog that never echoes values and a security
+posture card that warns when `SECRETS_MASTER_KEY` is unset.
+
 **Dev networking.** CRA's `"proxy": "http://localhost:8080"` forwards XHR (`/api/*`,
 `/auth/logout`) to the backend. Full-page navigations are NOT proxied (CRA serves index.html
 for `Accept: text/html`), so the login redirect uses the absolute `REACT_APP_API_ORIGIN`.
@@ -153,6 +185,9 @@ overup/
 │   │   │                       #   usePipelineStream (WS), stores/logStore (zustand)
 │   │   ├── artifacts/          # workspace artifact catalog: summary strip, URL-synced
 │   │   │                       #   filters, keyset infinite scroll, provenance detail page
+│   │   ├── secrets/            # write-only encrypted secrets: catalog + posture column,
+│   │   │                       #   create/replace dialog (value never echoed), detail
+│   │   │                       #   page with audit history
 │   │   └── dashboard/          # dashboard page; runners/etc. slot in here
 │   ├── lib/                    # api (ky), cn, env, queryClient, slug
 │   └── types/                  # shared API types (Me, Workspace, Repository, Workflow,
@@ -168,7 +203,8 @@ overup/
     │                           #   github_installations, repositories(+branches/sync_runs/
     │                           #   webhook_deliveries), workflows(+workflow_jobs),
     │                           #   pipelines(+runners/pipeline_jobs/pipeline_events/
-    │                           #   pipeline_log_chunks/artifacts/pipeline_counters)
+    │                           #   pipeline_log_chunks/artifacts/pipeline_counters),
+    │                           #   secrets (ciphertext-only + RBAC backfill)
     └── src/
         ├── main.rs             # bootstrap: env, tracing, pool, migrate, orphan recovery,
         │                       #   scheduler spawn, janitor, serve
@@ -183,13 +219,14 @@ overup/
         │                       #   WS nests (/runner, /ws) live OUTSIDE the CSRF layer
         ├── handlers/           # health, auth, me, workspaces, github_installations,
         │                       #   repositories, workflows, github_webhooks, pipelines,
-        │                       #   runners, runner_ws, browser_ws
+        │                       #   runners, runner_ws, browser_ws, secrets
         ├── middleware/         # security_headers, csrf, auth (CurrentUser extractor)
         └── services/           # session, github, github_app (JWT + token cache),
                                 #   auth_flow, workspace, authz (RBAC), repo_sync,
                                 #   workflow_parse, pipeline_plan, pipeline_run (state
                                 #   machine), scheduler, log_hub (mask+cap+broadcast),
-                                #   runner_hub, r2 (presign + HeadObject)
+                                #   runner_hub, r2 (presign + HeadObject),
+                                #   secrets_crypto (AES-256-GCM envelope encryption)
 ```
 
 **Authenticated app shell.** Everything under `/w/:slug` renders inside one persistent
@@ -268,7 +305,9 @@ SQL), `oauth2` v5 (Authorization Code + PKCE), `reqwest` (rustls, redirects disa
 (sanitized error responses), `dotenvy`, `rand` (OS RNG session tokens), `sha2` + `hex`
 (token/state hashing), `base64`, `validator` (input validation as endpoints grow),
 `jsonwebtoken` (RS256 GitHub App JWTs), `hmac` (webhook + job-payload signatures —
-`verify_slice` is constant-time), `serde_yaml_ng` (maintained serde_yaml fork; workflow
+`verify_slice` is constant-time), `aes-gcm` (AES-256-GCM envelope encryption for the
+Secrets subsystem; DEKs and decrypted values ride in `zeroize::Zeroizing` buffers),
+`serde_yaml_ng` (maintained serde_yaml fork; workflow
 parsing under strict budgets), `axum` with the **`ws` feature** (runner + browser WebSocket
 upgrades), `dashmap` (RunnerHub connection registry + LogHub broadcast/mask maps),
 `futures-util` (WS stream splitting), `aws-sdk-s3` (Cloudflare R2 via its S3 API — custom
@@ -395,8 +434,18 @@ endpoint, region `auto`, presigned URLs; isolated in `services/r2.rs`), and the 
   (entries/uncompressed size/file count) are capped (1000 entries, 96 KB JSON, 1 TiB/1M
   ceilings) and dropped whole on any violation — the upload itself still succeeds
 - Pipeline conclusions and `sync_error`-style fields hold static category strings only
-  (`runner_lost`, `timeout`, `step_failed`, `checkout_unavailable`, ...) — never
-  upstream/runner text
+  (`runner_lost`, `timeout`, `step_failed`, `checkout_unavailable`,
+  `secrets_unavailable`, ...) — never upstream/runner text
+- **Secrets are write-only and envelope-encrypted**: AES-256-GCM under a fresh per-secret
+  DEK, DEK wrapped by `SECRETS_MASTER_KEY` (32 bytes, validated at startup), row UUID as
+  AEAD associated data; Postgres holds ciphertext only, there is no retrieval endpoint,
+  and audit metadata never contains a value. Decryption happens exclusively at scheduler
+  dispatch into `Zeroizing` buffers; every plaintext is registered as a log mask before
+  the signed payload is sent; decrypt failure or a missing master key fails the job
+  closed (`secrets_unavailable`). Names are NFC-normalized, allow-listed
+  UPPER_SNAKE_CASE with reserved platform prefixes; values are 8 B–32 KB so the log
+  masker always covers them. Mutations need `secrets.manage` (owner/admin), metadata
+  reads `secrets.read` — both backfilled into existing workspaces by migration
 
 ## Running locally
 
@@ -409,7 +458,11 @@ endpoint, region `auto`, presigned URLs; isolated in `services/r2.rs`), and the 
 # 2. Backend — copy backend/.env.example to backend/.env and fill in
 #    DATABASE_URL plus GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET (OAuth App
 #    with callback http://localhost:8080/auth/github/callback) plus
-#    RUNNER_JOB_SIGNING_KEY (openssl rand -hex 32). R2_* vars are optional —
+#    RUNNER_JOB_SIGNING_KEY (openssl rand -hex 32). SECRETS_MASTER_KEY
+#    (openssl rand -hex 32) enables the Secrets module — without it secret
+#    creation is denied and pipelines for repos WITH stored secrets fail
+#    closed (secrets_unavailable); losing it makes stored values permanently
+#    undecryptable (re-enter values to recover). R2_* vars are optional —
 #    without them pipelines run but artifact uploads are denied and logs
 #    stay in Postgres (no archival/pruning). Retention knobs:
 #    ARTIFACT_RETENTION_DAYS / ARTIFACT_PENDING_TTL_HOURS /

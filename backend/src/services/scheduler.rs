@@ -167,6 +167,26 @@ async fn assign_eligible(state: &AppState) -> anyhow::Result<()> {
                     pipeline_run::on_job_finished(state, &finished).await?;
                 }
             }
+            Ok(DispatchOutcome::SecretsUnavailable) => {
+                // Secrets exist for this repository but could not be
+                // decrypted (or no master key is configured). Running a
+                // deploy-style job without its credentials would look like
+                // a plausible failure while testing nothing — fail closed
+                // with a static category instead (checkout policy).
+                state.log_hub.clear_masks(claimed.id);
+                db::runners::release(&state.pool, runner.id).await?;
+                used.remove(&runner.id);
+                if let Some(finished) = db::pipeline_jobs::force_finish(
+                    &state.pool,
+                    claimed.id,
+                    "failure",
+                    Some("secrets_unavailable"),
+                )
+                .await?
+                {
+                    pipeline_run::on_job_finished(state, &finished).await?;
+                }
+            }
             Ok(DispatchOutcome::Unreachable) | Err(_) => {
                 // Couldn't build or deliver the payload: undo the claim.
                 state.log_hub.clear_masks(claimed.id);
@@ -203,6 +223,11 @@ enum DispatchOutcome {
     /// Checkout credentials exist for this repository but could not be
     /// minted; running without source would be worse than failing.
     CheckoutUnavailable,
+    /// Secrets exist for this repository but could not be decrypted
+    /// (tampered rows, or SECRETS_MASTER_KEY missing/rotated); running
+    /// without the credentials the workflow depends on would be worse
+    /// than failing.
+    SecretsUnavailable,
 }
 
 /// Build, sign, and send the job payload.
@@ -239,7 +264,7 @@ async fn dispatch(
         }
     };
 
-    let env: std::collections::BTreeMap<String, String> = job
+    let mut env: std::collections::BTreeMap<String, String> = job
         .plan
         .get("env")
         .and_then(|e| e.as_object())
@@ -249,6 +274,70 @@ async fn dispatch(
                 .collect()
         })
         .unwrap_or_default();
+
+    // Resolve this repository's secrets and merge them into the payload
+    // env. Precedence: plan env < workspace secret < repository secret
+    // (resolve_for_dispatch already collapsed the scopes). Plaintext is
+    // decrypted here and nowhere else — it never touches
+    // pipeline_jobs.plan or pipeline_events — and every value is
+    // registered as a log mask below BEFORE the payload leaves the
+    // process. Any decryption failure fails the job closed: silently
+    // running a deploy without its token would look like a plausible
+    // failure while testing nothing.
+    let mut injected_secret_ids: Vec<Uuid> = Vec::new();
+    let mut secret_values: Vec<String> = Vec::new();
+    match &state.secrets_crypto {
+        Some(crypto) => {
+            let rows = db::secrets::resolve_for_dispatch(
+                &state.pool,
+                pipeline.workspace_id,
+                pipeline.repository_id,
+            )
+            .await?;
+            for row in rows {
+                let plaintext = match crypto.decrypt(&row.encrypted(), row.id.as_bytes()) {
+                    Ok(plaintext) => plaintext,
+                    Err(_) => {
+                        // Never any keyed detail — ids only.
+                        tracing::warn!(
+                            job_id = %job.id,
+                            secret_id = %row.id,
+                            "secret decryption failed; failing the job closed"
+                        );
+                        return Ok(DispatchOutcome::SecretsUnavailable);
+                    }
+                };
+                let Ok(value) = String::from_utf8(plaintext.to_vec()) else {
+                    tracing::warn!(
+                        job_id = %job.id,
+                        secret_id = %row.id,
+                        "secret value is not valid UTF-8; failing the job closed"
+                    );
+                    return Ok(DispatchOutcome::SecretsUnavailable);
+                };
+                secret_values.push(value.clone());
+                env.insert(row.name, value);
+                injected_secret_ids.push(row.id);
+            }
+        }
+        None => {
+            // No master key configured. A repository with stored secrets
+            // must not run without them; one with none proceeds normally.
+            if db::secrets::any_for_dispatch(
+                &state.pool,
+                pipeline.workspace_id,
+                pipeline.repository_id,
+            )
+            .await?
+            {
+                tracing::warn!(
+                    job_id = %job.id,
+                    "secrets exist for this repository but SECRETS_MASTER_KEY is not configured; failing the job closed"
+                );
+                return Ok(DispatchOutcome::SecretsUnavailable);
+            }
+        }
+    }
 
     let steps: Vec<protocol::JobStep> = job
         .plan
@@ -273,7 +362,9 @@ async fn dispatch(
         .unwrap_or_default();
 
     // Everything that must never surface in logs is registered before the
-    // payload leaves the process.
+    // payload leaves the process. Managed secrets are masked
+    // unconditionally — the looks_confidential heuristic only applies to
+    // workflow-YAML env, whose keys are the author's choice.
     let mut masks: Vec<String> = checkout
         .as_ref()
         .map(|c: &protocol::Checkout| vec![c.token.clone()])
@@ -283,6 +374,7 @@ async fn dispatch(
             .filter(|(key, _)| crate::models::pipeline::looks_confidential(key))
             .map(|(_, value)| value.clone()),
     );
+    masks.extend(secret_values);
     state.log_hub.register_masks(job.id, masks);
 
     let now = Utc::now();
@@ -311,6 +403,11 @@ async fn dispatch(
 
     let msg = protocol::sign_job_payload(&state.config.runner_job_signing_key, &payload)?;
     Ok(if state.runner_hub.send(runner_id, msg) {
+        // Usage telemetry is best-effort: stats must never fail a dispatch
+        // that already reached the runner.
+        if let Err(error) = db::secrets::record_usage(&state.pool, &injected_secret_ids).await {
+            tracing::warn!(job_id = %job.id, error = ?error, "failed to record secret usage");
+        }
         DispatchOutcome::Sent
     } else {
         DispatchOutcome::Unreachable

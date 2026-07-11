@@ -15,6 +15,7 @@ pub mod runner_profiles;
 pub mod runner_provision_flow;
 pub mod runner_provisioner;
 pub mod scheduler;
+pub mod secrets_crypto;
 pub mod session;
 pub mod workflow_parse;
 pub mod workspace;

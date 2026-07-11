@@ -11,6 +11,10 @@ use crate::error::{AppError, AppResult};
 
 pub const CONTENT_READ: &str = "content.read";
 pub const CONTENT_WRITE: &str = "content.write";
+/// Secret metadata (names, scopes, audit, usage) — never values.
+pub const SECRETS_READ: &str = "secrets.read";
+/// Create/replace/delete secrets. Owner + admin roles only.
+pub const SECRETS_MANAGE: &str = "secrets.manage";
 
 pub async fn require_permission(
     pool: &PgPool,

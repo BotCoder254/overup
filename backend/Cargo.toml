@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# Envelope encryption for the Secrets subsystem: AES-256-GCM encrypts each
+# secret value under a fresh per-secret DEK, which is itself wrapped by the
+# SECRETS_MASTER_KEY. Values only ever exist as ciphertext outside memory.
+aes-gcm = "0.10"
 anyhow = "1"
 aws-sdk-s3 = "1"
 axum = { version = "0.8", features = ["ws"] }
