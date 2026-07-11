@@ -29,6 +29,7 @@ export function TokenRevealDialog({ open, onClose, title, description, token }: 
       onClose={onClose}
       title={title}
       description={description}
+      className="max-w-lg"
       footer={
         <Button size="sm" onClick={onClose}>
           Done

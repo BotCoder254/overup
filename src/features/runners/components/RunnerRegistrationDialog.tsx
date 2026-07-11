@@ -129,7 +129,7 @@ export function RunnerRegistrationDialog({ open, onClose }: RunnerRegistrationDi
       open={open}
       onClose={close}
       title={step === 'waiting' && effectiveMode === 'hosted' ? 'Provisioning' : TITLES[step]}
-      className="max-w-lg"
+      className="max-w-xl"
     >
       {step === 'details' && (
         <OsArchStep

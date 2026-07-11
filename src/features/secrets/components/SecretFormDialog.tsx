@@ -159,7 +159,7 @@ export function SecretFormDialog({
           ? 'The current value can never be shown. Entering a new value replaces it permanently for every future pipeline run.'
           : 'The value is encrypted before it is stored and can never be viewed again — only replaced. It is injected into matching pipeline jobs as an environment variable.'
       }
-      className="max-w-lg"
+      className="max-w-xl"
       footer={
         <>
           <Button size="sm" variant="ghost" onClick={close}>

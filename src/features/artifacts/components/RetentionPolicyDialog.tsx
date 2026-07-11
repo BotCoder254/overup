@@ -76,6 +76,7 @@ export function RetentionPolicyDialog({ open, onClose }: RetentionPolicyDialogPr
           ? `Days each kind stays stored (1–400). Unset kinds fall back to the workspace default, then the server default of ${policies.data.globalDefaultDays} days. Applies to future uploads.`
           : 'Days each kind stays stored (1–400). Applies to future uploads.'
       }
+      className="max-w-lg"
       footer={
         <>
           <Button size="sm" variant="ghost" onClick={onClose}>

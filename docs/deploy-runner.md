@@ -95,7 +95,7 @@ its own Docker host — end users never see a token or edit an env file. Set on 
 | --- | --- | --- | --- |
 | `RUNNER_PROVISIONER` | yes | unset (off) | `docker` enables the feature. The backend needs Docker access (`DOCKER_HOST`/`DOCKER_TLS_VERIFY`/`DOCKER_CERT_PATH` honored; default local socket). |
 | `RUNNER_PROVISIONER_OVERUP_URL` | yes | — | URL runner containers use to reach the API. Must be reachable **from inside a container** — never `localhost`. Single host with the default bridge: `http://172.17.0.1:8080`; otherwise the public API origin. |
-| `RUNNER_IMAGE` | no | `ghcr.io/botcoder254/overup-runner:latest` | Runner image the provisioner pulls and runs. |
+| `RUNNER_IMAGE` | no | `ghcr.io/botcoder254/overup-runner:latest` | Runner image the provisioner pulls and runs. **The default only works once that image is published publicly to GHCR** (see §2.2) — nothing publishes it automatically. Alternatively build it directly on the server's daemon under the same tag: a locally present image satisfies provisioning even when the registry pull is denied. |
 | `RUNNER_PROVISIONER_DOCKER_HOST` | no | unset | `DOCKER_HOST` injected into runner containers for job execution. Unset mounts `/var/run/docker.sock` into them instead — root-equivalent on the host; prefer a TLS-secured `tcp://…:2376` daemon when isolation matters. |
 | `RUNNER_PROVISIONER_NETWORK` | no | `overup-runners` | Dedicated Docker bridge network runner containers join (created at startup if missing; labeled `overup.managed=true`). Containers on it must still be able to reach `RUNNER_PROVISIONER_OVERUP_URL`. Set to `bridge` to opt out. |
 | `RUNNER_PROVISIONER_DEFAULT_PROFILE` | no | `standard` | Resource profile applied when a create request doesn't pick one (incl. workspace auto-provisioning): `small`, `standard`, or `large`. |
@@ -130,6 +130,38 @@ bootstraps and never-armed pending rows are cleaned up by the hourly janitor.
 At startup the backend probes `RUNNER_PROVISIONER_OVERUP_URL/healthz` and logs a
 warning if it looks unreachable or points at localhost — check the backend logs
 if hosted runners provision but never connect.
+
+### 2.2 Publishing the runner image (one-time)
+
+> Full step-by-step guide (WSL builds, PAT creation, updating, troubleshooting):
+> [publish-runner-image.md](./publish-runner-image.md).
+
+Nothing in this repository pushes `ghcr.io/botcoder254/overup-runner:latest` for
+you — a fresh deployment that keeps the default `RUNNER_IMAGE` will log
+`error from registry: denied` on pre-pull (and hosted creates would fail
+`image_pull_failed` if the image is absent locally) until you publish it once:
+
+```bash
+# From the repo root — the context must include runner/ AND protocol/.
+docker build -f runner/Dockerfile -t ghcr.io/<your-gh-username>/overup-runner:latest .
+
+# PAT (classic) with the write:packages scope.
+echo <PAT> | docker login ghcr.io -u <your-gh-username> --password-stdin
+docker push ghcr.io/<your-gh-username>/overup-runner:latest
+```
+
+Then make it publicly pullable — `docker push` creates GHCR packages as
+**private**, and the provisioner pulls anonymously: on github.com → your profile
+→ **Packages** → `overup-runner` → **Package settings** → Danger Zone →
+**Change visibility → Public**. (If you publish under a different name, set
+`RUNNER_IMAGE` accordingly.)
+
+**No-registry alternative:** build the image directly on the server's daemon
+under the same tag (`docker build -f runner/Dockerfile -t
+ghcr.io/<you>/overup-runner:latest .` on the VPS). The provisioner still tries
+the registry first to keep `:latest` fresh, but a locally present image
+satisfies both the pre-pull warm-up and hosted-runner provisioning when the
+pull is denied — you just rebuild manually to update.
 
 ## 3. Environment reference
 
@@ -404,5 +436,5 @@ own host) or are best avoided until you're comfortable with the mount semantics.
 | Pipelines stay **Queued** with the runner online | Labels don't cover the job's `runs-on` (subset rule), or the single job slot is busy — check `RUNNER_LABELS` against the workflow, or add runners. |
 | `wss` connect fails through the proxy | `OVERUP_URL` must be the public origin (`https://api.example.com`); Traefik/Dokploy proxies WebSockets natively — check the URL and TLS cert before suspecting the proxy. |
 | Job containers can't reach the network | `RUNNER_JOB_NETWORK=none` set, or `isolated` combined with a workload expecting the default bridge. |
-| Hosted runner: wizard shows "Provisioning failed" | The `provision_error` category names the stage: `image_pull_failed` (check `RUNNER_IMAGE` + registry access on the server), `container_create_failed`/`container_start_failed` (check the server's Docker daemon and the container's logs), `provision_timeout` (very slow pull — pre-pull the image and retry), `bootstrap_arm_failed` (database error while preparing the credential — retry). Docker detail is in the backend logs. |
+| Hosted runner: wizard shows "Provisioning failed" | The `provision_error` category names the stage: `image_pull_failed` (the registry pull failed AND no local copy of the tag exists — `error from registry: denied` means the `RUNNER_IMAGE` package was never published or is private on GHCR: publish it once per §2.2 or build it on the server under the same tag), `container_create_failed`/`container_start_failed` (check the server's Docker daemon and the container's logs), `provision_timeout` (very slow pull — pre-pull the image and retry), `bootstrap_arm_failed` (database error while preparing the credential — retry). Docker detail is in the backend logs. |
 | Hosted runner: provisions fine but never connects (wizard times out) | `RUNNER_PROVISIONER_OVERUP_URL` isn't reachable from inside the container — never `localhost`; use `http://172.17.0.1:8080` (default bridge) or the public API origin. The backend logs a startup warning when its healthz probe of that URL fails. Check the runner container's own logs: `docker logs overup-runner-<runner-id>`. |

@@ -531,7 +531,12 @@ RUNNER_LABELS=self-hosted,linux,x64,ubuntu-latest cargo run
 # Hosted runners ("create and wait" — no install step): set on the backend
 #   RUNNER_PROVISIONER=docker
 #   RUNNER_PROVISIONER_OVERUP_URL=<URL runner containers reach the API on>
-#   RUNNER_IMAGE=ghcr.io/botcoder254/overup-runner:latest   (default)
+#   RUNNER_IMAGE=ghcr.io/botcoder254/overup-runner:latest   (default — must be
+#                                   published publicly to GHCR once, nothing in
+#                                   the repo pushes it; alternatively build it on
+#                                   the server daemon under the same tag: pulls
+#                                   fall back to a locally present image when the
+#                                   registry denies them)
 #   RUNNER_PREPULL_IMAGES=ubuntu:24.04  job images warmed into the daemon
 #                                   after every provisioner (re)connect (so
 #                                   every deploy/restart); comma-separated,

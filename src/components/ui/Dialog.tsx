@@ -84,7 +84,7 @@ export function Dialog({ open, onClose, title, description, children, footer, cl
           className,
         )}
       >
-        <h2 id={titleId} className="shrink-0 text-base font-semibold text-charcoal">
+        <h2 id={titleId} className="shrink-0 break-words text-base font-semibold text-charcoal">
           {title}
         </h2>
         {description && (
@@ -92,7 +92,9 @@ export function Dialog({ open, onClose, title, description, children, footer, cl
         )}
         {/* Body scrolls when the dialog would exceed the viewport, so the
             title and footer actions always stay reachable. */}
-        {children && <div className="min-h-0 overflow-y-auto">{children}</div>}
+        {/* -mx-1/px-1 gives ring-2 focus rings room to render inside the
+            scroll container instead of being clipped at its edge. */}
+        {children && <div className="-mx-1 min-h-0 overflow-y-auto overflow-x-hidden px-1">{children}</div>}
         {footer && <div className="mt-5 flex shrink-0 items-center justify-end gap-2">{footer}</div>}
       </div>
     </div>,

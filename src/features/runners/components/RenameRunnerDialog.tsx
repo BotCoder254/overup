@@ -49,6 +49,7 @@ export function RenameRunnerDialog({ runner, onClose }: RenameRunnerDialogProps)
       onClose={onClose}
       title={`Rename ${runner.name}`}
       description="Update the display name and labels used to match workflow runs-on values."
+      className="max-w-lg"
       footer={
         <>
           <Button size="sm" variant="ghost" onClick={onClose}>
