@@ -1,6 +1,7 @@
 import type { LucideIcon } from 'lucide-react';
 import type { KeyboardEvent, ReactNode, Ref } from 'react';
-import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { cn } from '../../lib/cn';
 
 interface TriggerProps {
@@ -32,11 +33,19 @@ function enabledMenuItems(panel: HTMLElement): HTMLElement[] {
   );
 }
 
+/** Gap between the trigger and the panel, matching the old mt-1.5 (6px). */
+const PANEL_GAP = 6;
+/** Minimum distance the panel keeps from the viewport edges. */
+const VIEWPORT_MARGIN = 8;
+
 /**
- * Dependency-free popover anchored to its trigger (absolute positioning in a
- * relative wrapper — both shell triggers live in the never-scrolling sidebar,
- * so no portal or scroll tracking is needed). Handles focus trap and restore,
- * arrow-key roving over menu items, Escape, and outside-click dismissal.
+ * Dependency-free popover anchored to its trigger. The panel renders through
+ * a portal on document.body with fixed positioning computed from the
+ * trigger's bounding rect, so it can never be clipped by scrolling or
+ * overflow containers (table wrappers, the content canvas). Position tracks
+ * scroll (capture phase) and resize while open, and flips vertically near
+ * the viewport edge. Handles focus trap and restore, arrow-key roving over
+ * menu items, Escape, and outside-click dismissal.
  */
 export function Popover({
   renderTrigger,
@@ -48,6 +57,11 @@ export function Popover({
   ariaLabel,
 }: PopoverProps) {
   const [isOpen, setIsOpen] = useState(false);
+  const [position, setPosition] = useState<{
+    top: number;
+    left: number;
+    minWidth: number;
+  } | null>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -55,8 +69,54 @@ export function Popover({
 
   const close = useCallback((restoreFocus = false) => {
     setIsOpen(false);
+    setPosition(null);
     if (restoreFocus) triggerRef.current?.focus();
   }, []);
+
+  const updatePosition = useCallback(() => {
+    const rect = triggerRef.current?.getBoundingClientRect();
+    const panel = panelRef.current;
+    if (!rect || !panel) return;
+    const panelRect = panel.getBoundingClientRect();
+
+    // Flip vertically when the preferred side would leave the viewport but
+    // the opposite side has room.
+    let resolvedSide = side;
+    if (
+      side === 'bottom' &&
+      rect.bottom + PANEL_GAP + panelRect.height > window.innerHeight &&
+      rect.top - PANEL_GAP - panelRect.height >= VIEWPORT_MARGIN
+    ) {
+      resolvedSide = 'top';
+    } else if (side === 'top' && rect.top - PANEL_GAP - panelRect.height < VIEWPORT_MARGIN) {
+      resolvedSide = 'bottom';
+    }
+    const top =
+      resolvedSide === 'bottom'
+        ? rect.bottom + PANEL_GAP
+        : rect.top - PANEL_GAP - panelRect.height;
+
+    let left = align === 'start' ? rect.left : rect.right - panelRect.width;
+    left = Math.max(
+      VIEWPORT_MARGIN,
+      Math.min(left, window.innerWidth - panelRect.width - VIEWPORT_MARGIN),
+    );
+
+    setPosition({ top, left, minWidth: rect.width });
+  }, [side, align]);
+
+  // Measure synchronously on open (the panel mounts hidden until positioned
+  // — no one-frame flash at 0,0), then track scroll and resize while open.
+  useLayoutEffect(() => {
+    if (!isOpen) return;
+    updatePosition();
+    window.addEventListener('scroll', updatePosition, { capture: true, passive: true });
+    window.addEventListener('resize', updatePosition);
+    return () => {
+      window.removeEventListener('scroll', updatePosition, { capture: true });
+      window.removeEventListener('resize', updatePosition);
+    };
+  }, [isOpen, updatePosition]);
 
   // Focus the first enabled menu item (or the panel itself) on open.
   useEffect(() => {
@@ -70,11 +130,16 @@ export function Popover({
     }
   }, [isOpen, role]);
 
-  // Outside click closes without stealing focus back to the trigger.
+  // Outside click closes without stealing focus back to the trigger. The
+  // panel lives in a portal, so it must be checked alongside the wrapper.
   useEffect(() => {
     if (!isOpen) return;
     function onPointerDown(event: PointerEvent) {
-      if (!wrapperRef.current?.contains(event.target as Node)) setIsOpen(false);
+      const target = event.target as Node;
+      if (!wrapperRef.current?.contains(target) && !panelRef.current?.contains(target)) {
+        setIsOpen(false);
+        setPosition(null);
+      }
     }
     document.addEventListener('pointerdown', onPointerDown);
     return () => document.removeEventListener('pointerdown', onPointerDown);
@@ -139,24 +204,30 @@ export function Popover({
         },
         isOpen,
       )}
-      {isOpen && (
-        <div
-          ref={panelRef}
-          id={panelId}
-          role={role}
-          aria-label={ariaLabel}
-          tabIndex={-1}
-          onKeyDown={onPanelKeyDown}
-          className={cn(
-            'absolute z-30 min-w-full animate-scale-in rounded border border-steel/20 bg-canvas p-1 focus-visible:outline-none',
-            side === 'bottom' ? 'top-full mt-1.5' : 'bottom-full mb-1.5',
-            align === 'start' ? 'left-0' : 'right-0',
-            panelClassName,
-          )}
-        >
-          {children({ close: () => close(true) })}
-        </div>
-      )}
+      {isOpen &&
+        createPortal(
+          <div
+            ref={panelRef}
+            id={panelId}
+            role={role}
+            aria-label={ariaLabel}
+            tabIndex={-1}
+            onKeyDown={onPanelKeyDown}
+            className={cn(
+              'fixed z-50 rounded border border-steel/20 bg-canvas p-1 focus-visible:outline-none',
+              position ? 'animate-scale-in' : 'invisible',
+              panelClassName,
+            )}
+            style={
+              position
+                ? { top: position.top, left: position.left, minWidth: position.minWidth }
+                : { top: 0, left: 0 }
+            }
+          >
+            {children({ close: () => close(true) })}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

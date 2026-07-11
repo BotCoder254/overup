@@ -53,6 +53,10 @@ pub struct Config {
     /// optional group; without it, artifact grants are cleanly denied and
     /// logs simply stay in Postgres.
     pub r2: Option<R2Config>,
+    /// Hosted-runner provisioning (Docker containers spawned by the control
+    /// plane) — optional group enabled with RUNNER_PROVISIONER=docker;
+    /// without it, hosted-runner creation is cleanly denied.
+    pub runner_provisioner: Option<RunnerProvisionerConfig>,
 }
 
 #[derive(Clone)]
@@ -61,6 +65,22 @@ pub struct R2Config {
     pub access_key_id: String,
     pub secret_access_key: String,
     pub bucket: String,
+}
+
+#[derive(Clone)]
+pub struct RunnerProvisionerConfig {
+    /// Runner image to run, e.g. ghcr.io/botcoder254/overup-runner:latest
+    /// (RUNNER_IMAGE).
+    pub image: String,
+    /// URL provisioned containers use to reach this control plane
+    /// (RUNNER_PROVISIONER_OVERUP_URL). Required: a container cannot assume
+    /// the operator's localhost.
+    pub overup_url: String,
+    /// DOCKER_HOST value passed through into runner containers so they can
+    /// execute jobs (RUNNER_PROVISIONER_DOCKER_HOST). Empty/unset = mount
+    /// /var/run/docker.sock into the container instead — note that the
+    /// socket mount is root-equivalent on the host.
+    pub runner_docker_host: Option<String>,
 }
 
 impl Config {
@@ -120,6 +140,26 @@ impl Config {
             _ => anyhow::bail!(
                 "R2 configuration is incomplete: set all of R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET or none"
             ),
+        };
+
+        // Hosted-runner provisioning is opt-in: the server needs Docker
+        // access and a URL that provisioned containers can reach it on.
+        let runner_provisioner = match optional("RUNNER_PROVISIONER", "").as_str() {
+            "" | "off" | "false" => None,
+            "docker" => Some(RunnerProvisionerConfig {
+                image: optional("RUNNER_IMAGE", "ghcr.io/botcoder254/overup-runner:latest"),
+                overup_url: required("RUNNER_PROVISIONER_OVERUP_URL")
+                    .context(
+                        "RUNNER_PROVISIONER=docker requires RUNNER_PROVISIONER_OVERUP_URL — \
+                         the URL runner containers use to reach this control plane",
+                    )?
+                    .trim_end_matches('/')
+                    .to_string(),
+                runner_docker_host: std::env::var("RUNNER_PROVISIONER_DOCKER_HOST")
+                    .ok()
+                    .filter(|v| !v.is_empty()),
+            }),
+            other => anyhow::bail!("RUNNER_PROVISIONER must be 'docker' or unset (got {other})"),
         };
 
         let artifact_retention_days: i64 = optional("ARTIFACT_RETENTION_DAYS", "30")
@@ -183,6 +223,7 @@ impl Config {
             artifact_pending_ttl_hours,
             log_hot_retention_days,
             r2,
+            runner_provisioner,
         })
     }
 }

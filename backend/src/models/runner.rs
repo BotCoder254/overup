@@ -22,6 +22,13 @@ pub struct Runner {
     #[allow(dead_code)] // reserved for the Runner Management dashboard
     pub last_health_at: Option<DateTime<Utc>>,
     pub draining_at: Option<DateTime<Utc>>,
+    /// Hosted runner provisioned by the control plane itself.
+    pub managed: bool,
+    /// Docker container backing a managed runner; internal — never serialized.
+    pub container_id: Option<String>,
+    /// Static failure category when background provisioning failed
+    /// (image_pull_failed, container_create_failed, ...); NULL otherwise.
+    pub provision_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -37,6 +44,8 @@ pub struct RunnerResponse {
     pub revoked: bool,
     pub last_health: Option<serde_json::Value>,
     pub draining: bool,
+    pub managed: bool,
+    pub provision_error: Option<String>,
 }
 
 impl From<Runner> for RunnerResponse {
@@ -52,6 +61,8 @@ impl From<Runner> for RunnerResponse {
             revoked: row.revoked_at.is_some(),
             last_health: row.last_health,
             draining: row.draining_at.is_some(),
+            managed: row.managed,
+            provision_error: row.provision_error,
         }
     }
 }

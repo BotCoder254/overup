@@ -52,3 +52,46 @@ impl From<Artifact> for ArtifactResponse {
         }
     }
 }
+
+/// Catalog entry: the artifact plus the provenance of the execution that
+/// produced it. `r2_key` stays internal, as everywhere else.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactCatalogResponse {
+    #[serde(flatten)]
+    pub artifact: ArtifactResponse,
+    pub pipeline_number: i32,
+    pub repository_id: Uuid,
+    pub repository_full_name: String,
+    pub workflow_id: Option<Uuid>,
+    pub workflow_name: String,
+    /// Short branch name (refs/heads/ stripped); other refs pass through.
+    pub branch: String,
+    pub commit_sha: String,
+    pub job_key: String,
+    pub job_name: Option<String>,
+    pub runner_name: Option<String>,
+}
+
+impl From<crate::db::artifacts::ArtifactCatalogRow> for ArtifactCatalogResponse {
+    fn from(row: crate::db::artifacts::ArtifactCatalogRow) -> Self {
+        let branch = row
+            .git_ref
+            .strip_prefix("refs/heads/")
+            .unwrap_or(&row.git_ref)
+            .to_string();
+        Self {
+            artifact: ArtifactResponse::from(row.artifact),
+            pipeline_number: row.pipeline_number,
+            repository_id: row.repository_id,
+            repository_full_name: row.repo_full_name,
+            workflow_id: row.workflow_id,
+            workflow_name: row.workflow_name,
+            branch,
+            commit_sha: row.commit_sha,
+            job_key: row.job_key,
+            job_name: row.job_name,
+            runner_name: row.runner_name,
+        }
+    }
+}

@@ -22,7 +22,15 @@ pub struct CallbackParams {
     code: Option<String>,
     state: Option<String>,
     error: Option<String>,
+    /// Present when GitHub sends an app-install redirect here instead of the
+    /// Setup URL (e.g. "Request user authorization during installation" is
+    /// enabled on the App). Install redirects never carry `state`.
+    installation_id: Option<String>,
+    setup_action: Option<String>,
 }
+
+/// GitHub App setup actions we recognise on a misrouted install redirect.
+const SETUP_ACTIONS: [&str; 3] = ["install", "update", "request"];
 
 /// GET /auth/github/callback — the only URL GitHub is allowed to redirect
 /// to. Whatever happens, the browser ends up back on the frontend; failures
@@ -38,6 +46,36 @@ pub async fn callback(
         // e.g. the user denied the authorization screen.
         tracing::warn!(oauth_error = %error, "github returned an error on callback");
         return Redirect::to(&format!("{frontend}/auth/callback?error=auth_failed"))
+            .into_response();
+    }
+
+    // GitHub App install redirects (installation_id/setup_action, no state)
+    // sometimes land here when the App's callback URL is used for the
+    // post-install redirect. Forward them to the real Setup handler instead
+    // of failing the OAuth flow. Parameters are validated before being echoed
+    // into the redirect; invalid values are dropped, never forwarded.
+    if params.state.is_none()
+        && (params.installation_id.is_some() || params.setup_action.is_some())
+    {
+        let mut query = Vec::new();
+        if let Some(id) = params
+            .installation_id
+            .as_deref()
+            .filter(|id| id.len() <= 20 && id.parse::<i64>().is_ok_and(|n| n > 0))
+        {
+            query.push(format!("installation_id={id}"));
+        }
+        if let Some(action) = params
+            .setup_action
+            .as_deref()
+            .filter(|a| SETUP_ACTIONS.contains(a))
+        {
+            query.push(format!("setup_action={action}"));
+        }
+        tracing::info!("app-install redirect landed on oauth callback; forwarding to setup");
+        // Relative redirect: stays on whichever origin (direct API or SPA
+        // proxy) the callback was reached through.
+        return Redirect::to(&format!("/auth/github/app/setup?{}", query.join("&")))
             .into_response();
     }
 

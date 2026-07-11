@@ -14,6 +14,8 @@ import { PipelinesPage } from '../features/pipelines/pages/PipelinesPage';
 import { PipelineDetailPage } from '../features/pipelines/pages/PipelineDetailPage';
 import { JobDetailPage } from '../features/pipelines/pages/JobDetailPage';
 import { JobQueuePage } from '../features/jobs/pages/JobQueuePage';
+import { ArtifactsPage } from '../features/artifacts/pages/ArtifactsPage';
+import { ArtifactDetailPage } from '../features/artifacts/pages/ArtifactDetailPage';
 import { RunnersPage } from '../features/runners/pages/RunnersPage';
 import { RunnerDetailPage } from '../features/runners/pages/RunnerDetailPage';
 import { NAV_ITEMS } from './navigation';
@@ -27,6 +29,7 @@ const IMPLEMENTED_SEGMENTS = new Set([
   'workflows',
   'pipelines',
   'jobs',
+  'artifacts',
   'runners',
 ]);
 
@@ -68,6 +71,8 @@ export const router = createBrowserRouter([
               { path: 'pipelines/:pipelineId', element: <PipelineDetailPage /> },
               { path: 'pipelines/:pipelineId/jobs/:jobId', element: <JobDetailPage /> },
               { path: 'jobs', element: <JobQueuePage /> },
+              { path: 'artifacts', element: <ArtifactsPage /> },
+              { path: 'artifacts/:artifactId', element: <ArtifactDetailPage /> },
               { path: 'runners', element: <RunnersPage /> },
               { path: 'runners/:runnerId', element: <RunnerDetailPage /> },
               ...NAV_ITEMS.filter(

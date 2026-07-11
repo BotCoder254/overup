@@ -41,7 +41,12 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("failed to run database migrations")?;
 
-    let state = AppState::new(pool.clone(), config.clone())?;
+    let mut state = AppState::new(pool.clone(), config.clone())?;
+    // Optional hosted-runner provisioner: probes Docker once; unavailable
+    // (None) degrades to a clean 409 on the hosted-runner endpoint.
+    state.runner_provisioner =
+        services::runner_provisioner::RunnerProvisioner::init(config.runner_provisioner.clone())
+            .await;
 
     // Boot-time execution recovery: no runner can be connected yet, so
     // anything marked online or in progress is a leftover from the previous

@@ -7,7 +7,8 @@ use crate::models::runner::Runner;
 /// Every column except token_hash — the hash never leaves the database
 /// layer's lookup path.
 const RUNNER_COLUMNS: &str = "id, workspace_id, name, labels, status, version, \
-     last_seen_at, created_by, created_at, revoked_at, last_health, last_health_at, draining_at";
+     last_seen_at, created_by, created_at, revoked_at, last_health, last_health_at, \
+     draining_at, managed, container_id, provision_error";
 
 pub enum CreateOutcome {
     Created(Box<Runner>),
@@ -99,6 +100,8 @@ pub struct CreateBootstrapParams<'a> {
     pub bootstrap_expires_at: DateTime<Utc>,
     pub created_by: Uuid,
     pub request_id: Option<&'a str>,
+    /// True for hosted runners the control plane provisions itself.
+    pub managed: bool,
 }
 
 /// Create a runner in pending-registration state: no permanent token yet,
@@ -115,14 +118,15 @@ pub async fn create_bootstrap(
         bootstrap_expires_at,
         created_by,
         request_id,
+        managed,
     } = params;
     let mut tx = pool.begin().await?;
 
     let runner = match sqlx::query_as::<_, Runner>(&format!(
         r#"
         INSERT INTO runners
-            (workspace_id, name, labels, token_hash, bootstrap_token_hash, bootstrap_expires_at, created_by)
-        VALUES ($1, $2, $3, NULL, $4, $5, $6)
+            (workspace_id, name, labels, token_hash, bootstrap_token_hash, bootstrap_expires_at, created_by, managed)
+        VALUES ($1, $2, $3, NULL, $4, $5, $6, $7)
         RETURNING {RUNNER_COLUMNS}
         "#,
     ))
@@ -132,6 +136,7 @@ pub async fn create_bootstrap(
     .bind(bootstrap_token_hash)
     .bind(bootstrap_expires_at)
     .bind(created_by)
+    .bind(managed)
     .fetch_one(&mut *tx)
     .await
     {
@@ -215,6 +220,67 @@ pub async fn exchange_bootstrap_token(
     .execute(pool)
     .await?;
     Ok(result.rows_affected() > 0)
+}
+
+/// Record the Docker container backing a hosted runner. Returns `false`
+/// when the row is gone or was revoked while provisioning ran — the caller
+/// must tear the now-ownerless container down.
+pub async fn set_container_id(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    id: Uuid,
+    container_id: &str,
+) -> sqlx::Result<bool> {
+    let result = sqlx::query(
+        "UPDATE runners SET container_id = $3 \
+         WHERE workspace_id = $1 AND id = $2 AND managed AND revoked_at IS NULL",
+    )
+    .bind(workspace_id)
+    .bind(id)
+    .bind(container_id)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Record why background provisioning of a hosted runner failed. `category`
+/// must be a static string (never upstream Docker text). Guarded to
+/// pending-registration rows only (`token_hash IS NULL`) — a runner that
+/// already exchanged its bootstrap credential is alive and can't be flagged.
+pub async fn set_provision_error(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    id: Uuid,
+    category: &str,
+) -> sqlx::Result<bool> {
+    let result = sqlx::query(
+        r#"
+        UPDATE runners SET provision_error = $3
+        WHERE workspace_id = $1 AND id = $2 AND managed AND token_hash IS NULL
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(id)
+    .bind(category)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Managed runners whose bootstrap expired unexchanged — the janitor needs
+/// their container ids to deprovision BEFORE the rows are purged.
+pub async fn find_expired_bootstrap_managed(
+    pool: &PgPool,
+) -> sqlx::Result<Vec<(Uuid, Option<String>)>> {
+    sqlx::query_as(
+        r#"
+        SELECT id, container_id FROM runners
+        WHERE managed AND token_hash IS NULL AND bootstrap_expires_at IS NOT NULL
+          AND bootstrap_expires_at < now()
+        "#,
+    )
+    .fetch_all(pool)
+    .await
 }
 
 /// Sweep: a bootstrap credential that was never exchanged is a dead runner

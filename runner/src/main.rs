@@ -18,7 +18,12 @@
 //!                               received from a bootstrap exchange; read on
 //!                               startup in preference to RUNNER_TOKEN once
 //!                               it exists
-//!   RUNNER_JOB_SIGNING_KEY      shared HMAC key — must match the control plane
+//!   RUNNER_JOB_SIGNING_KEY      optional shared HMAC key. When unset the
+//!                               runner uses the key the control plane
+//!                               delivers in hello_ack (in memory only,
+//!                               re-received on every connect); when set it
+//!                               must match the control plane and takes
+//!                               precedence over the delivered key
 //!   RUNNER_NAME                 display name sent in hello (default overup-runner)
 //!   RUNNER_LABELS               comma-separated labels (default self-hosted)
 //!   RUNNER_CAP_DROP             drop ALL Linux capabilities (default true; set
@@ -53,7 +58,9 @@ pub struct RunnerConfig {
     pub token: String,
     pub name: String,
     pub labels: Vec<String>,
-    pub signing_key: Vec<u8>,
+    /// Locally pinned job-payload verification key. `None` means "use the
+    /// key the control plane delivers in hello_ack".
+    pub signing_key: Option<Vec<u8>>,
     pub isolation: JobIsolation,
 }
 
@@ -120,10 +127,23 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
-    let signing_key = required("RUNNER_JOB_SIGNING_KEY")?.into_bytes();
-    if signing_key.len() < 32 {
-        anyhow::bail!("RUNNER_JOB_SIGNING_KEY must be at least 32 bytes");
-    }
+    // Optional since the control plane delivers the key in hello_ack; a
+    // locally set key is validated here and takes precedence.
+    let signing_key = match std::env::var("RUNNER_JOB_SIGNING_KEY") {
+        Ok(key) => {
+            let key = key.into_bytes();
+            if key.len() < 32 {
+                anyhow::bail!("RUNNER_JOB_SIGNING_KEY must be at least 32 bytes");
+            }
+            Some(key)
+        }
+        Err(_) => {
+            tracing::info!(
+                "no local RUNNER_JOB_SIGNING_KEY; using the key delivered by the control plane"
+            );
+            None
+        }
+    };
 
     let parse_limit = |key: &str, default: &str| -> anyhow::Result<i64> {
         let value: i64 = optional(key, default)

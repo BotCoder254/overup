@@ -9,6 +9,9 @@ aws-sdk-s3 = "1"
 axum = { version = "0.8", features = ["ws"] }
 axum-extra = { version = "0.10", features = ["cookie"] }
 base64 = "0.22"
+# Hosted-runner provisioning via the Docker Engine API; `ssl` (rustls)
+# enables remote TLS daemons, mirroring the runner crate.
+bollard = { version = "0.21", features = ["ssl"] }
 dashmap = "6"
 futures-util = "0.3"
 chrono = { version = "0.4", features = ["serde"] }

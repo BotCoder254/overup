@@ -1,8 +1,16 @@
+import { useQueryClient } from '@tanstack/react-query';
 import { useCallback, useState } from 'react';
 import { Dialog } from '../../../components/ui/Dialog';
-import { useBootstrapRunner } from '../hooks/useRunners';
+import { revokeRunner } from '../api/runnersApi';
+import {
+  runnersKey,
+  useBootstrapRunner,
+  useCreateHostedRunner,
+  useHostedRunnerAvailable,
+  useWorkspaceId,
+} from '../hooks/useRunners';
 import { InstallCommandStep } from './wizard/InstallCommandStep';
-import { OsArchStep } from './wizard/OsArchStep';
+import { OsArchStep, type RunnerMode } from './wizard/OsArchStep';
 import { WaitForConnectionStep } from './wizard/WaitForConnectionStep';
 
 interface RunnerRegistrationDialogProps {
@@ -29,20 +37,32 @@ function parseLabels(value: string): string[] {
   );
 }
 
-/** Guided registration: name/labels -> install command -> live connection check. */
+/**
+ * Guided registration. Self-hosted: name/labels -> install command -> live
+ * connection check. Hosted (when the deployment supports it): name/labels ->
+ * the server provisions a runner container itself -> live connection check —
+ * no install step, no token ever shown.
+ */
 export function RunnerRegistrationDialog({ open, onClose }: RunnerRegistrationDialogProps) {
   const bootstrap = useBootstrapRunner();
+  const createHosted = useCreateHostedRunner();
+  const hostedAvailable = useHostedRunnerAvailable();
+  const workspaceId = useWorkspaceId();
+  const queryClient = useQueryClient();
+
   const [step, setStep] = useState<Step>('details');
+  const [mode, setMode] = useState<RunnerMode>('self-hosted');
   const [name, setName] = useState('');
   const [labels, setLabels] = useState('');
   const [os, setOs] = useState('');
-  const [issued, setIssued] = useState<{ runnerId: string; token: string } | null>(null);
+  const [issued, setIssued] = useState<{ runnerId: string; token: string | null } | null>(null);
 
   // Stable across re-renders (typing updates name/labels state every
   // keystroke) so the Dialog never sees a changing onClose reference.
   const close = useCallback(() => {
     onClose();
     setStep('details');
+    setMode('self-hosted');
     setName('');
     setLabels('');
     setOs('');
@@ -50,19 +70,49 @@ export function RunnerRegistrationDialog({ open, onClose }: RunnerRegistrationDi
   }, [onClose]);
 
   const onDetailsNext = () => {
-    bootstrap.mutate(
-      { name: name.trim(), labels: parseLabels(labels) },
-      {
+    const input = { name: name.trim(), labels: parseLabels(labels) };
+    if (mode === 'hosted') {
+      createHosted.mutate(input, {
+        onSuccess: (runner) => {
+          setIssued({ runnerId: runner.id, token: null });
+          setStep('waiting');
+        },
+      });
+    } else {
+      bootstrap.mutate(input, {
         onSuccess: (result) => {
           setIssued({ runnerId: result.runner.id, token: result.token });
           setStep('install');
         },
-      },
-    );
+      });
+    }
   };
 
+  // A failed hosted provision leaves a dead runner row behind; discard it
+  // (best-effort — the janitor purges stragglers) and restart from the
+  // details step with the typed name/labels intact.
+  const retryHosted = useCallback(() => {
+    if (issued && workspaceId) {
+      void revokeRunner(workspaceId, issued.runnerId)
+        .then(() => queryClient.invalidateQueries({ queryKey: runnersKey(workspaceId) }))
+        .catch(() => {});
+    }
+    setIssued(null);
+    setStep('details');
+  }, [issued, workspaceId, queryClient]);
+
+  const waitingMessage =
+    mode === 'hosted'
+      ? 'Provisioning the hosted runner…'
+      : 'Waiting for the runner to connect…';
+
   return (
-    <Dialog open={open} onClose={close} title={TITLES[step]} className="max-w-lg">
+    <Dialog
+      open={open}
+      onClose={close}
+      title={step === 'waiting' && mode === 'hosted' ? 'Provisioning' : TITLES[step]}
+      className="max-w-lg"
+    >
       {step === 'details' && (
         <OsArchStep
           name={name}
@@ -71,19 +121,28 @@ export function RunnerRegistrationDialog({ open, onClose }: RunnerRegistrationDi
           onLabelsChange={setLabels}
           os={os}
           onOsChange={setOs}
+          mode={mode}
+          onModeChange={setMode}
+          hostedAvailable={hostedAvailable.data === true}
           onNext={onDetailsNext}
-          isLoading={bootstrap.isPending}
+          isLoading={bootstrap.isPending || createHosted.isPending}
         />
       )}
-      {step === 'install' && issued && (
+      {step === 'install' && issued?.token && (
         <InstallCommandStep
           token={issued.token}
+          name={name.trim()}
           labels={parseLabels(labels)}
           onNext={() => setStep('waiting')}
         />
       )}
       {step === 'waiting' && issued && (
-        <WaitForConnectionStep runnerId={issued.runnerId} onDone={close} />
+        <WaitForConnectionStep
+          runnerId={issued.runnerId}
+          message={waitingMessage}
+          onDone={close}
+          onRetry={mode === 'hosted' ? retryHosted : undefined}
+        />
       )}
     </Dialog>
   );

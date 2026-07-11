@@ -94,43 +94,71 @@ pub async fn run_connection(
     .await?;
 
     // The first server frame must be hello_ack carrying our identity.
-    let (runner_id, heartbeat_secs, permanent_token) = tokio::time::timeout(HELLO_TIMEOUT, async {
-        loop {
-            match stream.next().await {
-                Some(Ok(Message::Text(text))) => {
-                    match serde_json::from_str::<ServerMsg>(text.as_str()) {
-                        Ok(ServerMsg::HelloAck {
-                            runner_id,
-                            heartbeat_interval_secs,
-                            protocol_version,
-                            permanent_token,
-                        }) => {
-                            if protocol_version != protocol::PROTOCOL_VERSION {
-                                anyhow::bail!(
-                                    "protocol version mismatch: server {protocol_version}, runner {}",
-                                    protocol::PROTOCOL_VERSION
-                                );
+    let (runner_id, heartbeat_secs, permanent_token, delivered_key) =
+        tokio::time::timeout(HELLO_TIMEOUT, async {
+            loop {
+                match stream.next().await {
+                    Some(Ok(Message::Text(text))) => {
+                        match serde_json::from_str::<ServerMsg>(text.as_str()) {
+                            Ok(ServerMsg::HelloAck {
+                                runner_id,
+                                heartbeat_interval_secs,
+                                protocol_version,
+                                permanent_token,
+                                job_signing_key,
+                            }) => {
+                                if protocol_version != protocol::PROTOCOL_VERSION {
+                                    anyhow::bail!(
+                                        "protocol version mismatch: server {protocol_version}, runner {}",
+                                        protocol::PROTOCOL_VERSION
+                                    );
+                                }
+                                return Ok((
+                                    runner_id,
+                                    heartbeat_interval_secs,
+                                    permanent_token,
+                                    job_signing_key,
+                                ));
                             }
-                            return Ok((runner_id, heartbeat_interval_secs, permanent_token));
+                            Ok(_) => continue,
+                            Err(_) => anyhow::bail!("unparseable frame during handshake"),
                         }
-                        Ok(_) => continue,
-                        Err(_) => anyhow::bail!("unparseable frame during handshake"),
                     }
+                    Some(Ok(_)) => continue,
+                    Some(Err(error)) => return Err(error.into()),
+                    None => anyhow::bail!("connection closed during handshake"),
                 }
-                Some(Ok(_)) => continue,
-                Some(Err(error)) => return Err(error.into()),
-                None => anyhow::bail!("connection closed during handshake"),
             }
-        }
-    })
-    .await
-    .context("hello_ack timed out")??;
+        })
+        .await
+        .context("hello_ack timed out")??;
 
     tracing::info!(%runner_id, "connected to control plane");
     if let Some(token) = permanent_token {
         tracing::info!("received a permanent token from a bootstrap exchange");
         *new_token = Some(token);
     }
+
+    // Job-payload verification key for this connection: a locally pinned
+    // RUNNER_JOB_SIGNING_KEY always wins; otherwise use the key the control
+    // plane just delivered over the authenticated socket. Held in memory
+    // only — never persisted — and re-received on every connect, so a
+    // server-side rotation propagates on reconnect.
+    let signing_key: Vec<u8> = match (&config.signing_key, delivered_key) {
+        (Some(local), _) => local.clone(),
+        (None, Some(delivered)) => {
+            let key = delivered.into_bytes();
+            if key.len() < 32 {
+                anyhow::bail!("control plane delivered a job signing key shorter than 32 bytes");
+            }
+            tracing::info!("using the job signing key delivered by the control plane");
+            key
+        }
+        (None, None) => anyhow::bail!(
+            "no job signing key available: set RUNNER_JOB_SIGNING_KEY or upgrade the \
+             control plane to one that delivers the key in hello_ack"
+        ),
+    };
 
     let (out_tx, mut out_rx) = mpsc::channel::<RunnerMsg>(OUT_QUEUE);
     let grants = GrantWaiters::default();
@@ -148,7 +176,15 @@ pub async fn run_connection(
     // Refreshed on the heartbeat cadence; Ping-triggered replies reuse the
     // last sample rather than resampling on every server ping.
     let mut last_health: Option<protocol::RunnerHealth> = None;
-    let ctx = MsgContext { config, docker: &docker, runner_id, out_tx: &out_tx, grants: &grants, current: &current };
+    let ctx = MsgContext {
+        config,
+        docker: &docker,
+        runner_id,
+        out_tx: &out_tx,
+        grants: &grants,
+        current: &current,
+        signing_key: &signing_key,
+    };
 
     loop {
         tokio::select! {
@@ -199,6 +235,9 @@ struct MsgContext<'a> {
     out_tx: &'a mpsc::Sender<RunnerMsg>,
     grants: &'a GrantWaiters,
     current: &'a CurrentJob,
+    /// Resolved payload-verification key for this connection (local env key
+    /// or the one delivered in hello_ack).
+    signing_key: &'a [u8],
 }
 
 fn on_server_msg(
@@ -206,7 +245,7 @@ fn on_server_msg(
     msg: ServerMsg,
     last_health: &Option<protocol::RunnerHealth>,
 ) -> Option<Disconnect> {
-    let MsgContext { config, docker, runner_id, out_tx, grants, current } = *ctx;
+    let MsgContext { config, docker, runner_id, out_tx, grants, current, signing_key } = *ctx;
     match msg {
         ServerMsg::Ping => {
             let busy_job_id = current.lock().unwrap().as_ref().map(|j| j.job_id);
@@ -216,7 +255,7 @@ fn on_server_msg(
             // Integrity + freshness first; the payload is not even parsed
             // unless the signature over the exact bytes verifies.
             let Some(payload) = protocol::verify_job_payload(
-                &config.signing_key,
+                signing_key,
                 &payload_json,
                 &signature_hex,
                 Utc::now(),

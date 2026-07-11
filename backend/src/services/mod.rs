@@ -10,6 +10,7 @@ pub mod pipeline_run;
 pub mod r2;
 pub mod repo_sync;
 pub mod runner_hub;
+pub mod runner_provisioner;
 pub mod scheduler;
 pub mod session;
 pub mod workflow_parse;

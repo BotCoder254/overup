@@ -1,5 +1,6 @@
 import { format } from 'date-fns';
 import { Download, Package } from 'lucide-react';
+import { Link, useParams } from 'react-router-dom';
 import { Badge } from '../../../../components/ui/Badge';
 import { Button } from '../../../../components/ui/Button';
 import { EmptyState } from '../../../../components/ui/EmptyState';
@@ -35,6 +36,7 @@ export function ArtifactsPanel({
   /** Sidebar placement: a one-line empty state instead of the tall card. */
   compact?: boolean;
 }) {
+  const { slug = '' } = useParams<{ slug: string }>();
   const artifacts = useArtifacts(pipelineId);
   const download = useDownloadArtifact();
 
@@ -83,7 +85,14 @@ export function ArtifactsPanel({
       <TBody>
         {rows.map((artifact) => (
           <Tr key={artifact.id}>
-            <Td className="font-mono text-xs text-charcoal">{artifact.name}</Td>
+            <Td className="font-mono text-xs text-charcoal">
+              <Link
+                to={`/w/${slug}/artifacts/${artifact.id}`}
+                className="hover:text-link hover:underline"
+              >
+                {artifact.name}
+              </Link>
+            </Td>
             <Td className="text-xs text-charcoal">{formatBytes(artifact.sizeBytes)}</Td>
             <Td>{statusBadge(artifact.status)}</Td>
             <Td className="max-w-[140px] truncate font-mono text-[10px] text-steel">

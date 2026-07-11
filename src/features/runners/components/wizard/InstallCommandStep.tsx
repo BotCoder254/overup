@@ -5,6 +5,7 @@ import { env } from '../../../../lib/env';
 
 interface InstallCommandStepProps {
   token: string;
+  name: string;
   labels: string[];
   onNext: () => void;
 }
@@ -13,24 +14,29 @@ function serverOrigin(): string {
   return env.apiOrigin || window.location.origin;
 }
 
-function buildCommand(token: string, labels: string[]): string {
+/**
+ * Complete as-is: the signing key is delivered automatically over the
+ * authenticated connection, so nothing in this command needs editing.
+ */
+function buildCommand(token: string, name: string, labels: string[]): string {
   const labelArg = labels.length > 0 ? labels.join(',') : 'self-hosted';
+  const containerName = name || 'overup-runner';
   return [
-    `docker run -d --name overup-runner --restart unless-stopped \\`,
+    `docker run -d --name ${containerName} --restart unless-stopped \\`,
     `  -v /var/run/docker.sock:/var/run/docker.sock \\`,
     `  -e OVERUP_URL=${serverOrigin()} \\`,
     `  -e RUNNER_TOKEN=${token} \\`,
-    `  -e RUNNER_JOB_SIGNING_KEY=<same as the control plane> \\`,
+    `  -e RUNNER_NAME=${containerName} \\`,
     `  -e RUNNER_LABELS=${labelArg} \\`,
     `  -e RUNNER_TOKEN_FILE=/data/runner-token \\`,
-    `  -v overup-runner-data:/data \\`,
-    `  ghcr.io/overup/runner:latest`,
+    `  -v ${containerName}-data:/data \\`,
+    `  ghcr.io/botcoder254/overup-runner:latest`,
   ].join('\n');
 }
 
 /** Linux/Docker is the only path the reference runner actually ships today. */
-export function InstallCommandStep({ token, labels, onNext }: InstallCommandStepProps) {
-  const command = buildCommand(token, labels);
+export function InstallCommandStep({ token, name, labels, onNext }: InstallCommandStepProps) {
+  const command = buildCommand(token, name, labels);
 
   const copy = async () => {
     try {
@@ -44,8 +50,9 @@ export function InstallCommandStep({ token, labels, onNext }: InstallCommandStep
   return (
     <div className="mt-4 space-y-4">
       <p className="text-sm leading-relaxed text-steel">
-        Run this on the target machine. The token is single-use and expires in one hour — the
-        runner exchanges it for a permanent credential on its first connection.
+        Run this on the target machine exactly as shown — nothing needs editing. The token is
+        single-use and expires in one hour; the runner exchanges it for a permanent credential
+        and receives its signing key automatically on first connection.
       </p>
       <div className="relative">
         <pre className="overflow-x-auto rounded border border-steel/20 bg-surface p-3.5 font-mono text-xs leading-relaxed text-charcoal">

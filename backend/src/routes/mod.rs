@@ -12,8 +12,9 @@ use tower_http::trace::TraceLayer;
 
 use crate::error::AppError;
 use crate::handlers::{
-    auth, browser_ws, dashboard, dashboard_ws, github_installations, github_webhooks, health,
-    jobs, me, pipelines, repositories, runner_ws, runners, workflows, workspaces, ws_tickets,
+    artifacts, auth, browser_ws, dashboard, dashboard_ws, github_installations, github_webhooks,
+    health, jobs, me, pipelines, repositories, runner_ws, runners, workflows, workspaces,
+    ws_tickets,
 };
 use crate::middleware::{csrf, security_headers};
 use crate::state::AppState;
@@ -73,6 +74,15 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
     // Pipeline dispatch/rerun fan out into planning, token minting, and
     // runner traffic — same strict budget as manual syncs.
     let dispatch_governor = Arc::new(
+        GovernorConfigBuilder::default()
+            .per_second(1)
+            .burst_size(5)
+            .finish()
+            .expect("valid governor configuration"),
+    );
+    // Hosted-runner provisioning pulls images and starts containers — the
+    // strictest budget of all.
+    let hosted_runner_governor = Arc::new(
         GovernorConfigBuilder::default()
             .per_second(1)
             .burst_size(5)
@@ -167,11 +177,24 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
             "/workspaces/{workspace_id}/artifacts/{artifact_id}/download",
             get(pipelines::artifact_download),
         )
+        .route("/workspaces/{workspace_id}/artifacts", get(artifacts::list))
+        .route(
+            "/workspaces/{workspace_id}/artifacts/summary",
+            get(artifacts::summary),
+        )
+        .route(
+            "/workspaces/{workspace_id}/artifacts/{artifact_id}",
+            get(artifacts::detail).delete(artifacts::remove),
+        )
         .route(
             "/workspaces/{workspace_id}/runners",
             get(runners::list).post(runners::create),
         )
         .route("/workspaces/{workspace_id}/runners/bootstrap", post(runners::bootstrap))
+        .route(
+            "/workspaces/{workspace_id}/runners/hosted",
+            post(runners::create_hosted).layer(GovernorLayer::new(hosted_runner_governor)),
+        )
         .route(
             "/workspaces/{workspace_id}/runners/{runner_id}",
             get(runners::detail).patch(runners::update).delete(runners::revoke),

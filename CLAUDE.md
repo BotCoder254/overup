@@ -151,6 +151,8 @@ overup/
 │   │   ├── pipelines/          # execution ledger + live detail workspace: PipelineGraph,
 │   │   │                       #   ExecutionTimeline, LogViewer (xterm), tab panels,
 │   │   │                       #   usePipelineStream (WS), stores/logStore (zustand)
+│   │   ├── artifacts/          # workspace artifact catalog: summary strip, URL-synced
+│   │   │                       #   filters, keyset infinite scroll, provenance detail page
 │   │   └── dashboard/          # dashboard page; runners/etc. slot in here
 │   ├── lib/                    # api (ky), cn, env, queryClient, slug
 │   └── types/                  # shared API types (Me, Workspace, Repository, Workflow,
@@ -343,7 +345,11 @@ endpoint, region `auto`, presigned URLs; isolated in `services/r2.rs`), and the 
 - **Job payload integrity:** every `job_assign` is HMAC-SHA256-signed over the exact
   transmitted JSON (`RUNNER_JOB_SIGNING_KEY`, ≥32 bytes); payloads embed the target
   `runner_id` and a 5-minute validity window; runners verify constant-time BEFORE parsing —
-  tampered, replayed, or misdirected payloads never execute
+  tampered, replayed, or misdirected payloads never execute. The verification key is
+  delivered to authenticated runners in `hello_ack` over wss (memory-only, re-received per
+  connect; a locally pinned `RUNNER_JOB_SIGNING_KEY` takes precedence) — safe because
+  runners only VERIFY with it, token auth precedes delivery, and payloads stay
+  runner-bound + short-lived
 - Runner-reported data is never trusted raw: job-scoped messages are validated against the
   job's actual assignment (`runner_id` match in SQL guards); `stage` values come from a
   fixed vocabulary; `error_category` is coerced onto a static allow-list; artifact names are
@@ -408,13 +414,23 @@ cd backend && cargo run
 npm start
 
 # 4. Runner (optional — pipelines stay Queued without one). Requires Docker.
-#    Create a runner under the workspace (POST /api/workspaces/{id}/runners
-#    or the UI when Runner Management ships) and copy the one-time token.
-#    Labels must cover the workflows' runs-on values (e.g. ubuntu-latest).
+#    Register via the Runners page wizard (or POST …/runners/bootstrap) and
+#    run the generated command — the signing key is delivered automatically
+#    over the authenticated socket (RUNNER_JOB_SIGNING_KEY is optional and
+#    only pins it locally). Labels must cover the workflows' runs-on values
+#    (e.g. ubuntu-latest).
 cd runner
 OVERUP_URL=http://localhost:8080 RUNNER_TOKEN=<token> \
-RUNNER_JOB_SIGNING_KEY=<same as backend> \
 RUNNER_LABELS=self-hosted,linux,x64,ubuntu-latest cargo run
+
+# Hosted runners ("create and wait" — no install step): set on the backend
+#   RUNNER_PROVISIONER=docker
+#   RUNNER_PROVISIONER_OVERUP_URL=<URL runner containers reach the API on>
+#   RUNNER_IMAGE=ghcr.io/botcoder254/overup-runner:latest   (default)
+#   RUNNER_PROVISIONER_DOCKER_HOST=<daemon for job execution; unset mounts
+#                                   /var/run/docker.sock — root-equivalent>
+# The wizard then offers "Hosted on this server"; revoke deprovisions the
+# container, and the janitor cleans up abandoned bootstraps.
 
 # Runner hardening knobs (defaults are least-privilege):
 #   RUNNER_CAP_DROP=true            drop ALL capabilities (set false to opt out)
@@ -437,7 +453,12 @@ New OAuth App. Homepage `http://localhost:3000`, callback
 
 GitHub App registration (repositories/workflows): GitHub → Settings → Developer settings →
 GitHub Apps → New GitHub App.
-- Setup URL: `http://localhost:8080/auth/github/app/setup` (check "Redirect on update")
+- Setup URL: `http://localhost:8080/auth/github/app/setup` (check "Redirect on update";
+  in production use the API origin, e.g. `https://api.example.com/auth/github/app/setup`)
+- Leave **"Request user authorization (OAuth) during installation" UNCHECKED** — enabling
+  it makes GitHub redirect installs to the OAuth callback with no `state` parameter. The
+  callback detects that case and forwards to the setup handler, but the correct
+  configuration avoids the detour entirely
 - Webhook URL: needs a public tunnel in dev — `smee.io` or `cloudflared tunnel` forwarding
   to `http://localhost:8080/webhooks/github`; set a strong webhook secret
 - Repository permissions: **Metadata (read)** + **Contents (read)** — least privilege;

@@ -125,7 +125,11 @@ pub async fn list(
         .into_iter()
         .map(RunnerResponse::from)
         .collect();
-    Ok(Json(json!({ "runners": runners })))
+    Ok(Json(json!({
+        "runners": runners,
+        // Whether this deployment can provision hosted runners itself.
+        "hostedAvailable": state.runner_provisioner.is_some(),
+    })))
 }
 
 /// POST /api/workspaces/{workspace_id}/runners/bootstrap
@@ -167,6 +171,7 @@ pub async fn bootstrap(
             bootstrap_expires_at: expires_at,
             created_by: user.id,
             request_id,
+            managed: false,
         },
     )
     .await?;
@@ -195,6 +200,165 @@ pub async fn bootstrap(
         })),
     )
         .into_response())
+}
+
+/// POST /api/workspaces/{workspace_id}/runners/hosted
+///
+/// "Create and wait": provisions a runner container on the server's Docker
+/// host. The bootstrap token goes straight into the container environment —
+/// it is never returned to the browser — and the signing key is delivered
+/// over the authenticated WebSocket on first connect.
+pub async fn create_hosted(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    Path(workspace_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(body): Json<CreateRunnerRequest>,
+) -> AppResult<Response> {
+    authz::require_permission(&state.pool, user.id, workspace_id, authz::CONTENT_WRITE).await?;
+
+    let Some(provisioner) = state.runner_provisioner.clone() else {
+        return Err(AppError::Conflict(
+            "hosted runners are not available on this deployment",
+        ));
+    };
+
+    if !is_valid_name(&body.name) {
+        return Err(AppError::Validation(
+            "runner name must be 1-64 characters: letters, digits, '-', '_', '.'".into(),
+        ));
+    }
+    if body.labels.len() > MAX_LABELS || body.labels.iter().any(|l| !is_valid_name(l)) {
+        return Err(AppError::Validation(
+            "labels must each be 1-64 characters: letters, digits, '-', '_', '.'".into(),
+        ));
+    }
+
+    let (token, token_hash) = session::generate_token();
+    let expires_at = chrono::Utc::now() + chrono::Duration::hours(1);
+
+    let request_id = headers.get("x-request-id").and_then(|v| v.to_str().ok());
+    let outcome = db::runners::create_bootstrap(
+        &state.pool,
+        db::runners::CreateBootstrapParams {
+            workspace_id,
+            name: &body.name,
+            labels: &body.labels,
+            bootstrap_token_hash: &token_hash,
+            bootstrap_expires_at: expires_at,
+            created_by: user.id,
+            request_id,
+            managed: true,
+        },
+    )
+    .await?;
+
+    let runner = match outcome {
+        db::runners::CreateOutcome::Created(runner) => *runner,
+        db::runners::CreateOutcome::NameTaken => {
+            return Err(AppError::Conflict("a runner with this name already exists"));
+        }
+    };
+
+    // Respond immediately and provision in the background: the first image
+    // pull can take minutes, far past any browser/proxy timeout. The wizard
+    // polls the row — status stays `offline` while provisioning runs, and
+    // `provision_error` (static category) is the failure signal. Failed rows
+    // are NOT deleted (the wizard must be able to observe the failure); the
+    // janitor purges them once the bootstrap credential expires.
+    tracing::info!(%workspace_id, runner = %runner.name, "hosted runner provisioning started");
+    let response = RunnerResponse::from(runner);
+    state.workspace_hub.publish(
+        workspace_id,
+        WorkspaceEvent::RunnerUpdate { runner: response.clone() },
+    );
+
+    let runner_id = response.id;
+    let runner_name = response.name.clone();
+    let runner_labels = response.labels.clone();
+    let task_state = state.clone();
+    tokio::spawn(async move {
+        let result = tokio::time::timeout(
+            PROVISION_TIMEOUT,
+            provisioner.provision(crate::services::runner_provisioner::ProvisionParams {
+                runner_id,
+                workspace_id,
+                name: &runner_name,
+                labels: &runner_labels,
+                bootstrap_token: &token,
+            }),
+        )
+        .await;
+
+        match result {
+            Ok(Ok(container_id)) => {
+                match db::runners::set_container_id(
+                    &task_state.pool,
+                    workspace_id,
+                    runner_id,
+                    &container_id,
+                )
+                .await
+                {
+                    Ok(true) => {
+                        tracing::info!(%workspace_id, %runner_id, "hosted runner provisioned");
+                    }
+                    Ok(false) => {
+                        // Revoked or purged while the image pulled: the fresh
+                        // container has no owning row — tear it down now.
+                        tracing::info!(%workspace_id, %runner_id, "runner row gone after provision; removing orphan container");
+                        if let Err(error) = provisioner.deprovision(runner_id, &container_id).await
+                        {
+                            tracing::warn!(%runner_id, error = ?error, "failed to remove orphaned hosted runner container");
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%workspace_id, %runner_id, error = ?error, "failed to record runner container id");
+                    }
+                }
+            }
+            Ok(Err(error)) => {
+                // Static category into the row; Docker detail stays here.
+                tracing::error!(
+                    %workspace_id, %runner_id,
+                    category = error.category(),
+                    error = ?error.detail(),
+                    "hosted runner provisioning failed"
+                );
+                mark_provision_failed(&task_state, workspace_id, runner_id, error.category())
+                    .await;
+            }
+            Err(_) => {
+                tracing::error!(%workspace_id, %runner_id, "hosted runner provisioning timed out");
+                // The cancelled future may have left a partial container
+                // behind; names are deterministic, so sweep by name.
+                provisioner.cleanup_partial(runner_id).await;
+                mark_provision_failed(&task_state, workspace_id, runner_id, "provision_timeout")
+                    .await;
+            }
+        }
+    });
+
+    Ok((StatusCode::CREATED, Json(json!({ "runner": response }))).into_response())
+}
+
+/// Provisioning budget for one hosted runner (image pull + create + start).
+const PROVISION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Flag a hosted runner row as failed and push the update to live watchers
+/// (the wizard's polling picks it up either way).
+async fn mark_provision_failed(
+    state: &AppState,
+    workspace_id: Uuid,
+    runner_id: Uuid,
+    category: &str,
+) {
+    if let Err(error) =
+        db::runners::set_provision_error(&state.pool, workspace_id, runner_id, category).await
+    {
+        tracing::warn!(%workspace_id, %runner_id, error = ?error, "failed to record provision error");
+    }
+    publish_runner(state, workspace_id, runner_id).await;
 }
 
 /// GET /api/workspaces/{workspace_id}/runners/{runner_id}
@@ -405,6 +569,10 @@ pub async fn revoke(
 ) -> AppResult<Response> {
     authz::require_permission(&state.pool, user.id, workspace_id, authz::CONTENT_WRITE).await?;
 
+    // Snapshot before the revoke: a managed runner's container must be torn
+    // down afterwards, and the row's container_id is the only pointer to it.
+    let existing = db::runners::find_by_id(&state.pool, workspace_id, runner_id).await?;
+
     let request_id = headers.get("x-request-id").and_then(|v| v.to_str().ok());
     let revoked =
         db::runners::revoke_for_workspace(&state.pool, workspace_id, runner_id, user.id, request_id)
@@ -419,6 +587,19 @@ pub async fn revoke(
     pipeline_run::orphan_runner_jobs(&state, runner_id).await?;
     state.scheduler.poke();
     publish_runner(&state, workspace_id, runner_id).await;
+
+    // Hosted runner: remove its container + volume in the background;
+    // best-effort — the janitor and operator docs cover stragglers.
+    if let (Some(provisioner), Some(runner)) = (state.runner_provisioner.clone(), existing)
+        && runner.managed
+        && let Some(container_id) = runner.container_id
+    {
+        tokio::spawn(async move {
+            if let Err(error) = provisioner.deprovision(runner_id, &container_id).await {
+                tracing::warn!(%runner_id, error = ?error, "failed to deprovision revoked hosted runner");
+            }
+        });
+    }
 
     tracing::info!(%workspace_id, %runner_id, "runner revoked");
     Ok(StatusCode::NO_CONTENT.into_response())
