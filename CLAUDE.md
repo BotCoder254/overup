@@ -532,6 +532,15 @@ RUNNER_LABELS=self-hosted,linux,x64,ubuntu-latest cargo run
 #   RUNNER_PROVISIONER=docker
 #   RUNNER_PROVISIONER_OVERUP_URL=<URL runner containers reach the API on>
 #   RUNNER_IMAGE=ghcr.io/botcoder254/overup-runner:latest   (default)
+#   RUNNER_PREPULL_IMAGES=ubuntu:24.04  job images warmed into the daemon
+#                                   after every provisioner (re)connect (so
+#                                   every deploy/restart); comma-separated,
+#                                   default = DEFAULT_JOB_IMAGE, runner image
+#                                   always included, warn-only (never affects
+#                                   hostedAvailable). This — not the backend
+#                                   Dockerfile — is how job images ship with
+#                                   a deployment: images live in the host
+#                                   daemon, not inside the backend image.
 #   RUNNER_PROVISIONER_DOCKER_SOCKET=<explicit unix socket / named pipe for
 #                                   the provisioner's OWN Docker connection;
 #                                   usually unset>
