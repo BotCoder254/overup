@@ -116,6 +116,12 @@ pub struct RunnerProvisionerConfig {
     /// workspace auto-provisioning (RUNNER_PROVISIONER_DEFAULT_PROFILE,
     /// default `standard`).
     pub default_profile: ResourceProfile,
+    /// Job images pre-pulled into the daemon after every successful
+    /// provisioner (re)connect (RUNNER_PREPULL_IMAGES, comma-separated;
+    /// default = DEFAULT_JOB_IMAGE). The runner image itself is always
+    /// warmed in addition. Pull failures are warn-only — they never affect
+    /// hosted-runner availability.
+    pub prepull_images: Vec<String>,
 }
 
 impl Config {
@@ -177,6 +183,10 @@ impl Config {
             ),
         };
 
+        // Parsed ahead of the provisioner group: it doubles as the default
+        // pre-pull list, so the image jobs fall back to is always warm.
+        let default_job_image = optional("DEFAULT_JOB_IMAGE", "ubuntu:24.04");
+
         // Hosted-runner provisioning is opt-in: the server needs Docker
         // access and a URL that provisioned containers can reach it on.
         let runner_provisioner = match optional("RUNNER_PROVISIONER", "").as_str() {
@@ -212,6 +222,14 @@ impl Config {
                          of the dedicated network)"
                     );
                 }
+                // Job images warmed into the daemon on every provisioner
+                // (re)connect (RUNNER_PREPULL_IMAGES, comma-separated).
+                // Default: the default job image, so the common
+                // `pulling_image` stage is near-instant. Validated here so a
+                // malformed deployment fails loudly; pulls themselves are
+                // warn-only at runtime.
+                let prepull_images =
+                    parse_prepull_list(&optional("RUNNER_PREPULL_IMAGES", &default_job_image))?;
                 Some(RunnerProvisionerConfig {
                     image: optional("RUNNER_IMAGE", "ghcr.io/botcoder254/overup-runner:latest"),
                     overup_url: required("RUNNER_PROVISIONER_OVERUP_URL")
@@ -232,6 +250,7 @@ impl Config {
                     max_global,
                     network,
                     default_profile,
+                    prepull_images,
                 })
             }
             other => anyhow::bail!("RUNNER_PROVISIONER must be 'docker' or unset (got {other})"),
@@ -302,7 +321,7 @@ impl Config {
             github_webhook_secret: required("GITHUB_WEBHOOK_SECRET")?,
             github_app_slug: required("GITHUB_APP_SLUG")?,
             runner_job_signing_key,
-            default_job_image: optional("DEFAULT_JOB_IMAGE", "ubuntu:24.04"),
+            default_job_image,
             job_timeout_seconds: optional("JOB_TIMEOUT_SECONDS", "3600")
                 .parse()
                 .context("JOB_TIMEOUT_SECONDS must be an integer")?,
@@ -334,4 +353,62 @@ fn required(key: &str) -> anyhow::Result<String> {
 
 fn optional(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+/// Parse the comma-separated RUNNER_PREPULL_IMAGES value: trim entries, drop
+/// empties, dedupe preserving order, and enforce sane caps so a malformed
+/// deployment fails at startup instead of spraying pull warnings forever.
+fn parse_prepull_list(raw: &str) -> anyhow::Result<Vec<String>> {
+    let mut images: Vec<String> = Vec::new();
+    for entry in raw.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        if entry.len() > 256 {
+            anyhow::bail!(
+                "RUNNER_PREPULL_IMAGES entries must be at most 256 characters (got one of {} \
+                 characters)",
+                entry.len()
+            );
+        }
+        if !images.iter().any(|existing| existing == entry) {
+            images.push(entry.to_string());
+        }
+    }
+    if images.len() > 20 {
+        anyhow::bail!(
+            "RUNNER_PREPULL_IMAGES supports at most 20 images (got {})",
+            images.len()
+        );
+    }
+    Ok(images)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_prepull_list;
+
+    #[test]
+    fn prepull_list_trims_dedupes_and_drops_empties() {
+        let parsed =
+            parse_prepull_list("ubuntu:24.04, ,debian:bookworm-slim,ubuntu:24.04").unwrap();
+        assert_eq!(parsed, vec!["ubuntu:24.04", "debian:bookworm-slim"]);
+    }
+
+    #[test]
+    fn prepull_list_single_default() {
+        assert_eq!(parse_prepull_list("ubuntu:24.04").unwrap(), vec!["ubuntu:24.04"]);
+    }
+
+    #[test]
+    fn prepull_list_rejects_oversized_entry() {
+        assert!(parse_prepull_list(&"x".repeat(257)).is_err());
+    }
+
+    #[test]
+    fn prepull_list_rejects_too_many_images() {
+        let raw = (0..21).map(|i| format!("image-{i}")).collect::<Vec<_>>().join(",");
+        assert!(parse_prepull_list(&raw).is_err());
+    }
 }

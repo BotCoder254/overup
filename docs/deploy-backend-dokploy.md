@@ -211,6 +211,9 @@ MAX_ARTIFACTS_PER_JOB=10
 # DOCKER_HOST injected into runner containers for job execution; unset
 # mounts /var/run/docker.sock into them (root-equivalent on the host).
 #RUNNER_PROVISIONER_DOCKER_HOST=
+# Job images pre-pulled on every deploy/restart so jobs start instantly —
+# see "Pre-pulling job images" below. Default: DEFAULT_JOB_IMAGE.
+#RUNNER_PREPULL_IMAGES=ubuntu:24.04
 
 # --- Cloudflare R2 (OPTIONAL — all four or none) ------------------------------
 # Without these, pipelines run fine; artifact uploads are denied and logs
@@ -331,6 +334,29 @@ daemon over unauthenticated `tcp://2375`. A TLS-secured remote daemon via
 alternative that avoids mounting the socket, and
 `RUNNER_PROVISIONER_DOCKER_SOCKET=<path>` overrides the socket location when it lives
 somewhere non-standard (e.g. rootless Docker).
+
+### 5.3 Pre-pulling job images (why the Dockerfile can't do it)
+
+Job containers run on images like `ubuntu:24.04`; the first job that needs one waits
+for the pull. It is tempting to "install" those images in `backend/Dockerfile` so a
+deploy ships them — **that cannot work**: Docker images live in the *host daemon's*
+store (`/var/lib/docker`), not inside another image's filesystem. There is no daemon
+available during `docker build`, and an image buried inside the backend image would be
+invisible to the daemon runners actually use.
+
+The supported equivalent is `RUNNER_PREPULL_IMAGES` (comma-separated, default =
+`DEFAULT_JOB_IMAGE`). After every successful provisioner (re)connect — which includes
+every Dokploy redeploy — the backend pulls the runner image plus each listed image
+into the daemon through the mounted socket, logging one
+`pre-pulled image into the docker daemon` line per image. Because hosted runner
+containers share that same daemon (the socket mount), the runner's `pulling_image`
+stage then resolves from local layers instantly. Pull failures (typo'd name, registry
+down) are a single warn per image and never affect hosted-runner availability.
+
+Two limits to know: if `RUNNER_PROVISIONER_DOCKER_HOST` points job execution at a
+*different* daemon, the pre-pull warms the wrong one (it only helps when both are the
+same daemon, the default setup); and self-hosted runners on other machines have their
+own daemons this feature cannot reach.
 
 ## 6. Domain & HTTPS
 

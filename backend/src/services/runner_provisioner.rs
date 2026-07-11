@@ -44,6 +44,9 @@ pub struct RunnerProvisioner {
     /// or could be created on the current connection, `bridge` as the
     /// per-connection fallback (re-evaluated on every reconnect).
     network: tokio::sync::RwLock<String>,
+    /// Guards the post-connect image warm-up so rapid reconnects can't stack
+    /// concurrent pulls of the same list.
+    prepull_running: std::sync::atomic::AtomicBool,
     cfg: RunnerProvisionerConfig,
 }
 
@@ -113,6 +116,20 @@ fn container_name(runner_id: Uuid) -> String {
 
 fn volume_name(runner_id: Uuid) -> String {
     format!("overup-runner-{runner_id}-data")
+}
+
+/// Drain one `create_image` pull to completion (idempotent: an image already
+/// present in the daemon resolves immediately).
+async fn pull_image(docker: &Docker, image: &str) -> Result<(), bollard::errors::Error> {
+    let mut pull = docker.create_image(
+        Some(CreateImageOptionsBuilder::default().from_image(image).build()),
+        None,
+        None,
+    );
+    while let Some(progress) = pull.next().await {
+        progress?;
+    }
+    Ok(())
 }
 
 /// How long a disconnected provisioner waits between connection attempts.
@@ -293,6 +310,7 @@ impl RunnerProvisioner {
         std::sync::Arc::new(Self {
             docker: tokio::sync::RwLock::new(None),
             network: tokio::sync::RwLock::new(cfg.network.clone()),
+            prepull_running: std::sync::atomic::AtomicBool::new(false),
             cfg,
         })
     }
@@ -339,7 +357,7 @@ impl RunnerProvisioner {
                         network = "bridge".to_string();
                     }
                     *self.network.write().await = network.clone();
-                    *self.docker.write().await = Some(docker);
+                    *self.docker.write().await = Some(docker.clone());
                     warned = false;
                     tracing::info!(
                         via = %via,
@@ -348,6 +366,7 @@ impl RunnerProvisioner {
                         "hosted-runner provisioner connected"
                     );
                     self.preflight_overup_url().await;
+                    std::sync::Arc::clone(&self).spawn_prepull(docker);
                 }
                 Err(attempts) => {
                     if !warned {
@@ -471,19 +490,50 @@ impl RunnerProvisioner {
         let Some(docker) = self.handle().await else {
             return Err(ProvisionError::DockerUnavailable);
         };
-        let mut pull = docker.create_image(
-            Some(
-                CreateImageOptionsBuilder::default()
-                    .from_image(&self.cfg.image)
-                    .build(),
-            ),
-            None,
-            None,
-        );
-        while let Some(progress) = pull.next().await {
-            progress.map_err(ProvisionError::ImagePull)?;
+        pull_image(&docker, &self.cfg.image)
+            .await
+            .map_err(ProvisionError::ImagePull)
+    }
+
+    /// Warm the daemon's image cache after a successful (re)connect: the
+    /// runner image plus every RUNNER_PREPULL_IMAGES entry, so the runner's
+    /// `pulling_image` stage (and the first hosted-runner create) resolves
+    /// from local layers. Spawned — a multi-minute pull must never block the
+    /// health-ping loop — and warn-only: a bad image name never affects
+    /// hosted-runner availability. In the default setup the runner containers
+    /// share this daemon via the socket mount, so warming here warms job
+    /// execution too; with RUNNER_PROVISIONER_DOCKER_HOST pointed at a
+    /// different daemon this only helps runner-container creation.
+    fn spawn_prepull(self: std::sync::Arc<Self>, docker: Docker) {
+        use std::sync::atomic::Ordering;
+        if self.prepull_running.swap(true, Ordering::SeqCst) {
+            return;
         }
-        Ok(())
+        let this = self;
+        tokio::spawn(async move {
+            let mut images: Vec<&str> = vec![this.cfg.image.as_str()];
+            for image in &this.cfg.prepull_images {
+                if !images.contains(&image.as_str()) {
+                    images.push(image);
+                }
+            }
+            for image in images {
+                let started = std::time::Instant::now();
+                match pull_image(&docker, image).await {
+                    Ok(()) => tracing::info!(
+                        image = %image,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "pre-pulled image into the docker daemon"
+                    ),
+                    Err(error) => tracing::warn!(
+                        image = %image,
+                        error = ?error,
+                        "image pre-pull failed — jobs needing it will pull on demand"
+                    ),
+                }
+            }
+            this.prepull_running.store(false, Ordering::SeqCst);
+        });
     }
 
     /// Create and start one runner container. The image must already be
