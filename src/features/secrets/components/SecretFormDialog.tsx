@@ -171,13 +171,13 @@ export function SecretFormDialog({
         </>
       }
     >
-      <div className="space-y-4">
+      <div className="space-y-3">
         {!replacing && (
           <>
             <FormField
               id="secret-name"
               label="Name"
-              hint="UPPER_SNAKE_CASE — this becomes the environment variable name in job containers."
+              hint="UPPER_SNAKE_CASE — the env variable name in job containers."
               error={nameProblem}
             >
               {(aria) => (
@@ -197,7 +197,7 @@ export function SecretFormDialog({
 
             <fieldset>
               <legend className="text-sm font-medium text-charcoal">Scope</legend>
-              <div className="mt-2 space-y-2">
+              <div className="mt-1.5 space-y-1.5">
                 <label className="flex items-start gap-2 text-sm text-charcoal">
                   <input
                     type="radio"
@@ -224,7 +224,7 @@ export function SecretFormDialog({
                   <span>
                     Repository
                     <span className="block text-xs text-steel">
-                      Limited to one repository; overrides a workspace secret of the same name.
+                      One repository only; overrides workspace.
                     </span>
                   </span>
                 </label>
@@ -239,8 +239,7 @@ export function SecretFormDialog({
                   <span>
                     Environment
                     <span className="block text-xs text-steel">
-                      Only for jobs declaring the environment in YAML; overrides repository and
-                      workspace secrets of the same name.
+                      Only jobs declaring it in YAML; highest precedence.
                     </span>
                   </span>
                 </label>
@@ -316,7 +315,7 @@ export function SecretFormDialog({
         <FormField
           id="secret-value"
           label={replacing ? 'New value' : 'Value'}
-          hint="Sent once over an encrypted connection, then stored as ciphertext. Never appears in logs — it is masked automatically."
+          hint="Stored encrypted, masked in logs, never viewable again."
           error={valueProblem}
         >
           {(aria) => (

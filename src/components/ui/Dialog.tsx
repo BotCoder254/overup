@@ -80,16 +80,20 @@ export function Dialog({ open, onClose, title, description, children, footer, cl
         aria-labelledby={titleId}
         tabIndex={-1}
         className={cn(
-          'relative w-full max-w-md animate-scale-in rounded border border-steel/20 bg-canvas p-5 shadow-lg focus:outline-none',
+          'relative flex max-h-[calc(100vh-2rem)] w-full max-w-md flex-col animate-scale-in rounded border border-steel/20 bg-canvas p-5 shadow-lg focus:outline-none',
           className,
         )}
       >
-        <h2 id={titleId} className="text-base font-semibold text-charcoal">
+        <h2 id={titleId} className="shrink-0 text-base font-semibold text-charcoal">
           {title}
         </h2>
-        {description && <p className="mt-1.5 text-sm leading-relaxed text-steel">{description}</p>}
-        {children}
-        {footer && <div className="mt-5 flex items-center justify-end gap-2">{footer}</div>}
+        {description && (
+          <p className="mt-1.5 shrink-0 text-sm leading-relaxed text-steel">{description}</p>
+        )}
+        {/* Body scrolls when the dialog would exceed the viewport, so the
+            title and footer actions always stay reachable. */}
+        {children && <div className="min-h-0 overflow-y-auto">{children}</div>}
+        {footer && <div className="mt-5 flex shrink-0 items-center justify-end gap-2">{footer}</div>}
       </div>
     </div>,
     document.body,

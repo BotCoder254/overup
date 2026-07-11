@@ -199,6 +199,9 @@ MAX_ARTIFACTS_PER_JOB=10
 # Lets the control plane provision runner containers on its own Docker host;
 # the Runners wizard then offers "Hosted on this server". Full reference:
 # docs/deploy-runner.md §2.1.
+# IMPORTANT: the backend container must be able to reach the host's Docker
+# daemon — mount /var/run/docker.sock into it AND grant the socket's group,
+# see §5.2 below. Env vars alone are not enough.
 #RUNNER_PROVISIONER=docker
 # URL runner containers reach the API on — never localhost; on a single host
 # with Docker's default bridge http://172.17.0.1:8080 usually works, else
@@ -278,6 +281,56 @@ Notes:
   the login redirect or the live pipeline stream misbehaves later, this value being
   wrong is the first thing to check.
 - Changing environment variables in Dokploy requires a **redeploy** to take effect.
+
+### 5.2 Hosted runners: giving the backend Docker access
+
+Skip this unless you enable `RUNNER_PROVISIONER=docker`. When you do, remember the
+backend runs **inside a container as a non-root user (uid 10001)** — Docker being
+installed on the VPS (`/usr/bin/docker`) is invisible from in there. Without the two
+steps below the runtime log shows, every outage, one warn like:
+
+```
+hosted-runner provisioner: docker unreachable — retrying every 30s
+attempts=/var/run/docker.sock: socket not present; ...
+```
+
+**Step 1 — bind-mount the daemon socket into the backend container.**
+Dokploy: Application → **Advanced → Mounts** → *Add Mount* → type **Bind Mount**,
+Host Path `/var/run/docker.sock`, Mount Path `/var/run/docker.sock`. (Raw Docker /
+Compose equivalents in §9.)
+
+**Step 2 — grant the socket's group to the container user.**
+The socket is `root:docker` mode `660`, so uid 10001 gets `permission denied` until it
+carries the socket's gid. Find the gid on the VPS:
+
+```bash
+stat -c %g /var/run/docker.sock     # e.g. 988
+```
+
+Then grant it, whichever fits how you run the container:
+
+- **Dokploy Compose service** (or any compose file): add to the backend service
+  ```yaml
+  group_add:
+    - "988"        # the gid from stat, as a string
+  ```
+- **Raw `docker run`**: add `--group-add $(stat -c %g /var/run/docker.sock)`.
+- **Dokploy Application type**: if your Dokploy version doesn't expose a
+  group-add/groups field in the advanced container settings, switch the backend to a
+  **Compose** service (§9.3) — same image, same env, plus the `group_add` above.
+
+Redeploy and watch the runtime log: within ~30 s the reconnect loop prints
+`hosted-runner provisioner connected` and the Runners wizard's hosted path goes live —
+no backend restart needed beyond the redeploy.
+
+Security note: the Docker socket is **root-equivalent on the host**. That is inherent
+to hosted runners (the provisioner's documented trust boundary — it must control the
+daemon it provisions on) and acceptable on a single-operator VPS; never expose the
+daemon over unauthenticated `tcp://2375`. A TLS-secured remote daemon via
+`DOCKER_HOST` + `DOCKER_TLS_VERIFY=1` + `DOCKER_CERT_PATH` (set on the backend) is the
+alternative that avoids mounting the socket, and
+`RUNNER_PROVISIONER_DOCKER_SOCKET=<path>` overrides the socket location when it lives
+somewhere non-standard (e.g. rootless Docker).
 
 ## 6. Domain & HTTPS
 
@@ -454,6 +507,10 @@ docker run -d \
   --security-opt no-new-privileges \
   -p 127.0.0.1:8080:8080 \
   overup-backend:latest
+
+# Hosted runners (RUNNER_PROVISIONER=docker)? Add these two flags — see §5.2:
+#   -v /var/run/docker.sock:/var/run/docker.sock \
+#   --group-add "$(stat -c %g /var/run/docker.sock)" \
 ```
 
 - `-p 127.0.0.1:8080:8080` binds only to localhost — your reverse proxy (Traefik,
@@ -485,6 +542,11 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    # Hosted runners (RUNNER_PROVISIONER=docker)? Uncomment — see §5.2:
+    # volumes:
+    #   - /var/run/docker.sock:/var/run/docker.sock
+    # group_add:
+    #   - "988"                   # stat -c %g /var/run/docker.sock
     ports:
       - "127.0.0.1:8080:8080"     # remove entirely when Traefik shares the network
     networks:
@@ -553,6 +615,8 @@ Most protections are already enforced **in the code** (see the security checklis
 | Health check keeps failing but logs look fine | Confirm `BIND_ADDR=0.0.0.0:8080` (binding `127.0.0.1` inside the container breaks both Traefik and the healthcheck). |
 | Login loop / cookie never set | `COOKIE_SECURE=true` while testing over plain HTTP (the `__Host-` cookie requires HTTPS), or `FRONTEND_URL` doesn't match the real frontend origin. |
 | GitHub redirects to an error after authorize | `OAUTH_REDIRECT_URL` ≠ the callback URL registered on the OAuth App (must match exactly, scheme included). |
+| `hosted-runner provisioner: docker unreachable — retrying every 30s` with `socket not present` on every path | The Docker socket isn't mounted into the backend container — Docker on the VPS host is invisible from inside it. Add the bind mount + `group_add` per [§5.2](#52-hosted-runners-giving-the-backend-docker-access) and redeploy. |
+| Same warn but the attempt line says `permission denied` | Socket is mounted but uid 10001 can't open it — the `group_add`/`--group-add` step of [§5.2](#52-hosted-runners-giving-the-backend-docker-access) is missing or uses the wrong gid (`stat -c %g /var/run/docker.sock`). |
 | Webhook deliveries show `401` | `GITHUB_WEBHOOK_SECRET` doesn't match the secret configured on the GitHub App. |
 | Webhook deliveries show `404` | Wrong Webhook URL — it's `/webhooks/github`, not under `/api`. |
 | `database connection` errors at boot | Wrong internal hostname (use the Dokploy service's internal host, not `localhost`), or the app and Postgres aren't on the same Docker network. |

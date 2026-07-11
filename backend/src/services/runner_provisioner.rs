@@ -166,6 +166,46 @@ async fn connect_explicit(raw: &str) -> Result<Docker, String> {
     };
 }
 
+/// Whether this process is itself running inside a container. Drives the
+/// remediation wording: "join the docker group" advice is useless when the
+/// real problem is that the host's daemon socket was never mounted into the
+/// backend container — the host's /usr/bin/docker is invisible from here.
+#[cfg(unix)]
+fn running_in_container() -> bool {
+    if std::path::Path::new("/.dockerenv").exists() {
+        return true;
+    }
+    std::fs::read_to_string("/proc/1/cgroup")
+        .map(|cgroup| {
+            ["docker", "containerd", "kubepods", "libpod", "buildkit"]
+                .iter()
+                .any(|marker| cgroup.contains(marker))
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn running_in_container() -> bool {
+    false
+}
+
+/// Make an EACCES on an existing socket actionable: bollard's raw
+/// "Permission denied (os error 13)" doesn't say whose permission or how to
+/// grant it, and it's the exact failure a non-root backend hits once the
+/// socket IS mounted but the group wasn't added.
+fn annotate_permission_denied(reason: String) -> String {
+    let lower = reason.to_ascii_lowercase();
+    if lower.contains("permission denied") || lower.contains("os error 13") {
+        format!(
+            "{reason} (socket exists but this user cannot open it — add the backend user to \
+             the socket's group: usermod -aG docker, or for a containerized backend \
+             --group-add $(stat -c %g /var/run/docker.sock) / compose group_add)"
+        )
+    } else {
+        reason
+    }
+}
+
 /// Well-known local socket locations, probed when neither the explicit
 /// endpoint nor DOCKER_HOST produced a connection: the standard daemon
 /// sockets, then rootless Docker's per-user runtime sockets.
@@ -200,7 +240,9 @@ async fn try_connect(cfg: &RunnerProvisionerConfig) -> Result<(Docker, String), 
         let label = format!("RUNNER_PROVISIONER_DOCKER_SOCKET={raw}");
         match connect_explicit(raw).await {
             Ok(docker) => return Ok((docker, label)),
-            Err(reason) => attempts.push(format!("{label}: {reason}")),
+            Err(reason) => {
+                attempts.push(format!("{label}: {}", annotate_permission_denied(reason)));
+            }
         }
     }
 
@@ -223,7 +265,9 @@ async fn try_connect(cfg: &RunnerProvisionerConfig) -> Result<(Docker, String), 
         }
         match connect_explicit(&label).await {
             Ok(docker) => return Ok((docker, label)),
-            Err(reason) => attempts.push(format!("{label}: {reason}")),
+            Err(reason) => {
+                attempts.push(format!("{label}: {}", annotate_permission_denied(reason)));
+            }
         }
     }
 
@@ -308,15 +352,30 @@ impl RunnerProvisioner {
                 Err(attempts) => {
                     if !warned {
                         warned = true;
-                        tracing::warn!(
-                            attempts = %attempts.join("; "),
-                            "hosted-runner provisioner: docker unreachable — retrying every 30s. \
-                             Remediation: ensure the backend user is in the `docker` group; if \
-                             the backend runs in a container, mount /var/run/docker.sock into \
-                             it; for rootless Docker set \
+                        // Docker being installed on the HOST doesn't help a
+                        // containerized backend — tailor the fix to where we
+                        // actually run.
+                        let remediation = if running_in_container() {
+                            "the backend itself runs inside a container, so the host's Docker \
+                             daemon (and /usr/bin/docker) is not visible here. Bind-mount the \
+                             socket into THIS container (-v \
+                             /var/run/docker.sock:/var/run/docker.sock — in Dokploy/Portainer \
+                             etc. add a Mounts entry) AND grant the non-root backend user the \
+                             socket's group (--group-add $(stat -c %g /var/run/docker.sock) or \
+                             compose group_add), then redeploy; alternatively point DOCKER_HOST \
+                             at a TLS-secured remote daemon (+ DOCKER_TLS_VERIFY / \
+                             DOCKER_CERT_PATH)"
+                        } else {
+                            "ensure the docker daemon is running (systemctl status docker) and \
+                             the backend user is in the `docker` group; for rootless Docker set \
                              RUNNER_PROVISIONER_DOCKER_SOCKET=$XDG_RUNTIME_DIR/docker.sock; a \
                              remote daemon needs DOCKER_HOST (+ DOCKER_TLS_VERIFY / \
                              DOCKER_CERT_PATH)"
+                        };
+                        tracing::warn!(
+                            attempts = %attempts.join("; "),
+                            remediation = %remediation,
+                            "hosted-runner provisioner: docker unreachable — retrying every 30s"
                         );
                     }
                     tokio::time::sleep(RECONNECT_INTERVAL).await;
@@ -647,5 +706,24 @@ impl RunnerProvisioner {
         }
         tracing::info!(%runner_id, "hosted runner deprovisioned");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::annotate_permission_denied;
+
+    #[test]
+    fn permission_denied_gets_group_remediation() {
+        let annotated =
+            annotate_permission_denied("Permission denied (os error 13)".to_string());
+        assert!(annotated.contains("group"));
+        assert!(annotated.starts_with("Permission denied (os error 13)"));
+    }
+
+    #[test]
+    fn other_errors_pass_through_untouched() {
+        let reason = "connected but ping failed (timeout)".to_string();
+        assert_eq!(annotate_permission_denied(reason.clone()), reason);
     }
 }
