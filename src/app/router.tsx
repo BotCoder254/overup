@@ -18,6 +18,8 @@ import { ArtifactsPage } from '../features/artifacts/pages/ArtifactsPage';
 import { ArtifactDetailPage } from '../features/artifacts/pages/ArtifactDetailPage';
 import { RunnersPage } from '../features/runners/pages/RunnersPage';
 import { RunnerDetailPage } from '../features/runners/pages/RunnerDetailPage';
+import { SecretsPage } from '../features/secrets/pages/SecretsPage';
+import { SecretDetailPage } from '../features/secrets/pages/SecretDetailPage';
 import { NAV_ITEMS } from './navigation';
 import { ProtectedRoute } from './guards/ProtectedRoute';
 import { PublicOnlyRoute } from './guards/PublicOnlyRoute';
@@ -31,6 +33,7 @@ const IMPLEMENTED_SEGMENTS = new Set([
   'jobs',
   'artifacts',
   'runners',
+  'secrets',
 ]);
 
 /** Legacy /dashboard entry point: forward to the slug-routed workspace. */
@@ -75,6 +78,8 @@ export const router = createBrowserRouter([
               { path: 'artifacts/:artifactId', element: <ArtifactDetailPage /> },
               { path: 'runners', element: <RunnersPage /> },
               { path: 'runners/:runnerId', element: <RunnerDetailPage /> },
+              { path: 'secrets', element: <SecretsPage /> },
+              { path: 'secrets/:secretId', element: <SecretDetailPage /> },
               ...NAV_ITEMS.filter(
                 (item) => item.segment !== '' && !IMPLEMENTED_SEGMENTS.has(item.segment),
               ).map((item) => ({

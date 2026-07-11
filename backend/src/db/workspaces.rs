@@ -13,6 +13,9 @@ pub enum ProvisionOutcome {
     AlreadyMember,
 }
 
+// NOTE: these arrays only run at provisioning time. Adding a permission
+// here requires a matching role_permissions backfill migration for
+// pre-existing workspaces (see 20260711300001_secrets.sql).
 const OWNER_PERMISSIONS: &[&str] = &[
     "workspace.manage",
     "workspace.delete",
@@ -23,6 +26,8 @@ const OWNER_PERMISSIONS: &[&str] = &[
     "audit.read",
     "content.read",
     "content.write",
+    "secrets.read",
+    "secrets.manage",
 ];
 
 const ADMIN_PERMISSIONS: &[&str] = &[
@@ -33,9 +38,11 @@ const ADMIN_PERMISSIONS: &[&str] = &[
     "audit.read",
     "content.read",
     "content.write",
+    "secrets.read",
+    "secrets.manage",
 ];
 
-const MEMBER_PERMISSIONS: &[&str] = &["content.read", "content.write"];
+const MEMBER_PERMISSIONS: &[&str] = &["content.read", "content.write", "secrets.read"];
 
 fn is_unique_violation(err: &sqlx::Error, constraint: &str) -> bool {
     matches!(

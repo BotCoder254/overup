@@ -13,6 +13,7 @@ use crate::services::r2::R2;
 use crate::services::runner_hub::RunnerHub;
 use crate::services::runner_provisioner::RunnerProvisioner;
 use crate::services::scheduler::Scheduler;
+use crate::services::secrets_crypto::SecretsCrypto;
 use crate::services::workspace_hub::WorkspaceHub;
 use crate::services::ws_ticket::WsTicketStore;
 
@@ -47,6 +48,10 @@ pub struct AppState {
     /// unavailable (not configured, or Docker unreachable at startup).
     /// Initialized asynchronously in main after construction.
     pub runner_provisioner: Option<Arc<RunnerProvisioner>>,
+    /// Envelope-encryption engine for secret values; None disables the
+    /// Secrets feature cleanly (mutations denied, dispatch fails closed
+    /// for repositories that already have stored secrets).
+    pub secrets_crypto: Option<Arc<SecretsCrypto>>,
 }
 
 impl AppState {
@@ -73,6 +78,15 @@ impl AppState {
             &config.github_app_private_key_pem,
         )?;
 
+        // Validates the master key shape at startup so a bad key cannot
+        // surface later as a mid-request failure (the GitHub App PEM
+        // pattern).
+        let secrets_crypto = config
+            .secrets_master_key
+            .as_ref()
+            .map(|key| SecretsCrypto::new(key).map(Arc::new))
+            .transpose()?;
+
         let r2 = config.r2.as_ref().map(|r2| {
             Arc::new(R2::new(
                 &r2.account_id,
@@ -96,6 +110,7 @@ impl AppState {
             ws_tickets: Arc::new(WsTicketStore::default()),
             // Requires async Docker probing; main fills it in right after.
             runner_provisioner: None,
+            secrets_crypto,
         })
     }
 }

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::http::{HeaderName, HeaderValue, Method, header};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{Router, middleware as axum_middleware};
 use tower_governor::GovernorLayer;
 use tower_governor::governor::GovernorConfigBuilder;
@@ -13,8 +13,8 @@ use tower_http::trace::TraceLayer;
 use crate::error::AppError;
 use crate::handlers::{
     artifacts, auth, browser_ws, dashboard, dashboard_ws, github_installations, github_webhooks,
-    health, jobs, me, pipelines, repositories, runner_ws, runners, workflows, workspaces,
-    ws_tickets,
+    health, jobs, me, pipelines, repositories, runner_ws, runners, secrets, workflows,
+    workspaces, ws_tickets,
 };
 use crate::middleware::{csrf, security_headers};
 use crate::state::AppState;
@@ -83,6 +83,16 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
     // Hosted-runner provisioning pulls images and starts containers — the
     // strictest budget of all.
     let hosted_runner_governor = Arc::new(
+        GovernorConfigBuilder::default()
+            .per_second(1)
+            .burst_size(5)
+            .finish()
+            .expect("valid governor configuration"),
+    );
+    // Secret value replacement is a security-sensitive write path; keep it
+    // on the strict budget (creation shares the general api_governor like
+    // other cheap single-row writes).
+    let secrets_value_governor = Arc::new(
         GovernorConfigBuilder::default()
             .per_second(1)
             .burst_size(5)
@@ -189,6 +199,26 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
         .route(
             "/workspaces/{workspace_id}/artifacts/{artifact_id}",
             get(artifacts::detail).delete(artifacts::remove),
+        )
+        .route(
+            "/workspaces/{workspace_id}/secrets",
+            get(secrets::list).post(secrets::create),
+        )
+        .route(
+            "/workspaces/{workspace_id}/secrets/summary",
+            get(secrets::summary),
+        )
+        .route(
+            "/workspaces/{workspace_id}/secrets/audit",
+            get(secrets::audit),
+        )
+        .route(
+            "/workspaces/{workspace_id}/secrets/{secret_id}",
+            get(secrets::detail).patch(secrets::update).delete(secrets::remove),
+        )
+        .route(
+            "/workspaces/{workspace_id}/secrets/{secret_id}/value",
+            put(secrets::replace_value).layer(GovernorLayer::new(secrets_value_governor)),
         )
         .route(
             "/workspaces/{workspace_id}/runners",

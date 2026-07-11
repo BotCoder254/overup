@@ -12,6 +12,7 @@ pub mod pipelines;
 pub mod repositories;
 pub mod runner_ws;
 pub mod runners;
+pub mod secrets;
 pub mod workflows;
 pub mod workspaces;
 pub mod ws_tickets;

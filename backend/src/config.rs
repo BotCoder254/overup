@@ -59,6 +59,13 @@ pub struct Config {
     /// plane) — optional group enabled with RUNNER_PROVISIONER=docker;
     /// without it, hosted-runner creation is cleanly denied.
     pub runner_provisioner: Option<RunnerProvisionerConfig>,
+    /// Master key wrapping per-secret data-encryption keys
+    /// (SECRETS_MASTER_KEY: exactly 32 bytes, hex- or base64-encoded).
+    /// Optional: without it the Secrets API denies mutations cleanly and
+    /// dispatch fails closed for repositories that have stored secrets.
+    /// Losing the key makes existing secrets permanently undecryptable
+    /// (no plaintext escrow by design) — replace values to recover.
+    pub secrets_master_key: Option<Vec<u8>>,
 }
 
 #[derive(Clone)]
@@ -218,6 +225,30 @@ impl Config {
             other => anyhow::bail!("RUNNER_PROVISIONER must be 'docker' or unset (got {other})"),
         };
 
+        // Secrets master key: exactly 32 decoded bytes. 64 hex chars is the
+        // documented form (openssl rand -hex 32); base64 of 32 bytes is also
+        // accepted. Anything else is a deployment mistake, not a toggle.
+        let secrets_master_key = match std::env::var("SECRETS_MASTER_KEY") {
+            Err(_) => None,
+            Ok(raw) => {
+                let raw = raw.trim();
+                let decoded = if raw.len() == 64 && raw.chars().all(|c| c.is_ascii_hexdigit()) {
+                    hex::decode(raw).context("SECRETS_MASTER_KEY is not valid hex")?
+                } else {
+                    use base64::Engine;
+                    base64::engine::general_purpose::STANDARD
+                        .decode(raw)
+                        .context("SECRETS_MASTER_KEY is not valid hex or base64")?
+                };
+                if decoded.len() != 32 {
+                    anyhow::bail!(
+                        "SECRETS_MASTER_KEY must decode to exactly 32 bytes (generate one with `openssl rand -hex 32`)"
+                    );
+                }
+                Some(decoded)
+            }
+        };
+
         let artifact_retention_days: i64 = optional("ARTIFACT_RETENTION_DAYS", "30")
             .parse()
             .context("ARTIFACT_RETENTION_DAYS must be an integer")?;
@@ -280,6 +311,7 @@ impl Config {
             log_hot_retention_days,
             r2,
             runner_provisioner,
+            secrets_master_key,
         })
     }
 }
