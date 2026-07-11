@@ -549,6 +549,7 @@ pub async fn artifact_download(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
     Path((workspace_id, artifact_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
 ) -> AppResult<Json<serde_json::Value>> {
     authz::require_permission(&state.pool, user.id, workspace_id, authz::CONTENT_READ).await?;
 
@@ -566,6 +567,29 @@ pub async fn artifact_download(
         .presign_get(&artifact.r2_key, &artifact.name)
         .await
         .map_err(AppError::Internal)?;
+
+    // Downloads are audited like uploads and deletes; the presigned URL
+    // itself never appears in the log.
+    let request_id = headers.get("x-request-id").and_then(|v| v.to_str().ok());
+    sqlx::query(
+        r#"
+        INSERT INTO audit_logs
+            (workspace_id, actor_user_id, action, subject_type, subject_id, metadata, request_id)
+        VALUES ($1, $2, 'artifact.downloaded', 'artifact', $3, $4, $5)
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(user.id)
+    .bind(artifact.id)
+    .bind(json!({
+        "name": artifact.name,
+        "sizeBytes": artifact.size_bytes,
+        "pipelineId": artifact.pipeline_id,
+    }))
+    .bind(request_id)
+    .execute(&state.pool)
+    .await?;
+
     Ok(Json(json!({ "url": url })))
 }
 

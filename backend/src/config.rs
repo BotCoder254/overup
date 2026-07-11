@@ -1,5 +1,7 @@
 use anyhow::Context;
 
+use crate::services::runner_profiles::ResourceProfile;
+
 /// Application configuration, loaded once at startup from environment
 /// variables. Secrets never appear in Debug output or logs.
 #[derive(Clone)]
@@ -81,6 +83,23 @@ pub struct RunnerProvisionerConfig {
     /// /var/run/docker.sock into the container instead — note that the
     /// socket mount is root-equivalent on the host.
     pub runner_docker_host: Option<String>,
+    /// Auto-create one hosted runner when a workspace is created
+    /// (RUNNER_AUTO_PROVISION, default true whenever the provisioner is on).
+    pub auto_provision: bool,
+    /// Hosted-runner quotas: managed, non-revoked runners counted per
+    /// workspace (HOSTED_RUNNERS_PER_WORKSPACE) and across the whole
+    /// deployment (HOSTED_RUNNERS_GLOBAL). Both must be >= 1 — disabling
+    /// hosted runners is RUNNER_PROVISIONER=off, not a zero quota.
+    pub max_per_workspace: i64,
+    pub max_global: i64,
+    /// Docker network runner containers join (RUNNER_PROVISIONER_NETWORK,
+    /// default `overup-runners`). Set to `bridge` to opt out of the dedicated
+    /// network; anything else is created at startup if missing.
+    pub network: String,
+    /// Resource profile applied when a request doesn't pick one — including
+    /// workspace auto-provisioning (RUNNER_PROVISIONER_DEFAULT_PROFILE,
+    /// default `standard`).
+    pub default_profile: ResourceProfile,
 }
 
 impl Config {
@@ -146,19 +165,56 @@ impl Config {
         // access and a URL that provisioned containers can reach it on.
         let runner_provisioner = match optional("RUNNER_PROVISIONER", "").as_str() {
             "" | "off" | "false" => None,
-            "docker" => Some(RunnerProvisionerConfig {
-                image: optional("RUNNER_IMAGE", "ghcr.io/botcoder254/overup-runner:latest"),
-                overup_url: required("RUNNER_PROVISIONER_OVERUP_URL")
-                    .context(
-                        "RUNNER_PROVISIONER=docker requires RUNNER_PROVISIONER_OVERUP_URL — \
-                         the URL runner containers use to reach this control plane",
-                    )?
-                    .trim_end_matches('/')
-                    .to_string(),
-                runner_docker_host: std::env::var("RUNNER_PROVISIONER_DOCKER_HOST")
-                    .ok()
-                    .filter(|v| !v.is_empty()),
-            }),
+            "docker" => {
+                let auto_provision: bool = optional("RUNNER_AUTO_PROVISION", "true")
+                    .parse()
+                    .context("RUNNER_AUTO_PROVISION must be true or false")?;
+                let max_per_workspace: i64 = optional("HOSTED_RUNNERS_PER_WORKSPACE", "3")
+                    .parse()
+                    .context("HOSTED_RUNNERS_PER_WORKSPACE must be an integer")?;
+                let max_global: i64 = optional("HOSTED_RUNNERS_GLOBAL", "20")
+                    .parse()
+                    .context("HOSTED_RUNNERS_GLOBAL must be an integer")?;
+                if max_per_workspace < 1 || max_global < 1 {
+                    anyhow::bail!(
+                        "HOSTED_RUNNERS_PER_WORKSPACE and HOSTED_RUNNERS_GLOBAL must be at least 1 \
+                         (disable hosted runners with RUNNER_PROVISIONER=off instead)"
+                    );
+                }
+                let default_profile_raw =
+                    optional("RUNNER_PROVISIONER_DEFAULT_PROFILE", "standard");
+                let Some(default_profile) = ResourceProfile::from_str(&default_profile_raw) else {
+                    anyhow::bail!(
+                        "RUNNER_PROVISIONER_DEFAULT_PROFILE must be small, standard, or large \
+                         (got {default_profile_raw})"
+                    );
+                };
+                let network = optional("RUNNER_PROVISIONER_NETWORK", "overup-runners");
+                if network.is_empty() {
+                    anyhow::bail!(
+                        "RUNNER_PROVISIONER_NETWORK must not be empty (use 'bridge' to opt out \
+                         of the dedicated network)"
+                    );
+                }
+                Some(RunnerProvisionerConfig {
+                    image: optional("RUNNER_IMAGE", "ghcr.io/botcoder254/overup-runner:latest"),
+                    overup_url: required("RUNNER_PROVISIONER_OVERUP_URL")
+                        .context(
+                            "RUNNER_PROVISIONER=docker requires RUNNER_PROVISIONER_OVERUP_URL — \
+                             the URL runner containers use to reach this control plane",
+                        )?
+                        .trim_end_matches('/')
+                        .to_string(),
+                    runner_docker_host: std::env::var("RUNNER_PROVISIONER_DOCKER_HOST")
+                        .ok()
+                        .filter(|v| !v.is_empty()),
+                    auto_provision,
+                    max_per_workspace,
+                    max_global,
+                    network,
+                    default_profile,
+                })
+            }
             other => anyhow::bail!("RUNNER_PROVISIONER must be 'docker' or unset (got {other})"),
         };
 

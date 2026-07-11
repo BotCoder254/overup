@@ -82,6 +82,16 @@ pub enum RunnerMsg {
         name: String,
         size_bytes: u64,
         checksum_sha256: String,
+        /// Archive introspection. Older runners omit all three and newer
+        /// servers default them to `None`, so this addition never bumps
+        /// [`PROTOCOL_VERSION`]. The runner caps `entries` well below the
+        /// server's 128 KB inbound frame limit; the server re-validates.
+        #[serde(default)]
+        uncompressed_bytes: Option<u64>,
+        #[serde(default)]
+        file_count: Option<u32>,
+        #[serde(default)]
+        entries: Option<Vec<ArtifactEntry>>,
     },
     JobResult {
         job_id: Uuid,
@@ -91,6 +101,15 @@ pub enum RunnerMsg {
         error_category: Option<String>,
         metrics: JobMetrics,
     },
+}
+
+/// One file inside an archive artifact, reported with `artifact_done` so
+/// browsers can list archive contents without server-side extraction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ArtifactEntry {
+    pub path: String,
+    pub size_bytes: u64,
 }
 
 /// Ambient host telemetry reported with `heartbeat`. Every field is
@@ -476,6 +495,68 @@ mod tests {
         assert_eq!(metrics.cpu_peak_permille, None);
         assert_eq!(metrics.mem_peak_bytes, None);
         assert_eq!(metrics.sample_count, None);
+    }
+
+    #[test]
+    fn old_shape_artifact_done_still_parses() {
+        // An artifact_done emitted by a pre-manifest runner: only the
+        // original four fields. The manifest fields must default to None.
+        let json = format!(
+            r#"{{"type":"artifact_done","job_id":"{}","name":"dist.tar.gz","size_bytes":1024,"checksum_sha256":"{}"}}"#,
+            Uuid::nil(),
+            "a".repeat(64)
+        );
+        let parsed: RunnerMsg = serde_json::from_str(&json).unwrap();
+        let RunnerMsg::ArtifactDone {
+            uncompressed_bytes,
+            file_count,
+            entries,
+            ..
+        } = parsed
+        else {
+            panic!("expected ArtifactDone");
+        };
+        assert_eq!(uncompressed_bytes, None);
+        assert_eq!(file_count, None);
+        assert!(entries.is_none());
+    }
+
+    #[test]
+    fn artifact_done_round_trips_manifest() {
+        let msg = RunnerMsg::ArtifactDone {
+            job_id: Uuid::nil(),
+            name: "dist.tar.gz".into(),
+            size_bytes: 1024,
+            checksum_sha256: "b".repeat(64),
+            uncompressed_bytes: Some(4096),
+            file_count: Some(2),
+            entries: Some(vec![ArtifactEntry {
+                path: "bin/app".into(),
+                size_bytes: 4000,
+            }]),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: RunnerMsg = serde_json::from_str(&json).unwrap();
+        let RunnerMsg::ArtifactDone {
+            uncompressed_bytes,
+            file_count,
+            entries,
+            ..
+        } = parsed
+        else {
+            panic!("expected ArtifactDone");
+        };
+        assert_eq!(uncompressed_bytes, Some(4096));
+        assert_eq!(file_count, Some(2));
+        assert_eq!(
+            entries.as_deref(),
+            Some(
+                &[ArtifactEntry {
+                    path: "bin/app".into(),
+                    size_bytes: 4000,
+                }][..]
+            )
+        );
     }
 
     #[test]

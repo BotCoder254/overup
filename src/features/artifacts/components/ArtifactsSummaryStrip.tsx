@@ -44,7 +44,10 @@ export function ArtifactsSummaryStrip({ summary, loading, error }: ArtifactsSumm
         { label: 'Artifacts', value: '—' },
         { label: 'Available', value: '—' },
         { label: 'Uploading / failed', value: '—' },
+        { label: 'Uploaded (24h)', value: '—' },
         { label: 'Expiring in 7 days', value: '—' },
+        { label: 'Expiring storage', value: '—' },
+        { label: 'Largest', value: '—' },
         { label: 'Total size', value: '—' },
       ]
     : [
@@ -55,12 +58,32 @@ export function ArtifactsSummaryStrip({ summary, loading, error }: ArtifactsSumm
           value: String(summary.pending + summary.failed),
           hint: `${summary.pending} uploading · ${summary.failed} failed`,
         },
+        { label: 'Uploaded (24h)', value: String(summary.recent24h) },
         { label: 'Expiring in 7 days', value: String(summary.expiringSoon) },
-        { label: 'Total size', value: formatBytes(summary.totalBytes) },
+        {
+          label: 'Expiring storage',
+          value: formatBytes(summary.expiringBytes7d),
+          hint: `of ${formatBytes(summary.totalBytes)} stored`,
+        },
+        summary.largest.length > 0
+          ? {
+              label: 'Largest',
+              value: formatBytes(summary.largest[0].sizeBytes),
+              hint: summary.largest[0].name,
+            }
+          : { label: 'Largest', value: '—' },
+        {
+          label: 'Total size',
+          value: formatBytes(summary.totalBytes),
+          hint: summary.byKind
+            .slice(0, 2)
+            .map((usage) => `${usage.kind} ${formatBytes(usage.bytes)}`)
+            .join(' · '),
+        },
       ];
 
   return (
-    <div className="mb-6 grid grid-cols-2 gap-px overflow-hidden rounded border border-steel/20 bg-steel/10 sm:grid-cols-3 lg:grid-cols-5">
+    <div className="mb-6 grid grid-cols-2 gap-px overflow-hidden rounded border border-steel/20 bg-steel/10 sm:grid-cols-4 lg:grid-cols-8">
       {cells.map((cell) => (
         <Cell key={cell.label} {...cell} />
       ))}

@@ -4,8 +4,9 @@ import { workspacePath } from '../../../app/navigation';
 import { Badge } from '../../../components/ui/Badge';
 import { TBody, THead, Table, Td, Th, Tr } from '../../../components/ui/Table';
 import type { ArtifactCatalogEntry } from '../../../types/artifact';
-import type { Artifact } from '../../../types/pipeline';
+import type { Artifact, ArtifactKind } from '../../../types/pipeline';
 import { formatBytes } from '../../pipelines/lib/format';
+import { ARTIFACT_KIND_LABELS } from './ArtifactFilters';
 
 export function artifactStatusBadge(status: Artifact['status']) {
   switch (status) {
@@ -18,6 +19,10 @@ export function artifactStatusBadge(status: Artifact['status']) {
     default:
       return <Badge variant="danger">Failed</Badge>;
   }
+}
+
+export function artifactKindBadge(kind: ArtifactKind) {
+  return <Badge variant="neutral">{ARTIFACT_KIND_LABELS[kind] ?? kind}</Badge>;
 }
 
 interface ArtifactsTableProps {
@@ -37,6 +42,7 @@ export function ArtifactsTable({ slug, artifacts }: ArtifactsTableProps) {
       <THead>
         <Tr>
           <Th>Name</Th>
+          <Th className="hidden md:table-cell">Kind</Th>
           <Th className="hidden md:table-cell">Repository</Th>
           <Th className="hidden lg:table-cell">Pipeline</Th>
           <Th>Size</Th>
@@ -55,6 +61,7 @@ export function ArtifactsTable({ slug, artifacts }: ArtifactsTableProps) {
             <Td className="max-w-[220px] truncate font-mono text-xs text-charcoal">
               {artifact.name}
             </Td>
+            <Td className="hidden md:table-cell">{artifactKindBadge(artifact.kind)}</Td>
             <Td className="hidden max-w-[200px] truncate text-xs text-steel md:table-cell">
               {artifact.repositoryFullName}
             </Td>

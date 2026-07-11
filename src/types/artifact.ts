@@ -1,4 +1,4 @@
-import type { Artifact } from './pipeline';
+import type { Artifact, ArtifactKind } from './pipeline';
 
 /**
  * Workspace catalog entry: the artifact plus the provenance of the
@@ -15,11 +15,31 @@ export interface ArtifactCatalogEntry extends Artifact {
   jobKey: string;
   jobName: string | null;
   runnerName: string | null;
+  /** Docker image the producing job ran in (from the job plan snapshot). */
+  jobImage: string | null;
 }
 
 export interface ArtifactCatalogResponse {
   artifacts: ArtifactCatalogEntry[];
   nextCursor: string | null;
+}
+
+/** One file inside an archive artifact (runner-computed manifest). */
+export interface ArtifactEntryItem {
+  path: string;
+  sizeBytes: number;
+}
+
+/** Detail response: provenance entry + archive contents when present. */
+export interface ArtifactDetail {
+  artifact: ArtifactCatalogEntry;
+  entries: ArtifactEntryItem[] | null;
+}
+
+export interface ArtifactKindUsage {
+  kind: ArtifactKind;
+  count: number;
+  bytes: number;
 }
 
 export interface ArtifactsSummary {
@@ -29,4 +49,19 @@ export interface ArtifactsSummary {
   failed: number;
   expiringSoon: number;
   totalBytes: number;
+  recent24h: number;
+  expiringBytes7d: number;
+  byKind: ArtifactKindUsage[];
+  largest: { id: string; name: string; sizeBytes: number }[];
+}
+
+/** Per-kind retention policy row ('default' = workspace-wide default). */
+export interface RetentionPolicy {
+  kind: ArtifactKind | 'default';
+  retentionDays: number;
+}
+
+export interface RetentionPoliciesResponse {
+  policies: RetentionPolicy[];
+  globalDefaultDays: number;
 }

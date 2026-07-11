@@ -40,6 +40,16 @@ pub enum WorkspaceEvent {
         health: serde_json::Value,
         last_seen_at: DateTime<Utc>,
     },
+    /// An artifact became available (or changed status) somewhere in the
+    /// workspace — the catalog page refetches on it.
+    #[serde(rename_all = "camelCase")]
+    ArtifactUpdate {
+        id: Uuid,
+        pipeline_id: Uuid,
+        name: String,
+        status: String,
+        kind: String,
+    },
 }
 
 #[derive(Default)]

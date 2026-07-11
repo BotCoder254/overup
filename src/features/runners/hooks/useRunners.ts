@@ -2,9 +2,11 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { HTTPError } from 'ky';
 import { toast } from 'sonner';
 import { useWorkspaceId } from '../../repositories/hooks/useRepositories';
+import { HOSTED_QUOTA_COPY } from '../lib/provisionCopy';
 import {
   bootstrapRunner,
   createHostedRunner,
+  type CreateHostedInput,
   disableRunner,
   drainRunner,
   getRunnerDetail,
@@ -64,16 +66,20 @@ export function useRunnerDetail(runnerId: string | undefined, streamConnected: b
 }
 
 /**
- * Whether this deployment can provision hosted runners. Changes only on a
- * server redeploy, so one fetch per session is plenty.
+ * Hosted-runner capability + remaining quota. Availability changes only on
+ * a server redeploy, but the remaining quota moves with every hosted
+ * create/revoke — so this refetches on mount (no infinite staleTime) and is
+ * invalidated alongside the runner list.
  */
-export function useHostedRunnerAvailable() {
+export function useHostedRunnerInfo() {
   const workspaceId = useWorkspaceId();
   return useQuery({
-    queryKey: ['workspaces', workspaceId ?? '', 'runners', 'hosted-available'] as const,
-    queryFn: async () => (await getRunnersList(workspaceId!)).hostedAvailable,
+    queryKey: ['workspaces', workspaceId ?? '', 'runners', 'hosted-info'] as const,
+    queryFn: async () => {
+      const list = await getRunnersList(workspaceId!);
+      return { hostedAvailable: list.hostedAvailable, hostedRemaining: list.hostedRemaining };
+    },
     enabled: Boolean(workspaceId),
-    staleTime: Infinity,
   });
 }
 
@@ -82,12 +88,26 @@ export function useCreateHostedRunner() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: (input: { name: string; labels: string[] }) =>
-      createHostedRunner(workspaceId!, input),
+    mutationFn: (input: CreateHostedInput) => createHostedRunner(workspaceId!, input),
     onSuccess: () => {
       if (workspaceId) void queryClient.invalidateQueries({ queryKey: runnersKey(workspaceId) });
     },
-    onError: (error) => {
+    onError: async (error) => {
+      // Safety net behind the wizard's pre-check: the quota can fill between
+      // opening the dialog and submitting.
+      if (error instanceof HTTPError && error.response.status === 409) {
+        try {
+          const body = (await error.response.clone().json()) as {
+            error?: { message?: string };
+          };
+          if (body.error?.message === 'hosted_runner_quota') {
+            toast.error(HOSTED_QUOTA_COPY);
+            return;
+          }
+        } catch {
+          // Fall through to the generic 409 copy.
+        }
+      }
       toast.error(describeError(error, 'Could not provision the hosted runner.'));
     },
   });

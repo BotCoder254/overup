@@ -17,6 +17,13 @@ pub struct Artifact {
     pub content_type: Option<String>,
     pub checksum_sha256: Option<String>,
     pub status: String,
+    /// Server-classified category (package/report/docs/archive/...), never
+    /// runner-supplied — see services/artifact_kind.rs.
+    pub kind: String,
+    pub uncompressed_bytes: Option<i64>,
+    pub file_count: Option<i32>,
+    /// Archive entry manifest — detail responses only, never list DTOs.
+    pub entries: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
     pub expires_at: Option<DateTime<Utc>>,
 }
@@ -32,6 +39,9 @@ pub struct ArtifactResponse {
     pub content_type: Option<String>,
     pub checksum_sha256: Option<String>,
     pub status: String,
+    pub kind: String,
+    pub uncompressed_bytes: Option<i64>,
+    pub file_count: Option<i32>,
     pub created_at: DateTime<Utc>,
     pub expires_at: Option<DateTime<Utc>>,
 }
@@ -47,6 +57,9 @@ impl From<Artifact> for ArtifactResponse {
             content_type: row.content_type,
             checksum_sha256: row.checksum_sha256,
             status: row.status,
+            kind: row.kind,
+            uncompressed_bytes: row.uncompressed_bytes,
+            file_count: row.file_count,
             created_at: row.created_at,
             expires_at: row.expires_at,
         }
@@ -71,6 +84,8 @@ pub struct ArtifactCatalogResponse {
     pub job_key: String,
     pub job_name: Option<String>,
     pub runner_name: Option<String>,
+    /// Docker image the producing job ran in (from the job plan snapshot).
+    pub job_image: Option<String>,
 }
 
 impl From<crate::db::artifacts::ArtifactCatalogRow> for ArtifactCatalogResponse {
@@ -92,6 +107,7 @@ impl From<crate::db::artifacts::ArtifactCatalogRow> for ArtifactCatalogResponse 
             job_key: row.job_key,
             job_name: row.job_name,
             runner_name: row.runner_name,
+            job_image: row.job_image,
         }
     }
 }

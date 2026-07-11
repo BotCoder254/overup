@@ -8,6 +8,13 @@ export interface ArtifactFilterState {
   status: string;
   repositoryId: string;
   workflowId: string;
+  branch: string;
+  kind: string;
+  retention: string;
+  /** Megabytes (number inputs); converted to bytes by the page. */
+  minMb: string;
+  maxMb: string;
+  job: string;
   /** yyyy-mm-dd (native date inputs); converted to RFC3339 by the page. */
   from: string;
   to: string;
@@ -18,8 +25,25 @@ export const EMPTY_ARTIFACT_FILTERS: ArtifactFilterState = {
   status: '',
   repositoryId: '',
   workflowId: '',
+  branch: '',
+  kind: '',
+  retention: '',
+  minMb: '',
+  maxMb: '',
+  job: '',
   from: '',
   to: '',
+};
+
+export const ARTIFACT_KIND_LABELS: Record<string, string> = {
+  package: 'Package',
+  report: 'Report',
+  docs: 'Docs',
+  archive: 'Archive',
+  binary: 'Binary',
+  image: 'Image',
+  log: 'Log',
+  other: 'Other',
 };
 
 const controlClasses =
@@ -111,6 +135,89 @@ export function ArtifactFilters({ value, onChange }: ArtifactFiltersProps) {
           </option>
         ))}
       </select>
+
+      <label className="sr-only" htmlFor="artifact-kind-filter">
+        Filter by kind
+      </label>
+      <select
+        id="artifact-kind-filter"
+        className={`${controlClasses} w-full sm:w-auto`}
+        value={value.kind}
+        onChange={(event) => onChange({ kind: event.target.value })}
+      >
+        <option value="">All kinds</option>
+        {Object.entries(ARTIFACT_KIND_LABELS).map(([kind, label]) => (
+          <option key={kind} value={kind}>
+            {label}
+          </option>
+        ))}
+      </select>
+
+      <label className="sr-only" htmlFor="artifact-retention-filter">
+        Filter by retention status
+      </label>
+      <select
+        id="artifact-retention-filter"
+        className={`${controlClasses} w-full sm:w-auto`}
+        value={value.retention}
+        onChange={(event) => onChange({ retention: event.target.value })}
+      >
+        <option value="">Any retention</option>
+        <option value="active">Active</option>
+        <option value="expiring_soon">Expiring in 7 days</option>
+        <option value="expired">Expired</option>
+      </select>
+
+      <label className="sr-only" htmlFor="artifact-branch-filter">
+        Filter by branch
+      </label>
+      <input
+        id="artifact-branch-filter"
+        type="text"
+        placeholder="Branch"
+        maxLength={255}
+        className={`${controlClasses} w-full sm:w-32`}
+        value={value.branch}
+        onChange={(event) => onChange({ branch: event.target.value })}
+      />
+
+      <label className="sr-only" htmlFor="artifact-job-filter">
+        Filter by producing job
+      </label>
+      <input
+        id="artifact-job-filter"
+        type="text"
+        placeholder="Job"
+        maxLength={128}
+        className={`${controlClasses} w-full sm:w-28`}
+        value={value.job}
+        onChange={(event) => onChange({ job: event.target.value })}
+      />
+
+      <label className="sr-only" htmlFor="artifact-min-size-filter">
+        Minimum size in megabytes
+      </label>
+      <input
+        id="artifact-min-size-filter"
+        type="number"
+        min={0}
+        placeholder="Min MB"
+        className={`${controlClasses} w-full sm:w-24`}
+        value={value.minMb}
+        onChange={(event) => onChange({ minMb: event.target.value })}
+      />
+      <label className="sr-only" htmlFor="artifact-max-size-filter">
+        Maximum size in megabytes
+      </label>
+      <input
+        id="artifact-max-size-filter"
+        type="number"
+        min={0}
+        placeholder="Max MB"
+        className={`${controlClasses} w-full sm:w-24`}
+        value={value.maxMb}
+        onChange={(event) => onChange({ maxMb: event.target.value })}
+      />
 
       <label className="sr-only" htmlFor="artifact-from-filter">
         Created after

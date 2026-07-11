@@ -11,7 +11,7 @@ import { Dialog } from '../../../components/ui/Dialog';
 import { EmptyState } from '../../../components/ui/EmptyState';
 import { Spinner } from '../../../components/ui/Spinner';
 import { formatBytes, shortSha } from '../../pipelines/lib/format';
-import { artifactStatusBadge } from '../components/ArtifactsTable';
+import { artifactKindBadge, artifactStatusBadge } from '../components/ArtifactsTable';
 import {
   useArtifactDetail,
   useDeleteArtifact,
@@ -50,7 +50,8 @@ export function ArtifactDetailPage() {
     );
   }
 
-  const artifact = detail.data;
+  const artifact = detail.data?.artifact;
+  const entries = detail.data?.entries ?? null;
   if (!artifact) {
     return (
       <EmptyState
@@ -109,11 +110,22 @@ export function ArtifactDetailPage() {
         <Card>
           <CardHeader>
             <h2 className="text-sm font-semibold text-charcoal">Metadata</h2>
-            <span className="ml-auto">{artifactStatusBadge(artifact.status)}</span>
+            <span className="ml-auto flex items-center gap-1.5">
+              {artifactKindBadge(artifact.kind)}
+              {artifactStatusBadge(artifact.status)}
+            </span>
           </CardHeader>
           <CardBody>
             <dl className="divide-y divide-steel/10">
               <MetaRow label="Size">{formatBytes(artifact.sizeBytes)}</MetaRow>
+              {artifact.uncompressedBytes !== null && (
+                <MetaRow label="Uncompressed size">
+                  {formatBytes(artifact.uncompressedBytes)}
+                </MetaRow>
+              )}
+              {artifact.fileCount !== null && (
+                <MetaRow label="Files">{artifact.fileCount.toLocaleString()}</MetaRow>
+              )}
               <MetaRow label="Content type">{artifact.contentType ?? '—'}</MetaRow>
               <MetaRow label="Checksum (SHA-256)">
                 {artifact.checksumSha256 ? (
@@ -198,10 +210,47 @@ export function ArtifactDetailPage() {
                 <span className="font-mono text-xs">{shortSha(artifact.commitSha)}</span>
               </MetaRow>
               <MetaRow label="Runner">{artifact.runnerName ?? '—'}</MetaRow>
+              <MetaRow label="Image">
+                {artifact.jobImage ? (
+                  <span className="font-mono text-xs">{artifact.jobImage}</span>
+                ) : (
+                  '—'
+                )}
+              </MetaRow>
             </dl>
           </CardBody>
         </Card>
       </div>
+
+      {entries && entries.length > 0 && (
+        <Card className="mt-4">
+          <CardHeader>
+            <h2 className="text-sm font-semibold text-charcoal">Contents</h2>
+            <span className="ml-auto text-xs text-steel">
+              {artifact.fileCount !== null && artifact.fileCount > entries.length
+                ? `First ${entries.length.toLocaleString()} of ${artifact.fileCount.toLocaleString()} files`
+                : `${entries.length.toLocaleString()} files`}
+            </span>
+          </CardHeader>
+          <CardBody>
+            <ul className="max-h-96 divide-y divide-steel/10 overflow-y-auto">
+              {entries.map((entry) => (
+                <li
+                  key={entry.path}
+                  className="flex items-center justify-between gap-4 py-1.5"
+                >
+                  <span className="min-w-0 truncate font-mono text-xs text-charcoal">
+                    {entry.path}
+                  </span>
+                  <span className="shrink-0 text-xs text-steel">
+                    {formatBytes(entry.sizeBytes)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </CardBody>
+        </Card>
+      )}
 
       <Dialog
         open={confirmDelete}

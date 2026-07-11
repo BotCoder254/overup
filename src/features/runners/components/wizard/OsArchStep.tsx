@@ -1,8 +1,10 @@
-import { HardDrive, Server } from 'lucide-react';
+import { ChevronDown, ChevronRight, HardDrive, Server } from 'lucide-react';
 import { cn } from '../../../../lib/cn';
 import { Button } from '../../../../components/ui/Button';
 import { FormField } from '../../../../components/ui/FormField';
 import { Input } from '../../../../components/ui/Input';
+import type { RunnerResourceProfile } from '../../../../types/runner';
+import { HOSTED_QUOTA_COPY } from '../../lib/provisionCopy';
 
 interface OsOption {
   id: string;
@@ -17,6 +19,19 @@ const OS_OPTIONS: OsOption[] = [
   { id: 'macos-arm64', label: 'macOS · arm64', available: false },
 ];
 
+interface ProfileOption {
+  id: RunnerResourceProfile;
+  label: string;
+  detail: string;
+}
+
+/** Mirrors the server-side presets in backend services/runner_profiles.rs. */
+const PROFILE_OPTIONS: ProfileOption[] = [
+  { id: 'small', label: 'Small', detail: '1 CPU / 1 GiB' },
+  { id: 'standard', label: 'Standard', detail: '2 CPU / 2 GiB' },
+  { id: 'large', label: 'Large', detail: '4 CPU / 4 GiB' },
+];
+
 export type RunnerMode = 'hosted' | 'self-hosted';
 
 interface OsArchStepProps {
@@ -28,12 +43,24 @@ interface OsArchStepProps {
   onOsChange: (id: string) => void;
   mode: RunnerMode;
   onModeChange: (mode: RunnerMode) => void;
+  profile: RunnerResourceProfile;
+  onProfileChange: (profile: RunnerResourceProfile) => void;
+  instances: number;
+  onInstancesChange: (instances: number) => void;
   /** Whether this deployment can provision hosted runners itself. */
   hostedAvailable: boolean;
+  /** Remaining hosted-runner quota; null while unknown/no provisioner. */
+  hostedRemaining: number | null;
   onNext: () => void;
   isLoading?: boolean;
 }
 
+/**
+ * Details step. Hosted provisioning is the primary, one-click path whenever
+ * the deployment supports it; the self-hosted install flow lives behind an
+ * "Advanced" disclosure. Without a provisioner (or with the quota full) the
+ * form is the classic self-hosted one.
+ */
 export function OsArchStep({
   name,
   onNameChange,
@@ -43,52 +70,42 @@ export function OsArchStep({
   onOsChange,
   mode,
   onModeChange,
+  profile,
+  onProfileChange,
+  instances,
+  onInstancesChange,
   hostedAvailable,
+  hostedRemaining,
   onNext,
   isLoading,
 }: OsArchStepProps) {
-  const selfHosted = mode === 'self-hosted';
+  const hostedQuotaReached = hostedRemaining === 0;
+  const hostedUsable = hostedAvailable && !hostedQuotaReached;
+  const hosted = hostedUsable && mode === 'hosted';
+  const selfHosted = !hosted;
+  const maxInstances = Math.max(1, hostedRemaining ?? 1);
+
+  const clampInstances = (raw: number) => {
+    if (Number.isNaN(raw)) return 1;
+    return Math.min(Math.max(Math.trunc(raw), 1), maxInstances);
+  };
+
   return (
     <div className="mt-4 space-y-5">
-      {hostedAvailable && (
-        <div className="space-y-2">
-          <span className="text-sm font-medium text-charcoal">Where should it run?</span>
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-            <button
-              type="button"
-              onClick={() => onModeChange('hosted')}
-              className={cn(
-                'rounded border px-3 py-2.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary',
-                mode === 'hosted'
-                  ? 'border-primary bg-primary/5'
-                  : 'border-steel/20 hover:bg-surface',
-              )}
-            >
-              <span className="flex items-center gap-2 text-sm font-medium text-charcoal">
-                <Server size={15} aria-hidden="true" className="shrink-0 text-primary" />
-                Hosted on this server
-              </span>
-              <span className="mt-1 block text-xs leading-relaxed text-steel">
-                Provisioned automatically — create and wait, nothing to install.
-              </span>
-            </button>
-            <button
-              type="button"
-              onClick={() => onModeChange('self-hosted')}
-              className={cn(
-                'rounded border px-3 py-2.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary',
-                selfHosted ? 'border-primary bg-primary/5' : 'border-steel/20 hover:bg-surface',
-              )}
-            >
-              <span className="flex items-center gap-2 text-sm font-medium text-charcoal">
-                <HardDrive size={15} aria-hidden="true" className="shrink-0 text-primary" />
-                Self-hosted machine
-              </span>
-              <span className="mt-1 block text-xs leading-relaxed text-steel">
-                Run one copy-paste command on your own machine.
-              </span>
-            </button>
-          </div>
+      {hosted && (
+        <div className="flex items-start gap-2 rounded border border-steel/20 bg-surface px-3 py-2.5">
+          <Server size={15} aria-hidden="true" className="mt-0.5 shrink-0 text-primary" />
+          <p className="text-xs leading-relaxed text-steel">
+            <span className="font-medium text-charcoal">Hosted on this server.</span> The
+            platform provisions and manages the runner automatically — nothing to install,
+            no tokens, no configuration.
+          </p>
+        </div>
+      )}
+      {hostedAvailable && hostedQuotaReached && (
+        <div className="flex items-start gap-2 rounded border border-steel/20 bg-surface px-3 py-2.5">
+          <Server size={15} aria-hidden="true" className="mt-0.5 shrink-0 text-steel" />
+          <p className="text-xs leading-relaxed text-steel">{HOSTED_QUOTA_COPY}</p>
         </div>
       )}
 
@@ -119,6 +136,53 @@ export function OsArchStep({
         )}
       </FormField>
 
+      {hosted && (
+        <>
+          <div className="space-y-2">
+            <span className="text-sm font-medium text-charcoal">Size</span>
+            <div className="grid grid-cols-3 gap-2">
+              {PROFILE_OPTIONS.map((option) => (
+                <button
+                  key={option.id}
+                  type="button"
+                  onClick={() => onProfileChange(option.id)}
+                  className={cn(
+                    'rounded border px-3 py-2.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary',
+                    profile === option.id
+                      ? 'border-primary bg-primary/5'
+                      : 'border-steel/20 hover:bg-surface',
+                  )}
+                >
+                  <span className="block text-sm font-medium text-charcoal">{option.label}</span>
+                  <span className="mt-0.5 block text-xs text-steel">{option.detail}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <FormField
+            id="wizard-runner-instances"
+            label="Instances"
+            hint={
+              hostedRemaining !== null
+                ? `${hostedRemaining} hosted slot${hostedRemaining === 1 ? '' : 's'} remaining. Each instance runs one job at a time.`
+                : 'Each instance runs one job at a time.'
+            }
+          >
+            {(aria) => (
+              <Input
+                {...aria}
+                type="number"
+                min={1}
+                max={maxInstances}
+                value={instances}
+                onChange={(event) => onInstancesChange(clampInstances(event.target.valueAsNumber))}
+              />
+            )}
+          </FormField>
+        </>
+      )}
+
       {selfHosted && (
         <div className="space-y-2">
           <span className="text-sm font-medium text-charcoal">Operating system</span>
@@ -146,6 +210,31 @@ export function OsArchStep({
         </div>
       )}
 
+      {hostedUsable && (
+        <button
+          type="button"
+          onClick={() => onModeChange(hosted ? 'self-hosted' : 'hosted')}
+          className="flex items-center gap-1.5 text-xs font-medium text-steel transition-colors hover:text-charcoal focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+        >
+          {hosted ? (
+            <ChevronRight size={13} aria-hidden="true" />
+          ) : (
+            <ChevronDown size={13} aria-hidden="true" />
+          )}
+          {hosted ? (
+            <>
+              <HardDrive size={13} aria-hidden="true" />
+              Advanced: run on your own machine
+            </>
+          ) : (
+            <>
+              <Server size={13} aria-hidden="true" />
+              Back to a hosted runner
+            </>
+          )}
+        </button>
+      )}
+
       <div className="flex justify-end">
         <Button
           size="sm"
@@ -153,7 +242,11 @@ export function OsArchStep({
           disabled={!name.trim() || (selfHosted && !os)}
           onClick={onNext}
         >
-          {selfHosted ? 'Continue' : 'Create runner'}
+          {selfHosted
+            ? 'Continue'
+            : instances > 1
+              ? `Create ${instances} runners`
+              : 'Create runner'}
         </Button>
       </div>
     </div>

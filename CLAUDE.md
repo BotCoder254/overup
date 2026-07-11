@@ -326,7 +326,8 @@ endpoint, region `auto`, presigned URLs; isolated in `services/r2.rs`), and the 
   `.github/workflows` are parsed
 - Immutable audit trail in `audit_logs`: `installation.linked/unlinked`,
   `repository.imported/synced/removed`, `pipeline.created/completed/cancelled`,
-  `runner.created/revoked`, `artifact.uploaded` (with request ids where available)
+  `runner.created/revoked`, `artifact.uploaded/downloaded/deleted`,
+  `artifact.retention_updated` (with request ids where available)
 - **WebSocket surfaces live OUTSIDE the CSRF layer** (native WS can't send
   `X-Requested-With`) and defend themselves before upgrading. Browser WS
   (`/ws/workspaces/{ws}/pipelines/{p}` and `…/{ws}/dashboard`): strict
@@ -385,9 +386,14 @@ endpoint, region `auto`, presigned URLs; isolated in `services/r2.rs`), and the 
   transitions), atomic two-row job+runner claims, 15 s ack-timeout reverts, job/pipeline
   timeout sweeps, stale-runner orphaning, boot-time orphan recovery; checkout-token mint
   failures fail the job (`checkout_unavailable`) instead of running without source
-- Storage hygiene: artifacts carry `expires_at` (`ARTIFACT_RETENTION_DAYS`); the hourly
-  janitor deletes expired/abandoned R2 objects and rows, and prunes archived log chunks
-  only when the R2 archive exists (`LOG_HOT_RETENTION_DAYS`)
+- Storage hygiene: artifacts carry an immutable `expires_at` computed at upload from
+  per-kind workspace retention policies (`artifact_retention_policies`, 1–400 days,
+  kind row → `default` row → `ARTIFACT_RETENTION_DAYS` env); the hourly janitor deletes
+  expired/abandoned R2 objects and rows, and prunes archived log chunks only when the R2
+  archive exists (`LOG_HOT_RETENTION_DAYS`). Artifact `kind` is classified SERVER-side
+  from the validated name (`services/artifact_kind.rs`); runner-reported archive manifests
+  (entries/uncompressed size/file count) are capped (1000 entries, 96 KB JSON, 1 TiB/1M
+  ceilings) and dropped whole on any violation — the upload itself still succeeds
 - Pipeline conclusions and `sync_error`-style fields hold static category strings only
   (`runner_lost`, `timeout`, `step_failed`, `checkout_unavailable`, ...) — never
   upstream/runner text
@@ -407,7 +413,9 @@ endpoint, region `auto`, presigned URLs; isolated in `services/r2.rs`), and the 
 #    without them pipelines run but artifact uploads are denied and logs
 #    stay in Postgres (no archival/pruning). Retention knobs:
 #    ARTIFACT_RETENTION_DAYS / ARTIFACT_PENDING_TTL_HOURS /
-#    LOG_HOT_RETENTION_DAYS. Migrations run on startup.
+#    LOG_HOT_RETENTION_DAYS — per-kind artifact retention (1–400 days) is
+#    also configurable per workspace in the Artifacts UI and takes
+#    precedence at upload time. Migrations run on startup.
 cd backend && cargo run
 
 # 3. Frontend (http://localhost:3000)
@@ -429,8 +437,40 @@ RUNNER_LABELS=self-hosted,linux,x64,ubuntu-latest cargo run
 #   RUNNER_IMAGE=ghcr.io/botcoder254/overup-runner:latest   (default)
 #   RUNNER_PROVISIONER_DOCKER_HOST=<daemon for job execution; unset mounts
 #                                   /var/run/docker.sock — root-equivalent>
-# The wizard then offers "Hosted on this server"; revoke deprovisions the
-# container, and the janitor cleans up abandoned bootstraps.
+#   RUNNER_AUTO_PROVISION=true       auto-create one hosted runner ("hosted-1",
+#                                    labels self-hosted,linux,x64,ubuntu-latest)
+#                                    when a workspace is created — warn-only,
+#                                    never blocks workspace creation
+#   HOSTED_RUNNERS_PER_WORKSPACE=3   quota on managed, non-revoked runners
+#   HOSTED_RUNNERS_GLOBAL=20         quota across the whole deployment
+#   RUNNER_PROVISIONER_NETWORK=overup-runners   dedicated bridge network for
+#                                    runner containers (created at startup;
+#                                    "bridge" opts out; create-failure falls
+#                                    back to bridge, never disables the feature)
+#   RUNNER_PROVISIONER_DEFAULT_PROFILE=standard  small|standard|large
+# Hosted is the wizard's DEFAULT path (self-hosted moves behind "Advanced");
+# it takes a resource profile (small=1CPU/1GiB/256pids, standard=2/2GiB/512,
+# large=4/4GiB/1024 — services/runner_profiles.rs; limits bound the runner
+# container AND are forwarded to job containers via RUNNER_JOB_* env) and an
+# instance count (N rows named name-1..name-N, one batch tx under the quota
+# advisory lock — all-or-nothing on name collision; response is
+# {"runners":[...]}). Quota exhaustion shows remediation copy; a racing
+# create 409s with static category hosted_runner_quota. Credential hygiene
+# (JIT minting): rows are created credential-less; the background task pulls
+# the image FIRST, then per instance mints the bootstrap token, arms only its
+# hash via a guarded UPDATE (db::runners::arm_bootstrap — a revoked/purged
+# row aborts before any container exists), injects it into the container env
+# wrapped in zeroize::Zeroizing, and wipes it at end of iteration — plaintext
+# never spans the pull and never reaches a spawn that outlives it. Runner
+# containers are hardened: no-new-privileges, profile limits, dedicated
+# network (no cap-drop — they drive Docker; job containers get cap-drop from
+# the runner crate). Provisioning outcomes are audited (runner.provisioned /
+# runner.provision_failed, actor NULL). Revoke deprovisions the container.
+# The hourly janitor cleans up abandoned bootstraps, purges never-armed
+# pending rows older than 2 h, AND reconciles Docker against runner rows:
+# orphan overup.managed containers are deprovisioned, stopped ones restarted,
+# and offline rows whose container vanished get provision_error=
+# container_missing.
 
 # Runner hardening knobs (defaults are least-privilege):
 #   RUNNER_CAP_DROP=true            drop ALL capabilities (set false to opt out)

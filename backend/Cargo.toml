@@ -54,3 +54,6 @@ unicode-normalization = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 validator = { version = "0.20", features = ["derive"] }
+# Wipes plaintext runner bootstrap tokens from memory as soon as they have
+# been injected into a container environment.
+zeroize = "1"

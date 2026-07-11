@@ -68,6 +68,7 @@ pub async fn create_workspace(
                     user_id = %user.id,
                     "workspace provisioned"
                 );
+                spawn_auto_provision_runner(&state, workspace.id, user.id, request_id.clone());
                 return Ok((StatusCode::CREATED, Json(workspace.into())));
             }
             ProvisionOutcome::SlugTaken => {
@@ -81,4 +82,61 @@ pub async fn create_workspace(
     Err(AppError::Internal(anyhow::anyhow!(
         "slug candidate space exhausted for base '{base}'"
     )))
+}
+
+/// Zero-config runners: when this deployment can provision hosted runners
+/// and RUNNER_AUTO_PROVISION is on, every new workspace gets one in the
+/// background. Every failure path is warn-only — workspace creation never
+/// fails or slows because of it; denials/failures surface on the Runners
+/// page through the usual provision_error UX. No RBAC check: the actor
+/// literally just created (and owns) the workspace. The gate is the live
+/// provisioner handle, not just config — init degrades to None when Docker
+/// is unreachable at boot.
+fn spawn_auto_provision_runner(
+    state: &AppState,
+    workspace_id: uuid::Uuid,
+    user_id: uuid::Uuid,
+    request_id: Option<String>,
+) {
+    let Some(cfg) = state.config.runner_provisioner.as_ref() else {
+        return;
+    };
+    if !cfg.auto_provision || state.runner_provisioner.is_none() {
+        return;
+    }
+    let profile = cfg.default_profile;
+
+    let task_state = state.clone();
+    tokio::spawn(async move {
+        let labels: Vec<String> = ["self-hosted", "linux", "x64", "ubuntu-latest"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        match crate::services::runner_provision_flow::start_hosted_provision(
+            &task_state,
+            crate::services::runner_provision_flow::HostedProvisionRequest {
+                workspace_id,
+                created_by: user_id,
+                name: "hosted-1",
+                labels: &labels,
+                profile,
+                instances: 1,
+                request_id: request_id.as_deref(),
+            },
+        )
+        .await
+        {
+            Ok(Ok(runners)) => {
+                if let Some(runner) = runners.first() {
+                    tracing::info!(%workspace_id, runner_id = %runner.id, "auto-provisioned hosted runner");
+                }
+            }
+            Ok(Err(denied)) => {
+                tracing::warn!(%workspace_id, ?denied, "hosted runner auto-provision denied");
+            }
+            Err(error) => {
+                tracing::warn!(%workspace_id, error = ?error, "hosted runner auto-provision failed");
+            }
+        }
+    });
 }

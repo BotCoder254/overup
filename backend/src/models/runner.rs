@@ -29,6 +29,9 @@ pub struct Runner {
     /// Static failure category when background provisioning failed
     /// (image_pull_failed, container_create_failed, ...); NULL otherwise.
     pub provision_error: Option<String>,
+    /// Sizing preset for hosted runners (small|standard|large); NULL for
+    /// self-hosted rows.
+    pub resource_profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -46,6 +49,7 @@ pub struct RunnerResponse {
     pub draining: bool,
     pub managed: bool,
     pub provision_error: Option<String>,
+    pub resource_profile: Option<String>,
 }
 
 impl From<Runner> for RunnerResponse {
@@ -63,6 +67,7 @@ impl From<Runner> for RunnerResponse {
             draining: row.draining_at.is_some(),
             managed: row.managed,
             provision_error: row.provision_error,
+            resource_profile: row.resource_profile,
         }
     }
 }

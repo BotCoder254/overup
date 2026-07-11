@@ -1,5 +1,5 @@
 import { formatDistanceToNow, format } from 'date-fns';
-import { KeyRound, Pencil, Trash2 } from 'lucide-react';
+import { KeyRound, Pencil, Trash2, TriangleAlert } from 'lucide-react';
 import { useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { workspacePath } from '../../../app/navigation';
@@ -17,6 +17,7 @@ import { RenameRunnerDialog } from '../components/RenameRunnerDialog';
 import { RunnerMetaCard } from '../components/RunnerMetaCard';
 import { RunnerStatusBadge } from '../components/RunnerStatusBadge';
 import { useRevokeRunner, useRunnerDetail } from '../hooks/useRunners';
+import { PROVISION_FAILURE_COPY } from '../lib/provisionCopy';
 
 export function RunnerDetailPage() {
   const { slug = '', runnerId } = useParams<{ slug: string; runnerId: string }>();
@@ -85,6 +86,16 @@ export function RunnerDetailPage() {
         ))}
       </div>
 
+      {runner.provisionError && (
+        <div className="mb-4 flex items-start gap-2 rounded border border-steel/20 bg-canvas p-3 text-sm text-charcoal">
+          <TriangleAlert size={16} aria-hidden="true" className="mt-0.5 shrink-0 text-danger" />
+          <span>
+            {PROVISION_FAILURE_COPY[runner.provisionError] ??
+              'Provisioning this hosted runner failed.'}
+          </span>
+        </div>
+      )}
+
       <div className="grid gap-4 sm:grid-cols-2">
         <Card>
           <CardHeader>
@@ -152,7 +163,7 @@ export function RunnerDetailPage() {
             <h2 className="text-sm font-semibold text-charcoal">Host</h2>
           </CardHeader>
           <CardBody>
-            <RunnerMetaCard health={runner.lastHealth} />
+            <RunnerMetaCard health={runner.lastHealth} resourceProfile={runner.resourceProfile} />
           </CardBody>
         </Card>
       </div>

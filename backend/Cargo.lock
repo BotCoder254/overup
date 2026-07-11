@@ -557,6 +557,7 @@ dependencies = [
  "unicode-normalization",
  "uuid",
  "validator",
+ "zeroize",
 ]
 
 [[package]]
