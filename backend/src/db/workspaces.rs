@@ -15,7 +15,8 @@ pub enum ProvisionOutcome {
 
 // NOTE: these arrays only run at provisioning time. Adding a permission
 // here requires a matching role_permissions backfill migration for
-// pre-existing workspaces (see 20260711300001_secrets.sql).
+// pre-existing workspaces (see 20260711300001_secrets.sql and
+// 20260711300002_environments.sql).
 const OWNER_PERMISSIONS: &[&str] = &[
     "workspace.manage",
     "workspace.delete",
@@ -28,6 +29,7 @@ const OWNER_PERMISSIONS: &[&str] = &[
     "content.write",
     "secrets.read",
     "secrets.manage",
+    "environments.manage",
 ];
 
 const ADMIN_PERMISSIONS: &[&str] = &[
@@ -40,6 +42,7 @@ const ADMIN_PERMISSIONS: &[&str] = &[
     "content.write",
     "secrets.read",
     "secrets.manage",
+    "environments.manage",
 ];
 
 const MEMBER_PERMISSIONS: &[&str] = &["content.read", "content.write", "secrets.read"];

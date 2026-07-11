@@ -12,9 +12,9 @@ use tower_http::trace::TraceLayer;
 
 use crate::error::AppError;
 use crate::handlers::{
-    artifacts, auth, browser_ws, dashboard, dashboard_ws, github_installations, github_webhooks,
-    health, jobs, me, pipelines, repositories, runner_ws, runners, secrets, workflows,
-    workspaces, ws_tickets,
+    artifacts, auth, browser_ws, dashboard, dashboard_ws, environments, github_installations,
+    github_webhooks, health, jobs, me, pipelines, repositories, runner_ws, runners, secrets,
+    workflows, workspaces, ws_tickets,
 };
 use crate::middleware::{csrf, security_headers};
 use crate::state::AppState;
@@ -219,6 +219,24 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
         .route(
             "/workspaces/{workspace_id}/secrets/{secret_id}/value",
             put(secrets::replace_value).layer(GovernorLayer::new(secrets_value_governor)),
+        )
+        .route(
+            "/workspaces/{workspace_id}/environments",
+            get(environments::list).post(environments::create),
+        )
+        .route(
+            "/workspaces/{workspace_id}/environments/summary",
+            get(environments::summary),
+        )
+        .route(
+            "/workspaces/{workspace_id}/environments/audit",
+            get(environments::audit),
+        )
+        .route(
+            "/workspaces/{workspace_id}/environments/{environment_id}",
+            get(environments::detail)
+                .patch(environments::update)
+                .delete(environments::remove),
         )
         .route(
             "/workspaces/{workspace_id}/runners",

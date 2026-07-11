@@ -1,4 +1,5 @@
 pub mod artifact;
+pub mod environment;
 pub mod github_installation;
 pub mod pipeline;
 pub mod repository;

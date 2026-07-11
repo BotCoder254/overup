@@ -1,6 +1,7 @@
 pub mod artifact_retention;
 pub mod artifacts;
 pub mod dashboard;
+pub mod environments;
 pub mod github_installations;
 pub mod oauth_states;
 pub mod pipeline_events;

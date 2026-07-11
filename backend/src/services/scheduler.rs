@@ -275,11 +275,32 @@ async fn dispatch(
         })
         .unwrap_or_default();
 
-    // Resolve this repository's secrets and merge them into the payload
-    // env. Precedence: plan env < workspace secret < repository secret
-    // (resolve_for_dispatch already collapsed the scopes). Plaintext is
-    // decrypted here and nowhere else — it never touches
-    // pipeline_jobs.plan or pipeline_events — and every value is
+    // Resolve the job's environment binding (plan snapshots the NAME only;
+    // the id — and therefore the secret set — resolves live here so rotated
+    // values and renames apply to reruns). Unknown names proceed without
+    // environment secrets: pipeline creation already recorded a visible
+    // notice on the plan, and failing here would break GitHub-imported
+    // workflows that reference environments not defined in this workspace.
+    let environment_id = match job.plan.get("environment").and_then(|e| e.as_str()) {
+        None => None,
+        Some(name) => {
+            let resolved =
+                db::environments::find_by_name(&state.pool, pipeline.workspace_id, name).await?;
+            if resolved.is_none() {
+                tracing::warn!(
+                    job_id = %job.id,
+                    "job references an undefined environment; proceeding without environment secrets"
+                );
+            }
+            resolved
+        }
+    };
+
+    // Resolve this job's secrets and merge them into the payload env.
+    // Precedence: plan env < workspace secret < repository secret <
+    // environment secret (resolve_for_dispatch already collapsed the
+    // scopes). Plaintext is decrypted here and nowhere else — it never
+    // touches pipeline_jobs.plan or pipeline_events — and every value is
     // registered as a log mask below BEFORE the payload leaves the
     // process. Any decryption failure fails the job closed: silently
     // running a deploy without its token would look like a plausible
@@ -292,6 +313,7 @@ async fn dispatch(
                 &state.pool,
                 pipeline.workspace_id,
                 pipeline.repository_id,
+                environment_id,
             )
             .await?;
             for row in rows {
@@ -321,12 +343,13 @@ async fn dispatch(
             }
         }
         None => {
-            // No master key configured. A repository with stored secrets
+            // No master key configured. A dispatch with stored secrets
             // must not run without them; one with none proceeds normally.
             if db::secrets::any_for_dispatch(
                 &state.pool,
                 pipeline.workspace_id,
                 pipeline.repository_id,
+                environment_id,
             )
             .await?
             {

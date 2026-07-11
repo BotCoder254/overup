@@ -34,6 +34,7 @@ function filtersFromParams(params: URLSearchParams): SecretFilterState {
     q: params.get('q') ?? '',
     scope: params.get('scope') ?? '',
     repositoryId: params.get('repo') ?? '',
+    environmentId: params.get('env') ?? '',
   };
 }
 
@@ -58,6 +59,7 @@ export function SecretsPage() {
     if (filters.q) next.set('q', filters.q);
     if (filters.scope) next.set('scope', filters.scope);
     if (filters.repositoryId) next.set('repo', filters.repositoryId);
+    if (filters.environmentId) next.set('env', filters.environmentId);
     setSearchParams(next, { replace: true });
   }, [filters, setSearchParams]);
 
@@ -67,6 +69,7 @@ export function SecretsPage() {
       q: debouncedQ.trim() || undefined,
       scope: filters.scope || undefined,
       repositoryId: filters.repositoryId || undefined,
+      environmentId: filters.environmentId || undefined,
     }),
     [filters, debouncedQ],
   );
@@ -181,7 +184,11 @@ export function SecretsPage() {
         </div>
 
         <div className="min-w-0 space-y-4">
-          <SecretsSecurityCard encryptionConfigured={summary.data?.encryptionConfigured} />
+          <SecretsSecurityCard
+            encryptionConfigured={summary.data?.encryptionConfigured}
+            stale={summary.data?.stale}
+            staleAfterDays={summary.data?.staleAfterDays}
+          />
           <Card>
             <CardHeader>
               <h2 className="text-sm font-semibold text-charcoal">Recent activity</h2>

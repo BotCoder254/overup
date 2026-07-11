@@ -23,6 +23,9 @@ export function RunnersTable({
   onRegenerateToken,
   onRevoke,
 }: RunnersTableProps) {
+  // Defensive: revoked rows must never render, whatever path seeded the
+  // cache (the stream patch already filters them, this covers the rest).
+  const visible = runners.filter((runner) => !runner.revoked);
   return (
     <Table>
       <THead>
@@ -36,7 +39,7 @@ export function RunnersTable({
         </Tr>
       </THead>
       <TBody>
-        {runners.map((runner) => (
+        {visible.map((runner) => (
           <Tr key={runner.id} className="hover:bg-surface">
             <Td>
               <Link

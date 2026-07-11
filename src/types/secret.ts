@@ -6,7 +6,7 @@
  * replacement and can never be read back.
  */
 
-export type SecretScope = 'workspace' | 'repository';
+export type SecretScope = 'workspace' | 'repository' | 'environment';
 
 export interface Secret {
   id: string;
@@ -14,11 +14,15 @@ export interface Secret {
   scope: SecretScope;
   repositoryId?: string;
   repositoryName?: string;
+  environmentId?: string;
+  environmentName?: string;
   description?: string;
   creatorLogin?: string;
   updaterLogin?: string;
   createdAt: string;
   updatedAt: string;
+  /** When the value was last set (created or replaced) — the rotation clock. */
+  valueSetAt: string;
   lastUsedAt?: string;
   usageCount: number;
 }
@@ -32,11 +36,16 @@ export interface SecretsSummary {
   total: number;
   workspaceScoped: number;
   repositoryScoped: number;
+  environmentScoped: number;
   usedLast30d: number;
   neverUsed: number;
   createdLast30d: number;
   distinctRepositories: number;
   totalInjections: number;
+  /** Values not rotated within the stale window. */
+  stale: number;
+  /** The server's stale window in days (currently 90). */
+  staleAfterDays: number;
   /** Whether SECRETS_MASTER_KEY is configured on the deployment. */
   encryptionConfigured: boolean;
 }

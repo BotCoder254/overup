@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { HTTPError } from 'ky';
 import { toast } from 'sonner';
 import { useWorkspaceId } from '../../repositories/hooks/useRepositories';
-import { HOSTED_QUOTA_COPY } from '../lib/provisionCopy';
+import { HOSTED_QUOTA_COPY, HOSTED_UNAVAILABLE_COPY } from '../lib/provisionCopy';
 import {
   bootstrapRunner,
   createHostedRunner,
@@ -102,6 +102,10 @@ export function useCreateHostedRunner() {
           };
           if (body.error?.message === 'hosted_runner_quota') {
             toast.error(HOSTED_QUOTA_COPY);
+            return;
+          }
+          if (body.error?.message === 'hosted_runner_unavailable') {
+            toast.error(HOSTED_UNAVAILABLE_COPY);
             return;
           }
         } catch {

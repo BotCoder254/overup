@@ -88,8 +88,17 @@ pub struct RunnerProvisionerConfig {
     /// DOCKER_HOST value passed through into runner containers so they can
     /// execute jobs (RUNNER_PROVISIONER_DOCKER_HOST). Empty/unset = mount
     /// /var/run/docker.sock into the container instead — note that the
-    /// socket mount is root-equivalent on the host.
+    /// socket mount is root-equivalent on the host. This is NOT the daemon
+    /// the provisioner itself talks to — that's `docker_socket` below.
     pub runner_docker_host: Option<String>,
+    /// Explicit Docker endpoint for the provisioner's OWN connection
+    /// (RUNNER_PROVISIONER_DOCKER_SOCKET): a unix socket path (with or
+    /// without a unix:// prefix; e.g. rootless Docker's
+    /// $XDG_RUNTIME_DIR/docker.sock) or a Windows named pipe. Remote TCP
+    /// daemons must use DOCKER_HOST (+ DOCKER_TLS_VERIFY/DOCKER_CERT_PATH)
+    /// so TLS handling stays on the audited bollard path. Unset = probe
+    /// DOCKER_HOST, then the well-known local socket locations.
+    pub docker_socket: Option<String>,
     /// Auto-create one hosted runner when a workspace is created
     /// (RUNNER_AUTO_PROVISION, default true whenever the provisioner is on).
     pub auto_provision: bool,
@@ -213,6 +222,9 @@ impl Config {
                         .trim_end_matches('/')
                         .to_string(),
                     runner_docker_host: std::env::var("RUNNER_PROVISIONER_DOCKER_HOST")
+                        .ok()
+                        .filter(|v| !v.is_empty()),
+                    docker_socket: std::env::var("RUNNER_PROVISIONER_DOCKER_SOCKET")
                         .ok()
                         .filter(|v| !v.is_empty()),
                     auto_provision,

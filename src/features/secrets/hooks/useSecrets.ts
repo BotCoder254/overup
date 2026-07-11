@@ -31,6 +31,7 @@ export const secretsCatalogKey = (workspaceId: string, filters: SecretsCatalogFi
       q: filters.q ?? '',
       scope: filters.scope ?? '',
       repositoryId: filters.repositoryId ?? '',
+      environmentId: filters.environmentId ?? '',
     },
   ] as const;
 export const secretsSummaryKey = (workspaceId: string) =>

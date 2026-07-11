@@ -90,8 +90,10 @@ pub async fn create_workspace(
 /// fails or slows because of it; denials/failures surface on the Runners
 /// page through the usual provision_error UX. No RBAC check: the actor
 /// literally just created (and owns) the workspace. The gate is the live
-/// provisioner handle, not just config — init degrades to None when Docker
-/// is unreachable at boot.
+/// Docker connection, not just config — while the daemon is unreachable the
+/// auto-provision is skipped (warn-only) instead of enqueueing rows that can
+/// only fail; the user can create a hosted runner from the wizard once the
+/// provisioner reconnects.
 fn spawn_auto_provision_runner(
     state: &AppState,
     workspace_id: uuid::Uuid,
@@ -101,13 +103,20 @@ fn spawn_auto_provision_runner(
     let Some(cfg) = state.config.runner_provisioner.as_ref() else {
         return;
     };
-    if !cfg.auto_provision || state.runner_provisioner.is_none() {
+    let Some(provisioner) = state.runner_provisioner.clone() else {
+        return;
+    };
+    if !cfg.auto_provision {
         return;
     }
     let profile = cfg.default_profile;
 
     let task_state = state.clone();
     tokio::spawn(async move {
+        if !provisioner.available().await {
+            tracing::warn!(%workspace_id, "hosted runner auto-provision skipped: docker unavailable");
+            return;
+        }
         let labels: Vec<String> = ["self-hosted", "linux", "x64", "ubuntu-latest"]
             .into_iter()
             .map(String::from)

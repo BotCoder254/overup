@@ -100,6 +100,10 @@ pub struct ParsedJob {
     pub needs: Vec<String>,
     pub uses: Option<String>,
     pub strategy: Option<serde_json::Value>,
+    /// GitHub-style deployment environment name (`environment: prod` or
+    /// `environment: { name: prod }`); resolved live by name at dispatch to
+    /// scope environment secrets.
+    pub environment: Option<String>,
     pub step_count: i32,
     pub position: i32,
 }
@@ -390,6 +394,37 @@ fn extract_jobs(root: &Mapping, diagnostics: &mut Vec<Diagnostic>) -> Vec<Parsed
             ));
         }
 
+        // GitHub's two `environment:` forms — a bare string or a map with
+        // `name` (whose `url` we deliberately ignore). Anything else is a
+        // warning, never an error: the job still runs, just without
+        // environment secrets.
+        let environment = match get(job, "environment") {
+            None => None,
+            Some(value) => {
+                let name = value.as_str().or_else(|| {
+                    value
+                        .as_mapping()
+                        .and_then(|m| get(m, "name"))
+                        .and_then(Value::as_str)
+                });
+                match name.map(str::trim) {
+                    Some(name) if !name.is_empty() => {
+                        Some(name.chars().take(100).collect::<String>())
+                    }
+                    _ => {
+                        diagnostics.push(Diagnostic::warning(
+                            format!(
+                                "job `{job_key}` has a malformed `environment` \
+                                 (expected a string or a map with `name`)"
+                            ),
+                            Some(format!("{path}.environment")),
+                        ));
+                        None
+                    }
+                }
+            }
+        };
+
         let strategy = get(job, "strategy").map(value_to_json);
         if let Some(matrix) = get(job, "strategy")
             .and_then(Value::as_mapping)
@@ -411,6 +446,7 @@ fn extract_jobs(root: &Mapping, diagnostics: &mut Vec<Diagnostic>) -> Vec<Parsed
             needs: string_or_list(get(job, "needs")),
             uses,
             strategy,
+            environment,
             step_count: step_count as i32,
             position: position as i32,
             key: job_key,

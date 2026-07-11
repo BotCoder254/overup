@@ -110,12 +110,25 @@ async fn pass(state: &AppState) {
         }
     }
 
+    // Docker-touching cleanup below only makes sense with a live daemon
+    // connection; skipping it while Docker is down avoids a warn-per-row
+    // spray, and the DB-only purges still run either way (any containers
+    // left behind are reclaimed by reconciliation once Docker returns).
+    let live_provisioner = match &state.runner_provisioner {
+        Some(provisioner) if provisioner.available().await => Some(provisioner),
+        Some(_) => {
+            tracing::debug!("skipping hosted-runner docker cleanup: docker unavailable");
+            None
+        }
+        None => None,
+    };
+
     // 5. Runner rows stuck mid-registration: the wizard's bootstrap token
     //    expired before the runner ever connected, so no permanent identity
     //    was established — nothing worth keeping. Hosted (managed) runners
     //    first get their containers deprovisioned, while the rows still
     //    hold the container ids.
-    if let Some(provisioner) = &state.runner_provisioner {
+    if let Some(provisioner) = live_provisioner {
         match db::runners::find_expired_bootstrap_managed(&state.pool).await {
             Ok(orphans) => {
                 for (runner_id, container_id) in orphans {
@@ -143,7 +156,7 @@ async fn pass(state: &AppState) {
     //     comfortably exceeds every provisioning budget, so an in-flight
     //     provision is never purged from under its task.
     const STALE_PENDING_HOURS: i64 = 2;
-    if let Some(provisioner) = &state.runner_provisioner {
+    if let Some(provisioner) = live_provisioner {
         match db::runners::find_stale_pending_managed(&state.pool, STALE_PENDING_HOURS).await {
             Ok(stale) => {
                 for (runner_id, container_id) in stale {
@@ -169,7 +182,7 @@ async fn pass(state: &AppState) {
     // 6. Reconcile the Docker host against runner rows. Conservative and
     //    idempotent: ambiguous states are skipped, never destroyed, and the
     //    next pass retries anything that failed.
-    if let Some(provisioner) = &state.runner_provisioner {
+    if let Some(provisioner) = live_provisioner {
         reconcile_managed_containers(state, provisioner).await;
     }
 }

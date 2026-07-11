@@ -141,6 +141,7 @@ pub struct CatalogQuery {
     q: Option<String>,
     scope: Option<String>,
     repository_id: Option<Uuid>,
+    environment_id: Option<Uuid>,
     cursor: Option<String>,
     limit: Option<i64>,
 }
@@ -156,7 +157,7 @@ pub async fn list(
 
     let scope = match query.scope.as_deref() {
         None | Some("") => None,
-        Some(s @ ("workspace" | "repository")) => Some(s.to_string()),
+        Some(s @ ("workspace" | "repository" | "environment")) => Some(s.to_string()),
         Some(_) => return Err(AppError::Validation("invalid scope filter".into())),
     };
     let search_pattern = match query.q.as_deref().map(str::trim) {
@@ -173,6 +174,7 @@ pub async fn list(
     let filter = db::secrets::CatalogFilter {
         scope,
         repository_id: query.repository_id,
+        environment_id: query.environment_id,
         search_pattern,
         cursor,
         limit,
@@ -200,11 +202,15 @@ pub async fn summary(
         "total": summary.total,
         "workspaceScoped": summary.workspace_scoped,
         "repositoryScoped": summary.repository_scoped,
+        "environmentScoped": summary.environment_scoped,
         "usedLast30d": summary.used_last_30d,
         "neverUsed": summary.never_used,
         "createdLast30d": summary.created_last_30d,
         "distinctRepositories": summary.distinct_repositories,
         "totalInjections": summary.total_injections,
+        // Values not rotated within the stale window — rotation nudge.
+        "stale": summary.stale,
+        "staleAfterDays": db::secrets::SECRET_STALE_DAYS,
         // The UI's posture card states plainly whether values can be stored.
         "encryptionConfigured": state.secrets_crypto.is_some(),
     })))
@@ -272,6 +278,7 @@ pub struct CreateBody {
     value: String,
     description: Option<String>,
     repository_id: Option<Uuid>,
+    environment_id: Option<Uuid>,
 }
 
 /// POST /api/workspaces/{workspace_id}/secrets
@@ -293,6 +300,14 @@ pub async fn create(
     validate_value(&value)?;
     let description = validate_description(body.description.as_deref())?;
 
+    // Scopes are mutually exclusive: a secret is workspace-, repository-,
+    // OR environment-scoped (matches the DB CHECK constraint).
+    if body.repository_id.is_some() && body.environment_id.is_some() {
+        return Err(AppError::Validation(
+            "a secret is scoped to a repository or an environment, not both".into(),
+        ));
+    }
+
     // Repository scope must point at a repository inside this workspace.
     if let Some(repository_id) = body.repository_id
         && db::repositories::find_for_workspace(&state.pool, workspace_id, repository_id)
@@ -301,6 +316,18 @@ pub async fn create(
     {
         return Err(AppError::Validation(
             "repository does not belong to this workspace".into(),
+        ));
+    }
+
+    // Environment scope: same workspace-membership check, same flat error
+    // shape — existence in another workspace must not be distinguishable.
+    if let Some(environment_id) = body.environment_id
+        && db::environments::find_meta(&state.pool, workspace_id, environment_id)
+            .await?
+            .is_none()
+    {
+        return Err(AppError::Validation(
+            "environment does not belong to this workspace".into(),
         ));
     }
 
@@ -316,6 +343,7 @@ pub async fn create(
         id,
         workspace_id,
         body.repository_id,
+        body.environment_id,
         &name,
         description.as_deref(),
         &enc,

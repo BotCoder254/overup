@@ -38,17 +38,31 @@ export function useWorkspaceStream() {
     let attempt = 0;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 
+    // Frame ordering makes edits safe without extra bookkeeping: the backend
+    // emits the runner_update for a mutation at commit time, before the HTTP
+    // response triggers the invalidation refetch, so any stale frame is
+    // always followed by one carrying the committed state. Revokes are the
+    // exception — the trailing frame arrives with revoked: true AFTER the
+    // refetch removed the row, so it must remove (never re-append), or the
+    // just-deleted runner resurrects until a manual refresh.
     const patchRunner = (runner: Runner) => {
       queryClient.setQueryData<Runner[]>(runnersKey(workspaceId), (old) => {
         if (!old) return old;
+        if (runner.revoked) return old.filter((existing) => existing.id !== runner.id);
         const exists = old.some((existing) => existing.id === runner.id);
         return exists
           ? old.map((existing) => (existing.id === runner.id ? runner : existing))
           : [...old, runner];
       });
       queryClient.setQueryData<Runner>(runnerKey(workspaceId, runner.id), (old) =>
-        old ? runner : old,
+        old ? { ...old, ...runner } : old,
       );
+      if (runner.revoked) {
+        // Cross-client revokes free hosted-quota headroom too.
+        void queryClient.invalidateQueries({
+          queryKey: ['workspaces', workspaceId, 'runners', 'hosted-info'],
+        });
+      }
     };
 
     const handleEvent = (event: WorkspaceStreamEvent) => {

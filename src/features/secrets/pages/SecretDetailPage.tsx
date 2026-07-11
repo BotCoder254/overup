@@ -116,7 +116,11 @@ export function SecretDetailPage() {
                 </span>
               </MetaRow>
               <MetaRow label="Scope">
-                {secret.scope === 'repository' ? 'Repository' : 'Workspace'}
+                {secret.scope === 'repository'
+                  ? 'Repository'
+                  : secret.scope === 'environment'
+                    ? 'Environment'
+                    : 'Workspace'}
               </MetaRow>
               {secret.repositoryId && (
                 <MetaRow label="Repository">
@@ -125,6 +129,16 @@ export function SecretDetailPage() {
                     className="text-link hover:underline"
                   >
                     {secret.repositoryName ?? 'Repository'}
+                  </Link>
+                </MetaRow>
+              )}
+              {secret.environmentId && (
+                <MetaRow label="Environment">
+                  <Link
+                    to={workspacePath(slug, `environments/${secret.environmentId}`)}
+                    className="text-link hover:underline"
+                  >
+                    {secret.environmentName ?? 'Environment'}
                   </Link>
                 </MetaRow>
               )}
@@ -201,6 +215,11 @@ export function SecretDetailPage() {
                   {secret.updaterLogin && (
                     <span className="text-steel"> by {secret.updaterLogin}</span>
                   )}
+                </span>
+              </MetaRow>
+              <MetaRow label="Value rotated">
+                <span title={format(new Date(secret.valueSetAt), 'PPpp')}>
+                  {formatDistanceToNow(new Date(secret.valueSetAt), { addSuffix: true })}
                 </span>
               </MetaRow>
               <MetaRow label="Last used">
