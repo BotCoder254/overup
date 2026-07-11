@@ -97,16 +97,35 @@ its own Docker host — end users never see a token or edit an env file. Set on 
 | `RUNNER_PROVISIONER_OVERUP_URL` | yes | — | URL runner containers use to reach the API. Must be reachable **from inside a container** — never `localhost`. Single host with the default bridge: `http://172.17.0.1:8080`; otherwise the public API origin. |
 | `RUNNER_IMAGE` | no | `ghcr.io/botcoder254/overup-runner:latest` | Runner image the provisioner pulls and runs. |
 | `RUNNER_PROVISIONER_DOCKER_HOST` | no | unset | `DOCKER_HOST` injected into runner containers for job execution. Unset mounts `/var/run/docker.sock` into them instead — root-equivalent on the host; prefer a TLS-secured `tcp://…:2376` daemon when isolation matters. |
+| `RUNNER_PROVISIONER_NETWORK` | no | `overup-runners` | Dedicated Docker bridge network runner containers join (created at startup if missing; labeled `overup.managed=true`). Containers on it must still be able to reach `RUNNER_PROVISIONER_OVERUP_URL`. Set to `bridge` to opt out. |
+| `RUNNER_PROVISIONER_DEFAULT_PROFILE` | no | `standard` | Resource profile applied when a create request doesn't pick one (incl. workspace auto-provisioning): `small`, `standard`, or `large`. |
 
-Flow: "Register runner" → "Hosted on this server" → the backend responds instantly
-and provisions in the background (the first image pull can take minutes). The wizard
-polls the runner: a `provision_error` category (`image_pull_failed`,
-`container_create_failed`, `container_start_failed`, `provision_timeout`) surfaces as
-a failure with a "Try again" action. The one-time bootstrap token is injected
-directly into the container environment (never shown in the browser), exchanged for
-a permanent credential on first connect, and persisted in the container's data
-volume. Revoking the runner deprovisions its container and volume; abandoned
-bootstraps are cleaned up by the hourly janitor.
+Resource profiles (fixed server-side presets; users pick a size, never raw limits).
+The limits bound the runner container's own cgroup and are forwarded to its job
+containers via `RUNNER_JOB_MEMORY_BYTES`/`RUNNER_JOB_NANO_CPUS`/`RUNNER_JOB_PIDS_LIMIT`:
+
+| Profile | CPU | Memory | Pids |
+| --- | --- | --- | --- |
+| `small` | 1 | 1 GiB | 256 |
+| `standard` (default) | 2 | 2 GiB | 512 |
+| `large` | 4 | 4 GiB | 1024 |
+
+Flow: "Create a runner" → hosted is the default path (pick a size and an instance
+count — `N` instances create `name-1 … name-N`, each running one job at a time) →
+the backend responds instantly and provisions in the background (the first image
+pull can take minutes). The wizard polls every instance: a `provision_error`
+category (`image_pull_failed`, `container_create_failed`, `container_start_failed`,
+`provision_timeout`, `bootstrap_arm_failed`) surfaces as a failure with a retry
+action. Credential hygiene: the runner rows are created with **no credential at
+all**; the one-time bootstrap token is minted just-in-time after the image pull,
+armed onto the row (hash only), injected directly into the container environment
+(never shown in the browser), and wiped from server memory immediately — then
+exchanged for a permanent credential on first connect and persisted in the
+container's data volume. Runner containers are hardened: `no-new-privileges`,
+profile-derived memory/CPU/pids limits, and the dedicated network. Provisioning
+outcomes are audited as `runner.provisioned` / `runner.provision_failed` (system
+actor). Revoking the runner deprovisions its container and volume; abandoned
+bootstraps and never-armed pending rows are cleaned up by the hourly janitor.
 
 At startup the backend probes `RUNNER_PROVISIONER_OVERUP_URL/healthz` and logs a
 warning if it looks unreachable or points at localhost — check the backend logs
@@ -385,5 +404,5 @@ own host) or are best avoided until you're comfortable with the mount semantics.
 | Pipelines stay **Queued** with the runner online | Labels don't cover the job's `runs-on` (subset rule), or the single job slot is busy — check `RUNNER_LABELS` against the workflow, or add runners. |
 | `wss` connect fails through the proxy | `OVERUP_URL` must be the public origin (`https://api.example.com`); Traefik/Dokploy proxies WebSockets natively — check the URL and TLS cert before suspecting the proxy. |
 | Job containers can't reach the network | `RUNNER_JOB_NETWORK=none` set, or `isolated` combined with a workload expecting the default bridge. |
-| Hosted runner: wizard shows "Provisioning failed" | The `provision_error` category names the stage: `image_pull_failed` (check `RUNNER_IMAGE` + registry access on the server), `container_create_failed`/`container_start_failed` (check the server's Docker daemon and the container's logs), `provision_timeout` (very slow pull — pre-pull the image and retry). Docker detail is in the backend logs. |
+| Hosted runner: wizard shows "Provisioning failed" | The `provision_error` category names the stage: `image_pull_failed` (check `RUNNER_IMAGE` + registry access on the server), `container_create_failed`/`container_start_failed` (check the server's Docker daemon and the container's logs), `provision_timeout` (very slow pull — pre-pull the image and retry), `bootstrap_arm_failed` (database error while preparing the credential — retry). Docker detail is in the backend logs. |
 | Hosted runner: provisions fine but never connects (wizard times out) | `RUNNER_PROVISIONER_OVERUP_URL` isn't reachable from inside the container — never `localhost`; use `http://172.17.0.1:8080` (default bridge) or the public API origin. The backend logs a startup warning when its healthz probe of that URL fails. Check the runner container's own logs: `docker logs overup-runner-<runner-id>`. |

@@ -8,7 +8,7 @@ use crate::models::runner::Runner;
 /// layer's lookup path.
 const RUNNER_COLUMNS: &str = "id, workspace_id, name, labels, status, version, \
      last_seen_at, created_by, created_at, revoked_at, last_health, last_health_at, \
-     draining_at, managed, container_id, provision_error";
+     draining_at, managed, container_id, provision_error, resource_profile";
 
 pub enum CreateOutcome {
     Created(Box<Runner>),
@@ -164,6 +164,276 @@ pub async fn create_bootstrap(
 
     tx.commit().await?;
     Ok(CreateOutcome::Created(Box::new(runner)))
+}
+
+pub enum HostedCreateOutcome {
+    Created(Vec<Runner>),
+    NameTaken,
+    QuotaExceeded,
+}
+
+/// Serializes hosted-runner creation so concurrent requests can't both pass
+/// the quota check. Fixed constant — never derived from input.
+const HOSTED_CREATE_LOCK_KEY: i64 = 4_859_234_701;
+
+/// Parameters for [`create_hosted_pending`], bundled to keep the function
+/// signature within clippy's argument-count lint.
+pub struct CreateHostedPendingParams<'a> {
+    pub workspace_id: Uuid,
+    /// Used verbatim when `instances == 1`, suffixed `-1..-N` otherwise.
+    pub base_name: &'a str,
+    pub labels: &'a [String],
+    /// Validated preset slug (`small` | `standard` | `large`).
+    pub resource_profile: &'a str,
+    /// How many runner rows/containers to create (>= 1, handler-validated).
+    pub instances: u32,
+    pub created_by: Uuid,
+    pub request_id: Option<&'a str>,
+}
+
+/// Create hosted runner rows in *pending* state — no credential of any kind
+/// exists yet (`token_hash` and `bootstrap_token_hash` both NULL). The
+/// bootstrap credential is minted just-in-time by the provisioning task and
+/// armed via [`arm_bootstrap`] right before the container starts, so no
+/// plaintext token ever spans the (potentially minutes-long) image pull.
+///
+/// Per-workspace and global quota enforcement: the count + inserts run under
+/// a transaction-scoped advisory lock, so the quota can never be
+/// oversubscribed by a race; the lock only serializes hosted creations
+/// (rare, already rate-limited). A name collision on any instance rolls the
+/// whole batch back — creation is all-or-nothing.
+pub async fn create_hosted_pending(
+    pool: &PgPool,
+    params: CreateHostedPendingParams<'_>,
+    max_per_workspace: i64,
+    max_global: i64,
+) -> sqlx::Result<HostedCreateOutcome> {
+    let CreateHostedPendingParams {
+        workspace_id,
+        base_name,
+        labels,
+        resource_profile,
+        instances,
+        created_by,
+        request_id,
+    } = params;
+    let instances = instances.max(1);
+    let mut tx = pool.begin().await?;
+
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(HOSTED_CREATE_LOCK_KEY)
+        .execute(&mut *tx)
+        .await?;
+
+    let (ws_count, global_count): (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT COUNT(*) FILTER (WHERE workspace_id = $1), COUNT(*)
+        FROM runners WHERE managed AND revoked_at IS NULL
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if ws_count + i64::from(instances) > max_per_workspace
+        || global_count + i64::from(instances) > max_global
+    {
+        return Ok(HostedCreateOutcome::QuotaExceeded);
+    }
+
+    let mut runners = Vec::with_capacity(instances as usize);
+    for i in 1..=instances {
+        let name = if instances == 1 {
+            base_name.to_string()
+        } else {
+            format!("{base_name}-{i}")
+        };
+
+        let runner = match sqlx::query_as::<_, Runner>(&format!(
+            r#"
+            INSERT INTO runners
+                (workspace_id, name, labels, token_hash, bootstrap_token_hash,
+                 bootstrap_expires_at, created_by, managed, resource_profile)
+            VALUES ($1, $2, $3, NULL, NULL, NULL, $4, true, $5)
+            RETURNING {RUNNER_COLUMNS}
+            "#,
+        ))
+        .bind(workspace_id)
+        .bind(&name)
+        .bind(labels)
+        .bind(created_by)
+        .bind(resource_profile)
+        .fetch_one(&mut *tx)
+        .await
+        {
+            Ok(runner) => runner,
+            Err(err) if is_unique_violation(&err, "runners_ws_name_key") => {
+                return Ok(HostedCreateOutcome::NameTaken);
+            }
+            Err(err) => return Err(err),
+        };
+
+        sqlx::query(
+            r#"
+            INSERT INTO audit_logs
+                (workspace_id, actor_user_id, action, subject_type, subject_id, metadata, request_id)
+            VALUES ($1, $2, 'runner.created', 'runner', $3, $4, $5)
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(created_by)
+        .bind(runner.id)
+        .bind(serde_json::json!({
+            "name": name,
+            "labels": labels,
+            "managed": true,
+            "resourceProfile": resource_profile,
+        }))
+        .bind(request_id)
+        .execute(&mut *tx)
+        .await?;
+
+        runners.push(runner);
+    }
+
+    tx.commit().await?;
+    Ok(HostedCreateOutcome::Created(runners))
+}
+
+/// Arm a pending hosted runner's bootstrap credential just-in-time — called
+/// by the provisioning task right before the container is created, never
+/// earlier. Returns `false` when the row was revoked/purged/failed in the
+/// meantime; the caller must NOT create a container in that case.
+pub async fn arm_bootstrap(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    id: Uuid,
+    bootstrap_token_hash: &str,
+    expires_at: DateTime<Utc>,
+) -> sqlx::Result<bool> {
+    let result = sqlx::query(
+        r#"
+        UPDATE runners
+        SET bootstrap_token_hash = $3, bootstrap_expires_at = $4
+        WHERE workspace_id = $1 AND id = $2 AND managed AND revoked_at IS NULL
+          AND token_hash IS NULL AND bootstrap_token_hash IS NULL
+          AND provision_error IS NULL
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(id)
+    .bind(bootstrap_token_hash)
+    .bind(expires_at)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Managed rows that never got armed (no credential of any kind) and are old
+/// enough that no provisioning task can still be working on them. The
+/// expiry-based purge can't catch these — `bootstrap_expires_at` stays NULL
+/// until arm time. `container_id` is returned defensively (arm precedes
+/// container creation, so it should always be NULL here).
+pub async fn find_stale_pending_managed(
+    pool: &PgPool,
+    min_age_hours: i64,
+) -> sqlx::Result<Vec<(Uuid, Option<String>)>> {
+    sqlx::query_as(
+        r#"
+        SELECT id, container_id FROM runners
+        WHERE managed AND token_hash IS NULL AND bootstrap_token_hash IS NULL
+          AND created_at < now() - make_interval(hours => $1)
+        "#,
+    )
+    .bind(min_age_hours as i32)
+    .fetch_all(pool)
+    .await
+}
+
+/// Sweep for [`find_stale_pending_managed`] rows (same predicate).
+pub async fn purge_stale_pending_managed(pool: &PgPool, min_age_hours: i64) -> sqlx::Result<u64> {
+    let result = sqlx::query(
+        r#"
+        DELETE FROM runners
+        WHERE managed AND token_hash IS NULL AND bootstrap_token_hash IS NULL
+          AND created_at < now() - make_interval(hours => $1)
+        "#,
+    )
+    .bind(min_age_hours as i32)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+/// Audit entry for a control-plane-initiated runner event (provisioning
+/// outcomes). `actor_user_id` is NULL — the system, not a user, acted.
+/// `action` and `metadata` values must be static/sanitized (never Docker
+/// text).
+pub async fn insert_system_runner_audit(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    runner_id: Uuid,
+    action: &str,
+    metadata: serde_json::Value,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO audit_logs
+            (workspace_id, actor_user_id, action, subject_type, subject_id, metadata)
+        VALUES ($1, NULL, $2, 'runner', $3, $4)
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(action)
+    .bind(runner_id)
+    .bind(metadata)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// (workspace, global) counts of live managed runners — the wizard's
+/// remaining-quota display.
+pub async fn count_hosted(pool: &PgPool, workspace_id: Uuid) -> sqlx::Result<(i64, i64)> {
+    sqlx::query_as(
+        r#"
+        SELECT COUNT(*) FILTER (WHERE workspace_id = $1), COUNT(*)
+        FROM runners WHERE managed AND revoked_at IS NULL
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await
+}
+
+/// Every live managed runner: (id, container_id, status) — the janitor's
+/// reconciliation input.
+pub async fn list_managed_live(
+    pool: &PgPool,
+) -> sqlx::Result<Vec<(Uuid, Option<String>, String)>> {
+    sqlx::query_as(
+        "SELECT id, container_id, status FROM runners WHERE managed AND revoked_at IS NULL",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// Reconciler: a managed runner's container vanished from the Docker host.
+/// Guarded to offline rows so a live, connected runner is never flagged.
+/// (Deliberately not `set_provision_error` — that one only touches
+/// pre-registration rows.)
+pub async fn flag_container_missing(pool: &PgPool, id: Uuid) -> sqlx::Result<bool> {
+    let result = sqlx::query(
+        r#"
+        UPDATE runners
+        SET provision_error = 'container_missing', container_id = NULL
+        WHERE id = $1 AND managed AND revoked_at IS NULL
+          AND status = 'offline' AND container_id IS NOT NULL
+        "#,
+    )
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
 }
 
 /// Bearer-token lookup for a still-pending bootstrap credential.

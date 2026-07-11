@@ -78,6 +78,14 @@ export function useWorkspaceStream() {
         case 'runner_update':
           patchRunner(event.runner);
           break;
+        case 'artifact_update':
+          // Coarse prefix invalidation covers the catalog, summary, detail,
+          // and retention queries in one shot; a no-op when the Artifacts
+          // page isn't mounted.
+          void queryClient.invalidateQueries({
+            queryKey: ['workspaces', workspaceId, 'artifacts'],
+          });
+          break;
         case 'runner_health':
           queryClient.setQueryData<Runner[]>(runnersKey(workspaceId), (old) =>
             old?.map((runner) =>

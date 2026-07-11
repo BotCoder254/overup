@@ -1,12 +1,13 @@
 import { useQueryClient } from '@tanstack/react-query';
 import { useCallback, useState } from 'react';
 import { Dialog } from '../../../components/ui/Dialog';
+import type { RunnerResourceProfile } from '../../../types/runner';
 import { revokeRunner } from '../api/runnersApi';
 import {
   runnersKey,
   useBootstrapRunner,
   useCreateHostedRunner,
-  useHostedRunnerAvailable,
+  useHostedRunnerInfo,
   useWorkspaceId,
 } from '../hooks/useRunners';
 import { InstallCommandStep } from './wizard/InstallCommandStep';
@@ -21,7 +22,7 @@ interface RunnerRegistrationDialogProps {
 type Step = 'details' | 'install' | 'waiting';
 
 const TITLES: Record<Step, string> = {
-  details: 'Register a runner',
+  details: 'Create a runner',
   install: 'Install the runner',
   waiting: 'Connecting',
 };
@@ -38,79 +39,96 @@ function parseLabels(value: string): string[] {
 }
 
 /**
- * Guided registration. Self-hosted: name/labels -> install command -> live
- * connection check. Hosted (when the deployment supports it): name/labels ->
- * the server provisions a runner container itself -> live connection check —
- * no install step, no token ever shown.
+ * Guided creation. Hosted (the default whenever the deployment supports it):
+ * name/labels/size/instances -> the server provisions runner container(s)
+ * itself -> live connection check — no install step, no token ever shown.
+ * Self-hosted (behind "Advanced"): name/labels -> install command -> live
+ * connection check.
  */
 export function RunnerRegistrationDialog({ open, onClose }: RunnerRegistrationDialogProps) {
   const bootstrap = useBootstrapRunner();
   const createHosted = useCreateHostedRunner();
-  const hostedAvailable = useHostedRunnerAvailable();
+  const hostedInfo = useHostedRunnerInfo();
   const workspaceId = useWorkspaceId();
   const queryClient = useQueryClient();
 
   const [step, setStep] = useState<Step>('details');
-  const [mode, setMode] = useState<RunnerMode>('self-hosted');
+  const [mode, setMode] = useState<RunnerMode>('hosted');
   const [name, setName] = useState('');
   const [labels, setLabels] = useState('');
   const [os, setOs] = useState('');
-  const [issued, setIssued] = useState<{ runnerId: string; token: string | null } | null>(null);
+  const [profile, setProfile] = useState<RunnerResourceProfile>('standard');
+  const [instances, setInstances] = useState(1);
+  const [issued, setIssued] = useState<{ runnerIds: string[]; token: string | null } | null>(null);
+
+  // Hosted is the default path, but only when the deployment can actually
+  // provision and has quota headroom — otherwise the classic self-hosted
+  // flow is the only one.
+  const hostedUsable =
+    hostedInfo.data?.hostedAvailable === true && hostedInfo.data.hostedRemaining !== 0;
+  const effectiveMode: RunnerMode = hostedUsable ? mode : 'self-hosted';
 
   // Stable across re-renders (typing updates name/labels state every
   // keystroke) so the Dialog never sees a changing onClose reference.
   const close = useCallback(() => {
     onClose();
     setStep('details');
-    setMode('self-hosted');
+    setMode('hosted');
     setName('');
     setLabels('');
     setOs('');
+    setProfile('standard');
+    setInstances(1);
     setIssued(null);
   }, [onClose]);
 
   const onDetailsNext = () => {
     const input = { name: name.trim(), labels: parseLabels(labels) };
-    if (mode === 'hosted') {
-      createHosted.mutate(input, {
-        onSuccess: (runner) => {
-          setIssued({ runnerId: runner.id, token: null });
-          setStep('waiting');
+    if (effectiveMode === 'hosted') {
+      createHosted.mutate(
+        { ...input, resourceProfile: profile, instances },
+        {
+          onSuccess: (runners) => {
+            setIssued({ runnerIds: runners.map((runner) => runner.id), token: null });
+            setStep('waiting');
+          },
         },
-      });
+      );
     } else {
       bootstrap.mutate(input, {
         onSuccess: (result) => {
-          setIssued({ runnerId: result.runner.id, token: result.token });
+          setIssued({ runnerIds: [result.runner.id], token: result.token });
           setStep('install');
         },
       });
     }
   };
 
-  // A failed hosted provision leaves a dead runner row behind; discard it
+  // A failed hosted provision leaves dead runner rows behind; discard them
   // (best-effort — the janitor purges stragglers) and restart from the
   // details step with the typed name/labels intact.
   const retryHosted = useCallback(() => {
     if (issued && workspaceId) {
-      void revokeRunner(workspaceId, issued.runnerId)
-        .then(() => queryClient.invalidateQueries({ queryKey: runnersKey(workspaceId) }))
-        .catch(() => {});
+      void Promise.allSettled(
+        issued.runnerIds.map((runnerId) => revokeRunner(workspaceId, runnerId)),
+      ).then(() => queryClient.invalidateQueries({ queryKey: runnersKey(workspaceId) }));
     }
     setIssued(null);
     setStep('details');
   }, [issued, workspaceId, queryClient]);
 
   const waitingMessage =
-    mode === 'hosted'
-      ? 'Provisioning the hosted runner…'
+    effectiveMode === 'hosted'
+      ? issued && issued.runnerIds.length > 1
+        ? 'Provisioning the hosted runners…'
+        : 'Provisioning the hosted runner…'
       : 'Waiting for the runner to connect…';
 
   return (
     <Dialog
       open={open}
       onClose={close}
-      title={step === 'waiting' && mode === 'hosted' ? 'Provisioning' : TITLES[step]}
+      title={step === 'waiting' && effectiveMode === 'hosted' ? 'Provisioning' : TITLES[step]}
       className="max-w-lg"
     >
       {step === 'details' && (
@@ -121,9 +139,14 @@ export function RunnerRegistrationDialog({ open, onClose }: RunnerRegistrationDi
           onLabelsChange={setLabels}
           os={os}
           onOsChange={setOs}
-          mode={mode}
+          mode={effectiveMode}
           onModeChange={setMode}
-          hostedAvailable={hostedAvailable.data === true}
+          profile={profile}
+          onProfileChange={setProfile}
+          instances={instances}
+          onInstancesChange={setInstances}
+          hostedAvailable={hostedInfo.data?.hostedAvailable === true}
+          hostedRemaining={hostedInfo.data?.hostedRemaining ?? null}
           onNext={onDetailsNext}
           isLoading={bootstrap.isPending || createHosted.isPending}
         />
@@ -138,10 +161,10 @@ export function RunnerRegistrationDialog({ open, onClose }: RunnerRegistrationDi
       )}
       {step === 'waiting' && issued && (
         <WaitForConnectionStep
-          runnerId={issued.runnerId}
+          runnerIds={issued.runnerIds}
           message={waitingMessage}
           onDone={close}
-          onRetry={mode === 'hosted' ? retryHosted : undefined}
+          onRetry={effectiveMode === 'hosted' ? retryHosted : undefined}
         />
       )}
     </Dialog>

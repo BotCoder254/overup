@@ -433,8 +433,26 @@ async fn on_runner_msg(
             handle_artifact_request(state, runner_id, job_id, name, size_bytes, content_type)
                 .await?;
         }
-        RunnerMsg::ArtifactDone { job_id, name, checksum_sha256, .. } => {
-            handle_artifact_done(state, runner_id, job_id, name, checksum_sha256).await?;
+        RunnerMsg::ArtifactDone {
+            job_id,
+            name,
+            checksum_sha256,
+            uncompressed_bytes,
+            file_count,
+            entries,
+            ..
+        } => {
+            handle_artifact_done(
+                state,
+                runner_id,
+                job_id,
+                name,
+                checksum_sha256,
+                uncompressed_bytes,
+                file_count,
+                entries,
+            )
+            .await?;
         }
         RunnerMsg::JobResult { job_id, conclusion, exit_code, error_category, metrics } => {
             active_jobs.remove(&job_id);
@@ -537,6 +555,15 @@ async fn handle_artifact_request(
         &name,
     );
 
+    // Server-side classification drives per-kind retention and catalog
+    // filters; the runner never influences it beyond the validated name.
+    let kind = crate::services::artifact_kind::classify(&name);
+    let retention_days =
+        db::artifact_retention::resolve_days(&state.pool, pipeline.workspace_id, kind)
+            .await?
+            .map(i64::from)
+            .unwrap_or(state.config.artifact_retention_days);
+
     let artifact = db::artifacts::insert_pending(
         &state.pool,
         pipeline.workspace_id,
@@ -546,9 +573,10 @@ async fn handle_artifact_request(
         &key,
         size_bytes as i64,
         &content_type,
+        kind,
         // Retention clock starts at upload request; the janitor deletes the
         // R2 object and flips the row to expired once it lapses.
-        Some(chrono::Utc::now() + chrono::Duration::days(state.config.artifact_retention_days)),
+        Some(chrono::Utc::now() + chrono::Duration::days(retention_days)),
     )
     .await?;
 
@@ -576,12 +604,63 @@ async fn handle_artifact_request(
     Ok(())
 }
 
+/// Caps for runner-reported archive manifests — over-cap values are dropped
+/// (the upload itself always proceeds), matching the metrics-clamp rule.
+const MAX_MANIFEST_ENTRIES: usize = 1000;
+const MAX_MANIFEST_PATH_CHARS: usize = 512;
+const MAX_MANIFEST_JSON_BYTES: usize = 96 * 1024;
+const MAX_UNCOMPRESSED_BYTES: u64 = 1 << 40; // 1 TiB
+const MAX_FILE_COUNT: u32 = 1_000_000;
+
+/// Validate and convert the runner-reported archive manifest. Any violation
+/// drops the whole manifest — partial/tampered introspection is never stored.
+fn sanitize_manifest(
+    uncompressed_bytes: Option<u64>,
+    file_count: Option<u32>,
+    entries: Option<Vec<protocol::ArtifactEntry>>,
+) -> Option<db::artifacts::UploadManifest> {
+    if uncompressed_bytes.is_none() && file_count.is_none() && entries.is_none() {
+        return None;
+    }
+    if uncompressed_bytes.is_some_and(|b| b > MAX_UNCOMPRESSED_BYTES)
+        || file_count.is_some_and(|c| c > MAX_FILE_COUNT)
+    {
+        return None;
+    }
+    let entries_json = match entries {
+        None => None,
+        Some(list) => {
+            if list.len() > MAX_MANIFEST_ENTRIES
+                || list
+                    .iter()
+                    .any(|e| e.path.is_empty() || e.path.chars().count() > MAX_MANIFEST_PATH_CHARS)
+            {
+                return None;
+            }
+            let value = serde_json::to_value(&list).ok()?;
+            if serde_json::to_string(&value).map(|s| s.len()).ok()? > MAX_MANIFEST_JSON_BYTES {
+                return None;
+            }
+            Some(value)
+        }
+    };
+    Some(db::artifacts::UploadManifest {
+        uncompressed_bytes: uncompressed_bytes.map(|b| b as i64),
+        file_count: file_count.map(|c| c as i32),
+        entries: entries_json,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn handle_artifact_done(
     state: &AppState,
     runner_id: Uuid,
     job_id: Uuid,
     name: String,
     checksum_sha256: String,
+    uncompressed_bytes: Option<u64>,
+    file_count: Option<u32>,
+    entries: Option<Vec<protocol::ArtifactEntry>>,
 ) -> anyhow::Result<()> {
     let Some(job) = db::pipeline_jobs::find_assigned(&state.pool, job_id, runner_id).await? else {
         return Ok(());
@@ -624,8 +703,16 @@ async fn handle_artifact_done(
         }
     };
 
-    if let Some(artifact) =
-        db::artifacts::mark_uploaded(&state.pool, job.id, &name, verified_size, &checksum).await?
+    let manifest = sanitize_manifest(uncompressed_bytes, file_count, entries);
+    if let Some(artifact) = db::artifacts::mark_uploaded(
+        &state.pool,
+        job.id,
+        &name,
+        verified_size,
+        &checksum,
+        manifest.as_ref(),
+    )
+    .await?
     {
         sqlx::query(
             r#"
@@ -638,6 +725,17 @@ async fn handle_artifact_done(
         .bind(serde_json::json!({ "name": artifact.name, "sizeBytes": verified_size }))
         .execute(&state.pool)
         .await?;
+
+        state.workspace_hub.publish(
+            pipeline.workspace_id,
+            crate::services::workspace_hub::WorkspaceEvent::ArtifactUpdate {
+                id: artifact.id,
+                pipeline_id: artifact.pipeline_id,
+                name: artifact.name.clone(),
+                status: artifact.status.clone(),
+                kind: artifact.kind.clone(),
+            },
+        );
 
         state.log_hub.publish(
             pipeline.id,

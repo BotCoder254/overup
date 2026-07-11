@@ -1,3 +1,4 @@
+pub mod artifact_kind;
 pub mod auth_flow;
 pub mod authz;
 pub mod github;
@@ -10,6 +11,8 @@ pub mod pipeline_run;
 pub mod r2;
 pub mod repo_sync;
 pub mod runner_hub;
+pub mod runner_profiles;
+pub mod runner_provision_flow;
 pub mod runner_provisioner;
 pub mod scheduler;
 pub mod session;

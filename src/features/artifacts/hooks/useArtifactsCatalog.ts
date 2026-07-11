@@ -7,12 +7,15 @@ import {
 import { HTTPError } from 'ky';
 import { toast } from 'sonner';
 import { useWorkspaceId } from '../../repositories/hooks/useRepositories';
+import type { RetentionPolicy } from '../../../types/artifact';
 import {
   deleteArtifact,
   getArtifactCatalog,
   getArtifactDetail,
   getArtifactDownloadUrl,
   getArtifactsSummary,
+  getRetentionPolicies,
+  putRetentionPolicies,
   type ArtifactCatalogFilters,
 } from '../api/artifactsApi';
 
@@ -30,10 +33,18 @@ export const artifactCatalogKey = (workspaceId: string, filters: ArtifactCatalog
       jobId: filters.jobId ?? '',
       status: filters.status ?? '',
       q: filters.q ?? '',
+      branch: filters.branch ?? '',
+      kind: filters.kind ?? '',
+      retention: filters.retention ?? '',
+      minSize: filters.minSize ?? '',
+      maxSize: filters.maxSize ?? '',
+      job: filters.job ?? '',
       createdAfter: filters.createdAfter ?? '',
       createdBefore: filters.createdBefore ?? '',
     },
   ] as const;
+export const retentionPoliciesKey = (workspaceId: string) =>
+  ['workspaces', workspaceId, 'artifacts', 'retention'] as const;
 export const artifactsSummaryKey = (workspaceId: string) =>
   ['workspaces', workspaceId, 'artifacts', 'summary'] as const;
 export const artifactDetailKey = (workspaceId: string, artifactId: string) =>
@@ -83,7 +94,33 @@ export function useArtifactDetail(artifactId: string | undefined) {
     queryKey: artifactDetailKey(workspaceId ?? '', artifactId ?? ''),
     queryFn: () => getArtifactDetail(workspaceId!, artifactId!),
     enabled: Boolean(workspaceId && artifactId),
-    refetchInterval: (query) => (query.state.data?.status === 'pending' ? 5000 : false),
+    refetchInterval: (query) =>
+      query.state.data?.artifact.status === 'pending' ? 5000 : false,
+  });
+}
+
+export function useRetentionPolicies() {
+  const workspaceId = useWorkspaceId();
+  return useQuery({
+    queryKey: retentionPoliciesKey(workspaceId ?? ''),
+    queryFn: () => getRetentionPolicies(workspaceId!),
+    enabled: Boolean(workspaceId),
+  });
+}
+
+export function useSaveRetentionPolicies() {
+  const workspaceId = useWorkspaceId();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (policies: RetentionPolicy[]) => putRetentionPolicies(workspaceId!, policies),
+    onSuccess: (data) => {
+      toast.success('Retention policies saved.');
+      if (!workspaceId) return;
+      queryClient.setQueryData(retentionPoliciesKey(workspaceId), data);
+    },
+    onError: (error) => {
+      toast.error(describeError(error, 'Could not save retention policies.'));
+    },
   });
 }
 

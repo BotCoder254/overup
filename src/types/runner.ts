@@ -2,6 +2,9 @@
 
 export type RunnerStatus = 'offline' | 'idle' | 'busy' | 'disabled';
 
+/** Server-side sizing preset for hosted runners. */
+export type RunnerResourceProfile = 'small' | 'standard' | 'large';
+
 /** Ambient host telemetry sampled on every heartbeat, server-validated. */
 export interface RunnerHealth {
   cpuPermille?: number;
@@ -33,4 +36,6 @@ export interface Runner {
    * container_start_failed, provision_timeout); null otherwise.
    */
   provisionError: string | null;
+  /** Sizing preset for hosted runners; null for self-hosted rows. */
+  resourceProfile: RunnerResourceProfile | null;
 }

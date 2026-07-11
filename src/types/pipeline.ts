@@ -98,6 +98,16 @@ export interface LogChunk {
   createdAt?: string;
 }
 
+export type ArtifactKind =
+  | 'package'
+  | 'report'
+  | 'docs'
+  | 'archive'
+  | 'binary'
+  | 'image'
+  | 'log'
+  | 'other';
+
 export interface Artifact {
   id: string;
   pipelineId: string;
@@ -107,6 +117,9 @@ export interface Artifact {
   contentType: string | null;
   checksumSha256: string | null;
   status: 'pending' | 'uploaded' | 'failed' | 'expired';
+  kind: ArtifactKind;
+  uncompressedBytes: number | null;
+  fileCount: number | null;
   createdAt: string;
   expiresAt: string | null;
 }

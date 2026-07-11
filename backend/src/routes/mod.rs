@@ -183,6 +183,10 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
             get(artifacts::summary),
         )
         .route(
+            "/workspaces/{workspace_id}/artifacts/retention",
+            get(artifacts::retention_get).put(artifacts::retention_put),
+        )
+        .route(
             "/workspaces/{workspace_id}/artifacts/{artifact_id}",
             get(artifacts::detail).delete(artifacts::remove),
         )
@@ -289,7 +293,13 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
                 .map_err(anyhow::Error::new)?,
         )
         .allow_credentials(true)
-        .allow_methods([Method::GET, Method::POST, Method::DELETE])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+        ])
         .allow_headers([
             header::CONTENT_TYPE,
             HeaderName::from_static("x-requested-with"),

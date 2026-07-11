@@ -1,10 +1,11 @@
-import { Package } from 'lucide-react';
+import { Clock, Package } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
 import { PageHeader } from '../../../components/layout/PageHeader';
 import { Button } from '../../../components/ui/Button';
 import { EmptyState } from '../../../components/ui/EmptyState';
 import { Spinner } from '../../../components/ui/Spinner';
+import { useWorkspaceStream } from '../../dashboard/hooks/useWorkspaceStream';
 import type { ArtifactCatalogFilters as ApiFilters } from '../api/artifactsApi';
 import {
   ArtifactFilters,
@@ -13,6 +14,7 @@ import {
 } from '../components/ArtifactFilters';
 import { ArtifactsSummaryStrip } from '../components/ArtifactsSummaryStrip';
 import { ArtifactsTable } from '../components/ArtifactsTable';
+import { RetentionPolicyDialog } from '../components/RetentionPolicyDialog';
 import { useArtifactsCatalog, useArtifactsSummary } from '../hooks/useArtifactsCatalog';
 
 /** Trailing-edge debounce for the free-text input. */
@@ -37,9 +39,22 @@ function filtersFromParams(params: URLSearchParams): ArtifactFilterState {
     status: params.get('status') ?? '',
     repositoryId: params.get('repo') ?? '',
     workflowId: params.get('workflow') ?? '',
+    branch: params.get('branch') ?? '',
+    kind: params.get('kind') ?? '',
+    retention: params.get('retention') ?? '',
+    minMb: params.get('min') ?? '',
+    maxMb: params.get('max') ?? '',
+    job: params.get('job') ?? '',
     from: params.get('from') ?? '',
     to: params.get('to') ?? '',
   };
+}
+
+/** MB text input -> whole bytes, stringified for the API (empty on junk). */
+function mbToBytes(raw: string): string | undefined {
+  const mb = Number(raw);
+  if (!raw.trim() || !Number.isFinite(mb) || mb < 0) return undefined;
+  return String(Math.round(mb * 1024 * 1024));
 }
 
 /**
@@ -55,6 +70,13 @@ export function ArtifactsPage() {
     filtersFromParams(searchParams),
   );
 
+  const [retentionOpen, setRetentionOpen] = useState(false);
+
+  // Live catalog refresh: artifact_update frames on the workspace stream
+  // invalidate the artifact query prefix (poll-while-pending remains the
+  // fallback while disconnected).
+  useWorkspaceStream();
+
   // Mirror the filters into the URL (replace — no history spam).
   useEffect(() => {
     const next = new URLSearchParams();
@@ -62,12 +84,22 @@ export function ArtifactsPage() {
     if (filters.status) next.set('status', filters.status);
     if (filters.repositoryId) next.set('repo', filters.repositoryId);
     if (filters.workflowId) next.set('workflow', filters.workflowId);
+    if (filters.branch) next.set('branch', filters.branch);
+    if (filters.kind) next.set('kind', filters.kind);
+    if (filters.retention) next.set('retention', filters.retention);
+    if (filters.minMb) next.set('min', filters.minMb);
+    if (filters.maxMb) next.set('max', filters.maxMb);
+    if (filters.job) next.set('job', filters.job);
     if (filters.from) next.set('from', filters.from);
     if (filters.to) next.set('to', filters.to);
     setSearchParams(next, { replace: true });
   }, [filters, setSearchParams]);
 
   const debouncedQ = useDebouncedValue(filters.q, 300);
+  const debouncedBranch = useDebouncedValue(filters.branch, 300);
+  const debouncedJob = useDebouncedValue(filters.job, 300);
+  const debouncedMinMb = useDebouncedValue(filters.minMb, 300);
+  const debouncedMaxMb = useDebouncedValue(filters.maxMb, 300);
 
   const apiFilters = useMemo<ApiFilters>(
     () => ({
@@ -75,10 +107,16 @@ export function ArtifactsPage() {
       status: filters.status || undefined,
       repositoryId: filters.repositoryId || undefined,
       workflowId: filters.workflowId || undefined,
+      branch: debouncedBranch.trim() || undefined,
+      kind: filters.kind || undefined,
+      retention: filters.retention || undefined,
+      minSize: mbToBytes(debouncedMinMb),
+      maxSize: mbToBytes(debouncedMaxMb),
+      job: debouncedJob.trim() || undefined,
       createdAfter: dayBound(filters.from, false),
       createdBefore: dayBound(filters.to, true),
     }),
-    [filters, debouncedQ],
+    [filters, debouncedQ, debouncedBranch, debouncedJob, debouncedMinMb, debouncedMaxMb],
   );
 
   const summary = useArtifactsSummary();
@@ -109,7 +147,15 @@ export function ArtifactsPage() {
       <PageHeader
         title="Artifacts"
         description="Build outputs produced by pipeline runs — browse, download, and manage retention across the workspace."
+        actions={
+          <Button variant="secondary" size="sm" onClick={() => setRetentionOpen(true)}>
+            <Clock size={14} aria-hidden="true" />
+            Retention
+          </Button>
+        }
       />
+
+      <RetentionPolicyDialog open={retentionOpen} onClose={() => setRetentionOpen(false)} />
 
       <ArtifactsSummaryStrip
         summary={summary.data}

@@ -1,8 +1,10 @@
 import { api } from '../../../lib/api';
 import type {
-  ArtifactCatalogEntry,
   ArtifactCatalogResponse,
+  ArtifactDetail,
   ArtifactsSummary,
+  RetentionPoliciesResponse,
+  RetentionPolicy,
 } from '../../../types/artifact';
 
 export interface ArtifactCatalogFilters {
@@ -12,6 +14,13 @@ export interface ArtifactCatalogFilters {
   jobId?: string;
   status?: string;
   q?: string;
+  branch?: string;
+  kind?: string;
+  retention?: string;
+  /** Bytes, stringified — the page converts from MB inputs. */
+  minSize?: string;
+  maxSize?: string;
+  job?: string;
   createdAfter?: string;
   createdBefore?: string;
   cursor?: string;
@@ -37,11 +46,27 @@ export async function getArtifactsSummary(workspaceId: string): Promise<Artifact
 export async function getArtifactDetail(
   workspaceId: string,
   artifactId: string,
-): Promise<ArtifactCatalogEntry> {
-  const body = await api
+): Promise<ArtifactDetail> {
+  return api
     .get(`/api/workspaces/${workspaceId}/artifacts/${artifactId}`)
-    .json<{ artifact: ArtifactCatalogEntry }>();
-  return body.artifact;
+    .json<ArtifactDetail>();
+}
+
+export async function getRetentionPolicies(
+  workspaceId: string,
+): Promise<RetentionPoliciesResponse> {
+  return api
+    .get(`/api/workspaces/${workspaceId}/artifacts/retention`)
+    .json<RetentionPoliciesResponse>();
+}
+
+export async function putRetentionPolicies(
+  workspaceId: string,
+  policies: RetentionPolicy[],
+): Promise<RetentionPoliciesResponse> {
+  return api
+    .put(`/api/workspaces/${workspaceId}/artifacts/retention`, { json: { policies } })
+    .json<RetentionPoliciesResponse>();
 }
 
 /** Same presigned-GET endpoint the pipeline panel uses. */

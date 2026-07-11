@@ -1,10 +1,15 @@
 import { api } from '../../../lib/api';
-import type { Runner } from '../../../types/runner';
+import type { Runner, RunnerResourceProfile } from '../../../types/runner';
 
 export interface RunnersListResponse {
   runners: Runner[];
   /** Whether this deployment can provision hosted runners itself. */
   hostedAvailable: boolean;
+  /**
+   * Remaining hosted-runner quota (min of per-workspace and global
+   * headroom); null when the deployment has no provisioner.
+   */
+  hostedRemaining: number | null;
 }
 
 export async function getRunnersList(workspaceId: string): Promise<RunnersListResponse> {
@@ -38,18 +43,28 @@ export async function bootstrapRunner(
     .json<BootstrapResult>();
 }
 
+export interface CreateHostedInput {
+  name: string;
+  labels: string[];
+  /** Sizing preset; omitted = the server's configured default. */
+  resourceProfile?: RunnerResourceProfile;
+  /** How many runner containers to provision in one batch (default 1). */
+  instances?: number;
+}
+
 /**
- * "Create and wait": the server provisions a runner container itself. No
- * token ever reaches the browser — it is injected into the container.
+ * "Create and wait": the server provisions runner container(s) itself. No
+ * token ever reaches the browser — it is minted just-in-time on the server
+ * and injected into the container.
  */
 export async function createHostedRunner(
   workspaceId: string,
-  input: { name: string; labels: string[] },
-): Promise<Runner> {
+  input: CreateHostedInput,
+): Promise<Runner[]> {
   const body = await api
     .post(`/api/workspaces/${workspaceId}/runners/hosted`, { json: input })
-    .json<{ runner: Runner }>();
-  return body.runner;
+    .json<{ runners: Runner[] }>();
+  return body.runners;
 }
 
 export async function updateRunner(

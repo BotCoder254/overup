@@ -15,8 +15,9 @@ use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::middleware::auth::CurrentUser;
 use crate::models::runner::RunnerResponse;
+use crate::services::runner_profiles::ResourceProfile;
 use crate::services::workspace_hub::WorkspaceEvent;
-use crate::services::{authz, pipeline_run, session};
+use crate::services::{authz, pipeline_run, runner_provision_flow, session};
 use crate::state::AppState;
 
 /// Refetch a runner and publish its current state to the workspace-wide live
@@ -125,10 +126,27 @@ pub async fn list(
         .into_iter()
         .map(RunnerResponse::from)
         .collect();
+
+    let hosted_available = state.runner_provisioner.is_some();
+    // Remaining hosted-runner quota (min of the per-workspace and global
+    // headroom); null when this deployment has no provisioner.
+    let hosted_remaining = match (hosted_available, state.config.runner_provisioner.as_ref()) {
+        (true, Some(cfg)) => {
+            let (ws, global) = db::runners::count_hosted(&state.pool, workspace_id).await?;
+            Some(
+                (cfg.max_per_workspace - ws)
+                    .min(cfg.max_global - global)
+                    .max(0),
+            )
+        }
+        _ => None,
+    };
+
     Ok(Json(json!({
         "runners": runners,
         // Whether this deployment can provision hosted runners itself.
-        "hostedAvailable": state.runner_provisioner.is_some(),
+        "hostedAvailable": hosted_available,
+        "hostedRemaining": hosted_remaining,
     })))
 }
 
@@ -202,26 +220,33 @@ pub async fn bootstrap(
         .into_response())
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateHostedRequest {
+    name: String,
+    #[serde(default)]
+    labels: Vec<String>,
+    /// Sizing preset slug; defaults to the server's configured profile.
+    resource_profile: Option<String>,
+    /// How many runner containers to provision in one batch; defaults to 1.
+    instances: Option<u32>,
+}
+
 /// POST /api/workspaces/{workspace_id}/runners/hosted
 ///
-/// "Create and wait": provisions a runner container on the server's Docker
-/// host. The bootstrap token goes straight into the container environment —
-/// it is never returned to the browser — and the signing key is delivered
-/// over the authenticated WebSocket on first connect.
+/// "Create and wait": provisions runner container(s) on the server's Docker
+/// host. The bootstrap token is minted just-in-time by the provisioning task
+/// and goes straight into the container environment — it is never returned
+/// to the browser — and the signing key is delivered over the authenticated
+/// WebSocket on first connect.
 pub async fn create_hosted(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
     Path(workspace_id): Path<Uuid>,
     headers: HeaderMap,
-    Json(body): Json<CreateRunnerRequest>,
+    Json(body): Json<CreateHostedRequest>,
 ) -> AppResult<Response> {
     authz::require_permission(&state.pool, user.id, workspace_id, authz::CONTENT_WRITE).await?;
-
-    let Some(provisioner) = state.runner_provisioner.clone() else {
-        return Err(AppError::Conflict(
-            "hosted runners are not available on this deployment",
-        ));
-    };
 
     if !is_valid_name(&body.name) {
         return Err(AppError::Validation(
@@ -234,131 +259,70 @@ pub async fn create_hosted(
         ));
     }
 
-    let (token, token_hash) = session::generate_token();
-    let expires_at = chrono::Utc::now() + chrono::Duration::hours(1);
+    let profile = match &body.resource_profile {
+        None => state
+            .config
+            .runner_provisioner
+            .as_ref()
+            .map(|cfg| cfg.default_profile)
+            .unwrap_or(ResourceProfile::Standard),
+        Some(raw) => ResourceProfile::from_str(raw).ok_or(AppError::Validation(
+            "resourceProfile must be small, standard, or large".into(),
+        ))?,
+    };
+
+    let instances = body.instances.unwrap_or(1);
+    let max_instances = state
+        .config
+        .runner_provisioner
+        .as_ref()
+        .map(|cfg| cfg.max_per_workspace)
+        .unwrap_or(1)
+        .max(1) as u32;
+    if instances < 1 || instances > max_instances {
+        return Err(AppError::Validation(
+            "instances must be between 1 and the hosted-runner quota".into(),
+        ));
+    }
+    // Suffixed instance names (`{name}-{i}`) must stay within the 64-char
+    // runner-name budget.
+    if instances > 1 && body.name.len() + 1 + instances.to_string().len() > 64 {
+        return Err(AppError::Validation(
+            "runner name is too long for this many instances".into(),
+        ));
+    }
 
     let request_id = headers.get("x-request-id").and_then(|v| v.to_str().ok());
-    let outcome = db::runners::create_bootstrap(
-        &state.pool,
-        db::runners::CreateBootstrapParams {
+    let responses = match runner_provision_flow::start_hosted_provision(
+        &state,
+        runner_provision_flow::HostedProvisionRequest {
             workspace_id,
+            created_by: user.id,
             name: &body.name,
             labels: &body.labels,
-            bootstrap_token_hash: &token_hash,
-            bootstrap_expires_at: expires_at,
-            created_by: user.id,
+            profile,
+            instances,
             request_id,
-            managed: true,
         },
     )
-    .await?;
-
-    let runner = match outcome {
-        db::runners::CreateOutcome::Created(runner) => *runner,
-        db::runners::CreateOutcome::NameTaken => {
+    .await?
+    {
+        Ok(responses) => responses,
+        Err(runner_provision_flow::HostedDenied::Unavailable) => {
+            return Err(AppError::Conflict(
+                "hosted runners are not available on this deployment",
+            ));
+        }
+        Err(runner_provision_flow::HostedDenied::NameTaken) => {
             return Err(AppError::Conflict("a runner with this name already exists"));
+        }
+        Err(runner_provision_flow::HostedDenied::QuotaExceeded) => {
+            // Static category the wizard maps to remediation copy.
+            return Err(AppError::Conflict("hosted_runner_quota"));
         }
     };
 
-    // Respond immediately and provision in the background: the first image
-    // pull can take minutes, far past any browser/proxy timeout. The wizard
-    // polls the row — status stays `offline` while provisioning runs, and
-    // `provision_error` (static category) is the failure signal. Failed rows
-    // are NOT deleted (the wizard must be able to observe the failure); the
-    // janitor purges them once the bootstrap credential expires.
-    tracing::info!(%workspace_id, runner = %runner.name, "hosted runner provisioning started");
-    let response = RunnerResponse::from(runner);
-    state.workspace_hub.publish(
-        workspace_id,
-        WorkspaceEvent::RunnerUpdate { runner: response.clone() },
-    );
-
-    let runner_id = response.id;
-    let runner_name = response.name.clone();
-    let runner_labels = response.labels.clone();
-    let task_state = state.clone();
-    tokio::spawn(async move {
-        let result = tokio::time::timeout(
-            PROVISION_TIMEOUT,
-            provisioner.provision(crate::services::runner_provisioner::ProvisionParams {
-                runner_id,
-                workspace_id,
-                name: &runner_name,
-                labels: &runner_labels,
-                bootstrap_token: &token,
-            }),
-        )
-        .await;
-
-        match result {
-            Ok(Ok(container_id)) => {
-                match db::runners::set_container_id(
-                    &task_state.pool,
-                    workspace_id,
-                    runner_id,
-                    &container_id,
-                )
-                .await
-                {
-                    Ok(true) => {
-                        tracing::info!(%workspace_id, %runner_id, "hosted runner provisioned");
-                    }
-                    Ok(false) => {
-                        // Revoked or purged while the image pulled: the fresh
-                        // container has no owning row — tear it down now.
-                        tracing::info!(%workspace_id, %runner_id, "runner row gone after provision; removing orphan container");
-                        if let Err(error) = provisioner.deprovision(runner_id, &container_id).await
-                        {
-                            tracing::warn!(%runner_id, error = ?error, "failed to remove orphaned hosted runner container");
-                        }
-                    }
-                    Err(error) => {
-                        tracing::warn!(%workspace_id, %runner_id, error = ?error, "failed to record runner container id");
-                    }
-                }
-            }
-            Ok(Err(error)) => {
-                // Static category into the row; Docker detail stays here.
-                tracing::error!(
-                    %workspace_id, %runner_id,
-                    category = error.category(),
-                    error = ?error.detail(),
-                    "hosted runner provisioning failed"
-                );
-                mark_provision_failed(&task_state, workspace_id, runner_id, error.category())
-                    .await;
-            }
-            Err(_) => {
-                tracing::error!(%workspace_id, %runner_id, "hosted runner provisioning timed out");
-                // The cancelled future may have left a partial container
-                // behind; names are deterministic, so sweep by name.
-                provisioner.cleanup_partial(runner_id).await;
-                mark_provision_failed(&task_state, workspace_id, runner_id, "provision_timeout")
-                    .await;
-            }
-        }
-    });
-
-    Ok((StatusCode::CREATED, Json(json!({ "runner": response }))).into_response())
-}
-
-/// Provisioning budget for one hosted runner (image pull + create + start).
-const PROVISION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
-
-/// Flag a hosted runner row as failed and push the update to live watchers
-/// (the wizard's polling picks it up either way).
-async fn mark_provision_failed(
-    state: &AppState,
-    workspace_id: Uuid,
-    runner_id: Uuid,
-    category: &str,
-) {
-    if let Err(error) =
-        db::runners::set_provision_error(&state.pool, workspace_id, runner_id, category).await
-    {
-        tracing::warn!(%workspace_id, %runner_id, error = ?error, "failed to record provision error");
-    }
-    publish_runner(state, workspace_id, runner_id).await;
+    Ok((StatusCode::CREATED, Json(json!({ "runners": responses }))).into_response())
 }
 
 /// GET /api/workspaces/{workspace_id}/runners/{runner_id}

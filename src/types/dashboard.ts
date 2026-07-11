@@ -1,6 +1,6 @@
 /** Dashboard/workspace-wide live-feed API types — mirror the backend camelCase DTOs. */
 
-import type { PipelineConclusion, PipelineStatus } from './pipeline';
+import type { ArtifactKind, PipelineConclusion, PipelineStatus } from './pipeline';
 import type { Runner, RunnerHealth } from './runner';
 
 export interface DashboardSummary {
@@ -46,5 +46,13 @@ export type WorkspaceStreamEvent =
       runnerId: string;
       health: RunnerHealth;
       lastSeenAt: string;
+    }
+  | {
+      type: 'artifact_update';
+      id: string;
+      pipelineId: string;
+      name: string;
+      status: string;
+      kind: ArtifactKind;
     }
   | { type: 'pong' };

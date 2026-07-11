@@ -1,3 +1,4 @@
+pub mod artifact_retention;
 pub mod artifacts;
 pub mod dashboard;
 pub mod github_installations;
