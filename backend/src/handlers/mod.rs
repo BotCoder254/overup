@@ -13,6 +13,7 @@ pub mod me;
 pub mod pipelines;
 pub mod repositories;
 pub mod runner_ws;
+pub mod search;
 pub mod runners;
 pub mod secrets;
 pub mod workflows;

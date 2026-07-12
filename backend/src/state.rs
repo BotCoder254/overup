@@ -13,6 +13,7 @@ use crate::services::r2::R2;
 use crate::services::runner_hub::RunnerHub;
 use crate::services::runner_provisioner::RunnerProvisioner;
 use crate::services::scheduler::Scheduler;
+use crate::services::search_indexer::SearchIndexer;
 use crate::services::secrets_crypto::SecretsCrypto;
 use crate::services::workspace_hub::WorkspaceHub;
 use crate::services::ws_ticket::WsTicketStore;
@@ -39,6 +40,8 @@ pub struct AppState {
     pub workspace_hub: Arc<WorkspaceHub>,
     /// Wake handle for the scheduling loop.
     pub scheduler: Arc<Scheduler>,
+    /// Dirty-workspace queue for the Global Search indexer loop.
+    pub search_indexer: Arc<SearchIndexer>,
     /// Artifact storage; None disables artifact grants cleanly.
     pub r2: Option<Arc<R2>>,
     /// One-time tickets for cross-origin browser WebSocket auth
@@ -96,6 +99,10 @@ impl AppState {
             ))
         });
 
+        // Every WorkspaceHub::publish marks its workspace dirty on this
+        // indexer, so the hub is constructed around it.
+        let search_indexer = Arc::new(SearchIndexer::default());
+
         Ok(Self {
             pool,
             config: Arc::new(config),
@@ -104,8 +111,9 @@ impl AppState {
             github_app: Arc::new(github_app),
             log_hub: Arc::new(LogHub::default()),
             runner_hub: Arc::new(RunnerHub::default()),
-            workspace_hub: Arc::new(WorkspaceHub::default()),
+            workspace_hub: Arc::new(WorkspaceHub::new(search_indexer.clone())),
             scheduler: Arc::new(Scheduler::default()),
+            search_indexer,
             r2,
             ws_tickets: Arc::new(WsTicketStore::default()),
             // Requires async Docker probing; main fills it in right after.

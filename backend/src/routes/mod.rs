@@ -14,7 +14,7 @@ use crate::error::AppError;
 use crate::handlers::{
     activity, artifacts, auth, browser_ws, dashboard, dashboard_ws, environments,
     github_installations, github_webhooks, health, jobs, me, pipelines, repositories, runner_ws,
-    runners, secrets, workflows, workspaces, ws_tickets,
+    runners, search, secrets, workflows, workspaces, ws_tickets,
 };
 use crate::middleware::{csrf, security_headers};
 use crate::state::AppState;
@@ -96,6 +96,16 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
         GovernorConfigBuilder::default()
             .per_second(1)
             .burst_size(5)
+            .finish()
+            .expect("valid governor configuration"),
+    );
+    // Global Search is keystroke-driven (debounced client-side); its own
+    // budget keeps a fast typist inside limits while stopping scrapers from
+    // riding the general api_governor headroom.
+    let search_governor = Arc::new(
+        GovernorConfigBuilder::default()
+            .per_second(5)
+            .burst_size(20)
             .finish()
             .expect("valid governor configuration"),
     );
@@ -265,6 +275,11 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
         .route(
             "/workspaces/{workspace_id}/dashboard/activity",
             get(dashboard::activity),
+        )
+        // Global Search over the async-maintained search_documents index.
+        .route(
+            "/workspaces/{workspace_id}/search",
+            get(search::query).layer(GovernorLayer::new(search_governor)),
         )
         // Workspace activity feed: the audit_logs ledger (distinct from the
         // dashboard's time-bucketed pipeline chart above).

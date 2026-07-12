@@ -23,6 +23,7 @@ import { SecretsPage } from '../features/secrets/pages/SecretsPage';
 import { SecretDetailPage } from '../features/secrets/pages/SecretDetailPage';
 import { EnvironmentsPage } from '../features/environments/pages/EnvironmentsPage';
 import { EnvironmentDetailPage } from '../features/environments/pages/EnvironmentDetailPage';
+import { SearchPage } from '../features/search/pages/SearchPage';
 import { NAV_ITEMS } from './navigation';
 import { ProtectedRoute } from './guards/ProtectedRoute';
 import { PublicOnlyRoute } from './guards/PublicOnlyRoute';
@@ -88,6 +89,9 @@ export const router = createBrowserRouter([
               { path: 'secrets/:secretId', element: <SecretDetailPage /> },
               { path: 'environments', element: <EnvironmentsPage /> },
               { path: 'environments/:environmentId', element: <EnvironmentDetailPage /> },
+              // Not a nav item — reached from the sidebar input, the
+              // command palette's "See all results", or a shared URL.
+              { path: 'search', element: <SearchPage /> },
               ...NAV_ITEMS.filter(
                 (item) => item.segment !== '' && !IMPLEMENTED_SEGMENTS.has(item.segment),
               ).map((item) => ({

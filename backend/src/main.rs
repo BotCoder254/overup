@@ -84,6 +84,10 @@ async fn main() -> anyhow::Result<()> {
     // R2 cleanup, archived log-chunk pruning.
     tokio::spawn(services::janitor::run(state.clone()));
 
+    // Global Search indexer: boot backfill, dirty-workspace drains, and the
+    // periodic reconcile pass over the search_documents projection.
+    tokio::spawn(services::search_indexer::run(state.clone()));
+
     let router = routes::build_router(state)?;
 
     let listener = tokio::net::TcpListener::bind(&config.bind_addr)
