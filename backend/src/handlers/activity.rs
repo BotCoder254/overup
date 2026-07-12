@@ -84,6 +84,15 @@ fn build_feed_filter(query: &FeedQuery) -> AppResult<db::activity::FeedFilter> {
     };
     let created_after = parse_ts(&query.created_after, "createdAfter")?;
     let created_before = parse_ts(&query.created_before, "createdBefore")?;
+    // An inverted range can only ever match nothing — reject it loudly
+    // instead of returning a confusing empty feed.
+    if let (Some(after), Some(before)) = (created_after, created_before)
+        && after > before
+    {
+        return Err(AppError::Validation(
+            "createdAfter must not be later than createdBefore".into(),
+        ));
+    }
 
     let search_pattern = match query.q.as_deref().map(str::trim) {
         None | Some("") => None,

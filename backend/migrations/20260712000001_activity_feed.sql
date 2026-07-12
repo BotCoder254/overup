@@ -1,9 +1,18 @@
+-- no-transaction
+-- (CREATE INDEX CONCURRENTLY cannot run inside a transaction block, so this
+-- migration opts out of sqlx's per-migration transaction.)
+--
 -- Activity Feed: workspace-wide reader over the immutable audit_logs ledger.
 --
 -- 1. Keyset-pagination index. The feed pages on the (created_at, id) tuple
 --    (the secrets_ws_created_idx shape); the original
 --    audit_logs_workspace_created_idx stays in place to keep this additive.
-CREATE INDEX audit_logs_ws_created_id_idx
+--    Built CONCURRENTLY so a production ledger keeps accepting audit writes
+--    (every workspace mutation records one) during the build. A failed
+--    concurrent build leaves an INVALID index behind, so the DROP makes the
+--    retry after such a failure idempotent.
+DROP INDEX IF EXISTS audit_logs_ws_created_id_idx;
+CREATE INDEX CONCURRENTLY audit_logs_ws_created_id_idx
     ON audit_logs (workspace_id, created_at DESC, id DESC);
 
 -- 2. RBAC backfill. audit.read is already seeded into owner/admin roles by
