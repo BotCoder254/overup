@@ -11,6 +11,7 @@ pub mod pipeline_logs;
 pub mod pipelines;
 pub mod repositories;
 pub mod runners;
+pub mod search;
 pub mod secrets;
 pub mod sessions;
 pub mod users;

@@ -14,6 +14,9 @@ import { Sidebar } from './Sidebar';
 export function AppShell() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // Text typed into the sidebar search input before the palette took focus;
+  // seeds the palette's query so no keystroke is lost.
+  const [paletteSeed, setPaletteSeed] = useState('');
   const drawerRef = useRef<HTMLDivElement>(null);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const location = useLocation();
@@ -22,6 +25,11 @@ export function AppShell() {
   useEffect(() => {
     setDrawerOpen(false);
   }, [location.pathname]);
+
+  const openSearch = (seed?: string) => {
+    if (seed !== undefined) setPaletteSeed(seed);
+    setPaletteOpen(true);
+  };
 
   // Move focus into the drawer when it opens; back to the hamburger on close.
   useEffect(() => {
@@ -38,7 +46,7 @@ export function AppShell() {
     <div className="flex h-dvh overflow-hidden bg-surface text-charcoal">
       {/* Desktop sidebar */}
       <div className="hidden w-[272px] shrink-0 lg:block">
-        <Sidebar onSearch={() => setPaletteOpen(true)} />
+        <Sidebar onSearch={openSearch} />
       </div>
 
       {/* Mobile drawer + backdrop */}
@@ -69,9 +77,9 @@ export function AppShell() {
         >
           <Sidebar
             onNavigate={() => setDrawerOpen(false)}
-            onSearch={() => {
+            onSearch={(seed) => {
               setDrawerOpen(false);
-              setPaletteOpen(true);
+              openSearch(seed);
             }}
           />
         </div>
@@ -83,7 +91,7 @@ export function AppShell() {
           ref={menuButtonRef}
           drawerOpen={drawerOpen}
           onMenu={() => setDrawerOpen(true)}
-          onSearch={() => setPaletteOpen(true)}
+          onSearch={() => openSearch()}
         />
         <div className="flex min-h-0 flex-1 flex-col p-2 pt-0 lg:p-3 lg:pl-0 lg:pt-3">
           <main className="min-h-0 flex-1 overflow-y-auto rounded border border-steel/20 bg-canvas">
@@ -94,7 +102,14 @@ export function AppShell() {
         </div>
       </div>
 
-      <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
+      <CommandPalette
+        open={paletteOpen}
+        initialQuery={paletteSeed}
+        onOpenChange={(open) => {
+          setPaletteOpen(open);
+          if (!open) setPaletteSeed('');
+        }}
+      />
     </div>
   );
 }

@@ -5,6 +5,7 @@ pub mod github_installation;
 pub mod pipeline;
 pub mod repository;
 pub mod runner;
+pub mod search;
 pub mod secret;
 pub mod user;
 pub mod workflow;

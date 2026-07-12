@@ -7,6 +7,8 @@
 //! already-clamped health JSON, or a handful of pipeline status fields) by
 //! the time it reaches this hub, so this module is pure fan-out.
 
+use std::sync::Arc;
+
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::Serialize;
@@ -14,6 +16,7 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::models::runner::RunnerResponse;
+use crate::services::search_indexer::SearchIndexer;
 
 /// Per-workspace broadcast depth. These are idempotent state deltas, not a
 /// log stream — a dropped frame is always superseded by the next event or a
@@ -57,12 +60,24 @@ pub enum WorkspaceEvent {
     ActivityUpdate { category: String },
 }
 
-#[derive(Default)]
 pub struct WorkspaceHub {
     channels: DashMap<Uuid, broadcast::Sender<WorkspaceEvent>>,
+    /// Every publish marks its workspace dirty for the Global Search
+    /// indexer — this hub is the single choke point all searchable
+    /// mutations already flow through. The poke is a latency optimization
+    /// only; the indexer's tick + reconcile passes are the correctness
+    /// backstop.
+    indexer: Arc<SearchIndexer>,
 }
 
 impl WorkspaceHub {
+    pub fn new(indexer: Arc<SearchIndexer>) -> Self {
+        Self {
+            channels: DashMap::new(),
+            indexer,
+        }
+    }
+
     pub fn subscribe(&self, workspace_id: Uuid) -> broadcast::Receiver<WorkspaceEvent> {
         self.channels
             .entry(workspace_id)
@@ -72,6 +87,9 @@ impl WorkspaceHub {
 
     /// Fan an event out to subscribers; idle channels are pruned lazily.
     pub fn publish(&self, workspace_id: Uuid, event: WorkspaceEvent) {
+        // Unconditionally, BEFORE the no-subscriber early-out: search
+        // freshness must not depend on someone watching the dashboard.
+        self.indexer.mark_dirty(workspace_id);
         if let Some(tx) = self.channels.get(&workspace_id)
             && tx.send(event).is_err()
         {
@@ -87,9 +105,13 @@ impl WorkspaceHub {
 mod tests {
     use super::*;
 
+    fn test_hub() -> WorkspaceHub {
+        WorkspaceHub::new(Arc::new(SearchIndexer::default()))
+    }
+
     #[test]
     fn subscribe_creates_channel_and_receives_publish() {
-        let hub = WorkspaceHub::default();
+        let hub = test_hub();
         let workspace_id = Uuid::new_v4();
         let mut rx = hub.subscribe(workspace_id);
 
@@ -108,7 +130,7 @@ mod tests {
 
     #[test]
     fn publish_without_subscribers_is_a_no_op() {
-        let hub = WorkspaceHub::default();
+        let hub = test_hub();
         let workspace_id = Uuid::new_v4();
         // No subscribe() call — publishing must not panic and must not
         // create a lingering channel entry.
@@ -127,7 +149,7 @@ mod tests {
 
     #[test]
     fn channel_is_pruned_after_last_subscriber_drops() {
-        let hub = WorkspaceHub::default();
+        let hub = test_hub();
         let workspace_id = Uuid::new_v4();
         let rx = hub.subscribe(workspace_id);
         assert!(!hub.channels.is_empty());
@@ -149,7 +171,7 @@ mod tests {
 
     #[test]
     fn events_are_isolated_per_workspace() {
-        let hub = WorkspaceHub::default();
+        let hub = test_hub();
         let ws_a = Uuid::new_v4();
         let ws_b = Uuid::new_v4();
         let mut rx_a = hub.subscribe(ws_a);
