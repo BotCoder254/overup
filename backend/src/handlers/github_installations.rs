@@ -155,6 +155,12 @@ pub async fn setup(
                 account = %row.account_login,
                 "github app installation linked"
             );
+            state.workspace_hub.publish(
+                workspace.id,
+                crate::services::workspace_hub::WorkspaceEvent::ActivityUpdate {
+                    category: "integration".into(),
+                },
+            );
             Redirect::to(&format!(
                 "{frontend}/w/{}/repositories?installed=1",
                 workspace.slug
@@ -227,5 +233,11 @@ pub async fn unlink(
     .await?;
 
     tracing::info!(%workspace_id, "github app installation unlinked");
+    state.workspace_hub.publish(
+        workspace_id,
+        crate::services::workspace_hub::WorkspaceEvent::ActivityUpdate {
+            category: "integration".into(),
+        },
+    );
     Ok(StatusCode::NO_CONTENT.into_response())
 }

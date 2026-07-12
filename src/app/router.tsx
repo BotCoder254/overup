@@ -5,6 +5,7 @@ import { CallbackPage } from '../features/auth/pages/CallbackPage';
 import { OnboardingPage } from '../features/auth/pages/OnboardingPage';
 import { SignInPage } from '../features/auth/pages/SignInPage';
 import { useMe } from '../features/auth/hooks/useAuth';
+import { ActivityPage } from '../features/activity/pages/ActivityPage';
 import { DashboardPage } from '../features/dashboard/pages/DashboardPage';
 import { RepositoriesPage } from '../features/repositories/pages/RepositoriesPage';
 import { RepositoryDetailPage } from '../features/repositories/pages/RepositoryDetailPage';
@@ -29,6 +30,7 @@ import { WorkspaceRoute } from './guards/WorkspaceRoute';
 
 /** Segments with real pages; everything else still renders a placeholder. */
 const IMPLEMENTED_SEGMENTS = new Set([
+  'activity',
   'repositories',
   'workflows',
   'pipelines',
@@ -69,6 +71,7 @@ export const router = createBrowserRouter([
             element: <AppShell />,
             children: [
               { index: true, element: <DashboardPage /> },
+              { path: 'activity', element: <ActivityPage /> },
               { path: 'repositories', element: <RepositoriesPage /> },
               { path: 'repositories/:repoId', element: <RepositoryDetailPage /> },
               { path: 'workflows', element: <WorkflowsPage /> },

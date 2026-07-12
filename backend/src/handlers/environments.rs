@@ -18,6 +18,7 @@ use crate::error::{AppError, AppResult};
 use crate::middleware::auth::CurrentUser;
 use crate::models::environment::EnvironmentResponse;
 use crate::services::authz;
+use crate::services::workspace_hub::WorkspaceEvent;
 use crate::state::AppState;
 
 use super::pipelines::{escape_like, format_cursor, parse_cursor};
@@ -214,6 +215,10 @@ pub async fn create(
     {
         db::environments::InsertOutcome::Created(meta) => {
             tracing::info!(%workspace_id, environment = %name, "environment created");
+            state.workspace_hub.publish(
+                workspace_id,
+                WorkspaceEvent::ActivityUpdate { category: "environment".into() },
+            );
             Ok((
                 StatusCode::CREATED,
                 Json(json!({ "environment": EnvironmentResponse::from(*meta) })),
@@ -266,9 +271,15 @@ pub async fn update(
     )
     .await?
     {
-        db::environments::UpdateOutcome::Updated(meta) => Ok(Json(
-            json!({ "environment": EnvironmentResponse::from(*meta) }),
-        )),
+        db::environments::UpdateOutcome::Updated(meta) => {
+            state.workspace_hub.publish(
+                workspace_id,
+                WorkspaceEvent::ActivityUpdate { category: "environment".into() },
+            );
+            Ok(Json(
+                json!({ "environment": EnvironmentResponse::from(*meta) }),
+            ))
+        }
         db::environments::UpdateOutcome::DuplicateName => Err(AppError::Conflict(
             "an environment with this name already exists",
         )),
@@ -296,6 +307,10 @@ pub async fn remove(
             .ok_or(AppError::NotFound)?;
 
     tracing::info!(%workspace_id, %environment_id, deleted_secrets, "environment deleted");
+    state.workspace_hub.publish(
+        workspace_id,
+        WorkspaceEvent::ActivityUpdate { category: "environment".into() },
+    );
     Ok(Json(json!({ "deletedSecrets": deleted_secrets })))
 }
 

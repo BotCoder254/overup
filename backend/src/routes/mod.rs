@@ -12,9 +12,9 @@ use tower_http::trace::TraceLayer;
 
 use crate::error::AppError;
 use crate::handlers::{
-    artifacts, auth, browser_ws, dashboard, dashboard_ws, environments, github_installations,
-    github_webhooks, health, jobs, me, pipelines, repositories, runner_ws, runners, secrets,
-    workflows, workspaces, ws_tickets,
+    activity, artifacts, auth, browser_ws, dashboard, dashboard_ws, environments,
+    github_installations, github_webhooks, health, jobs, me, pipelines, repositories, runner_ws,
+    runners, secrets, workflows, workspaces, ws_tickets,
 };
 use crate::middleware::{csrf, security_headers};
 use crate::state::AppState;
@@ -265,6 +265,17 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
         .route(
             "/workspaces/{workspace_id}/dashboard/activity",
             get(dashboard::activity),
+        )
+        // Workspace activity feed: the audit_logs ledger (distinct from the
+        // dashboard's time-bucketed pipeline chart above).
+        .route("/workspaces/{workspace_id}/activity", get(activity::list))
+        .route(
+            "/workspaces/{workspace_id}/activity/summary",
+            get(activity::summary),
+        )
+        .route(
+            "/workspaces/{workspace_id}/activity/export",
+            get(activity::export),
         )
         // One-time WS auth tickets for deployments whose SPA proxy cannot
         // forward upgrades (see handlers/ws_tickets.rs).

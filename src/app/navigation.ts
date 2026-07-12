@@ -9,7 +9,6 @@ import {
   ListChecks,
   Lock,
   Package,
-  ScrollText,
   Server,
   Settings,
   Workflow,
@@ -128,13 +127,6 @@ export const NAV_GROUPS: NavGroup[] = [
         icon: KeyRound,
         description:
           'Scoped tokens for automating the overup API from scripts, runners, and external systems.',
-      },
-      {
-        label: 'Logs',
-        segment: 'logs',
-        icon: ScrollText,
-        description:
-          'The workspace audit trail — who changed what, when, and from where.',
       },
       {
         label: 'Settings',

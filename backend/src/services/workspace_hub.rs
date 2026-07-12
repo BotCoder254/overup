@@ -50,6 +50,11 @@ pub enum WorkspaceEvent {
         status: String,
         kind: String,
     },
+    /// The audit ledger moved in a category that has no dedicated frame
+    /// (secrets, environments, repositories, installations). Carries only
+    /// the feed category — subscribers invalidate and refetch over REST,
+    /// so nothing sensitive can transit this variant.
+    ActivityUpdate { category: String },
 }
 
 #[derive(Default)]

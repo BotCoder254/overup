@@ -15,6 +15,7 @@ use crate::models::repository::{
     AvailableRepoResponse, BranchResponse, RepositoryResponse, SyncRunResponse,
 };
 use crate::models::workflow::WorkflowSummaryResponse;
+use crate::services::workspace_hub::WorkspaceEvent;
 use crate::services::{authz, github_app, repo_sync};
 use crate::state::AppState;
 
@@ -173,6 +174,11 @@ pub async fn import(
     // Initial sync happens in the background; the card shows progress.
     repo_sync::schedule(&state, repository.id, "import").await?;
 
+    state.workspace_hub.publish(
+        workspace_id,
+        WorkspaceEvent::ActivityUpdate { category: "repository".into() },
+    );
+
     Ok((
         StatusCode::CREATED,
         Json(RepositoryResponse::from_row(repository, 0)),
@@ -260,5 +266,9 @@ pub async fn remove(
     }
 
     tracing::info!(%workspace_id, %repository_id, "repository removed");
+    state.workspace_hub.publish(
+        workspace_id,
+        WorkspaceEvent::ActivityUpdate { category: "repository".into() },
+    );
     Ok(StatusCode::NO_CONTENT.into_response())
 }
