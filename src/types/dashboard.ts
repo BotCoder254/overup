@@ -55,4 +55,13 @@ export type WorkspaceStreamEvent =
       status: string;
       kind: ArtifactKind;
     }
+  | {
+      /**
+       * The audit ledger moved in a category with no dedicated frame
+       * (secrets, environments, repositories, installations) — carries only
+       * the feed category, consumers invalidate and refetch over REST.
+       */
+      type: 'activity_update';
+      category: string;
+    }
   | { type: 'pong' };

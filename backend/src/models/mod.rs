@@ -1,3 +1,4 @@
+pub mod activity;
 pub mod artifact;
 pub mod environment;
 pub mod github_installation;

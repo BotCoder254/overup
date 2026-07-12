@@ -37,16 +37,15 @@ export function SecretsSummaryStrip({ summary, loading, error }: SecretsSummaryS
     );
   }
 
+  // Deliberately just the four actionable numbers: the total (with the
+  // encryption posture), active usage, rotation staleness, and cleanup
+  // candidates. The scope breakdown lives in the catalog's filters instead.
   const cells: CellProps[] = loading || !summary
     ? [
         { label: 'Secrets', value: '—' },
-        { label: 'Workspace-wide', value: '—' },
-        { label: 'Repository-scoped', value: '—' },
-        { label: 'Environment-scoped', value: '—' },
         { label: 'Used (30d)', value: '—' },
-        { label: 'Never used', value: '—' },
         { label: 'Stale', value: '—' },
-        { label: 'Injections', value: '—' },
+        { label: 'Never used', value: '—' },
       ]
     : [
         {
@@ -54,29 +53,21 @@ export function SecretsSummaryStrip({ summary, loading, error }: SecretsSummaryS
           value: String(summary.total),
           hint: summary.encryptionConfigured ? 'AES-256-GCM at rest' : 'Encryption key not set',
         },
-        { label: 'Workspace-wide', value: String(summary.workspaceScoped) },
-        { label: 'Repository-scoped', value: String(summary.repositoryScoped) },
-        { label: 'Environment-scoped', value: String(summary.environmentScoped) },
         { label: 'Used (30d)', value: String(summary.usedLast30d) },
-        {
-          label: 'Never used',
-          value: String(summary.neverUsed),
-          hint: summary.neverUsed > 0 ? 'Candidates for cleanup' : undefined,
-        },
         {
           label: `Stale (${summary.staleAfterDays}d)`,
           value: String(summary.stale),
           hint: summary.stale > 0 ? 'Rotate by replacing the value' : undefined,
         },
         {
-          label: 'Injections',
-          value: String(summary.totalInjections),
-          hint: 'Total job dispatches',
+          label: 'Never used',
+          value: String(summary.neverUsed),
+          hint: summary.neverUsed > 0 ? 'Candidates for cleanup' : undefined,
         },
       ];
 
   return (
-    <div className="mb-6 grid grid-cols-2 gap-px overflow-hidden rounded border border-steel/20 bg-steel/10 sm:grid-cols-4 lg:grid-cols-8">
+    <div className="mb-6 grid grid-cols-2 gap-px overflow-hidden rounded border border-steel/20 bg-steel/10 sm:grid-cols-4">
       {cells.map((cell) => (
         <Cell key={cell.label} {...cell} />
       ))}

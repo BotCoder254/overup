@@ -45,7 +45,12 @@ const ADMIN_PERMISSIONS: &[&str] = &[
     "environments.manage",
 ];
 
-const MEMBER_PERMISSIONS: &[&str] = &["content.read", "content.write", "secrets.read"];
+const MEMBER_PERMISSIONS: &[&str] = &[
+    "content.read",
+    "content.write",
+    "secrets.read",
+    "audit.read",
+];
 
 fn is_unique_violation(err: &sqlx::Error, constraint: &str) -> bool {
     matches!(

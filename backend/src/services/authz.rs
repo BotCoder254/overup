@@ -18,6 +18,8 @@ pub const SECRETS_MANAGE: &str = "secrets.manage";
 /// Create/rename/delete environments (listing rides content.read — the
 /// metadata isn't sensitive). Owner + admin roles only.
 pub const ENVIRONMENTS_MANAGE: &str = "environments.manage";
+/// Read the workspace activity feed (the audit_logs ledger). All roles.
+pub const AUDIT_READ: &str = "audit.read";
 
 pub async fn require_permission(
     pool: &PgPool,

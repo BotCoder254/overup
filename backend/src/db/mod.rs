@@ -1,3 +1,4 @@
+pub mod activity;
 pub mod artifact_retention;
 pub mod artifacts;
 pub mod dashboard;

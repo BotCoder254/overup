@@ -65,6 +65,16 @@ export function useWorkspaceStream() {
       }
     };
 
+    // Every delta frame is written to the audit ledger at (or before) the
+    // moment it is emitted, so any frame is a cheap "the feed moved" signal.
+    // Coarse prefix invalidation covers the feed AND its summary strip; a
+    // no-op when the Activity page isn't mounted.
+    const invalidateActivity = () => {
+      void queryClient.invalidateQueries({
+        queryKey: ['workspaces', workspaceId, 'activity'],
+      });
+    };
+
     const handleEvent = (event: WorkspaceStreamEvent) => {
       switch (event.type) {
         case 'snapshot':
@@ -88,9 +98,11 @@ export function useWorkspaceStream() {
           void queryClient.invalidateQueries({
             queryKey: ['workspaces', workspaceId, 'jobs'],
           });
+          invalidateActivity();
           break;
         case 'runner_update':
           patchRunner(event.runner);
+          invalidateActivity();
           break;
         case 'artifact_update':
           // Coarse prefix invalidation covers the catalog, summary, detail,
@@ -99,6 +111,12 @@ export function useWorkspaceStream() {
           void queryClient.invalidateQueries({
             queryKey: ['workspaces', workspaceId, 'artifacts'],
           });
+          invalidateActivity();
+          break;
+        case 'activity_update':
+          // Categories without their own frame (secret/environment/
+          // repository/integration) still reach live feeds this way.
+          invalidateActivity();
           break;
         case 'runner_health':
           queryClient.setQueryData<Runner[]>(runnersKey(workspaceId), (old) =>

@@ -22,6 +22,7 @@ use crate::middleware::auth::CurrentUser;
 use crate::models::secret::SecretResponse;
 use crate::services::authz;
 use crate::services::secrets_crypto::SecretsCrypto;
+use crate::services::workspace_hub::WorkspaceEvent;
 use crate::state::AppState;
 
 use super::pipelines::{escape_like, format_cursor, parse_cursor};
@@ -355,6 +356,10 @@ pub async fn create(
     match outcome {
         db::secrets::InsertOutcome::Created(meta) => {
             tracing::info!(%workspace_id, secret_id = %id, "secret created");
+            state.workspace_hub.publish(
+                workspace_id,
+                WorkspaceEvent::ActivityUpdate { category: "secret".into() },
+            );
             Ok((
                 StatusCode::CREATED,
                 Json(json!({ "secret": SecretResponse::from(*meta) })),
@@ -405,6 +410,10 @@ pub async fn replace_value(
         .await?
         .ok_or(AppError::NotFound)?;
     tracing::info!(%workspace_id, %secret_id, "secret value replaced");
+    state.workspace_hub.publish(
+        workspace_id,
+        WorkspaceEvent::ActivityUpdate { category: "secret".into() },
+    );
     Ok(Json(json!({ "secret": SecretResponse::from(meta) })))
 }
 
@@ -445,6 +454,10 @@ pub async fn update(
     let meta = db::secrets::find_meta(&state.pool, workspace_id, secret_id)
         .await?
         .ok_or(AppError::NotFound)?;
+    state.workspace_hub.publish(
+        workspace_id,
+        WorkspaceEvent::ActivityUpdate { category: "secret".into() },
+    );
     Ok(Json(json!({ "secret": SecretResponse::from(meta) })))
 }
 
@@ -466,6 +479,10 @@ pub async fn remove(
     }
 
     tracing::info!(%workspace_id, %secret_id, "secret deleted");
+    state.workspace_hub.publish(
+        workspace_id,
+        WorkspaceEvent::ActivityUpdate { category: "secret".into() },
+    );
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

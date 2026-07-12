@@ -243,6 +243,14 @@ async fn run_sync(
         .await
         .map_err(|e| fail("database error")(e.into()))?;
 
+    // The ledger gained a repository.synced entry — nudge live feeds.
+    state.workspace_hub.publish(
+        repository.workspace_id,
+        crate::services::workspace_hub::WorkspaceEvent::ActivityUpdate {
+            category: "repository".into(),
+        },
+    );
+
     Ok(serde_json::json!({
         "workflows": keep.len(),
         "fetched": fetched,
