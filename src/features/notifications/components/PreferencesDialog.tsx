@@ -43,18 +43,24 @@ export function PreferencesDialog({ open, onClose }: PreferencesDialogProps) {
 
   const [disabled, setDisabled] = useState<Set<NotificationCategory>>(new Set());
   const [minSeverity, setMinSeverity] = useState<NotificationSeverity>('info');
-  const [muteHours, setMuteHours] = useState(0);
+  // 'keep' preserves an active mute untouched — otherwise saving ANY other
+  // preference would silently lift it (PUT replaces the whole row).
+  const [mute, setMute] = useState<'keep' | number>(0);
 
-  // Seed local state from the server copy each time the dialog opens.
+  const currentlyMuted = Boolean(
+    preferences?.mutedUntil && new Date(preferences.mutedUntil) > new Date(),
+  );
+
+  // Seed local state from the server copy each time the dialog opens (and
+  // again if the query resolves while it is open).
   useEffect(() => {
     if (!open || !preferences) return;
     setDisabled(new Set(preferences.disabledCategories));
     setMinSeverity(preferences.minSeverity);
-    setMuteHours(0);
+    setMute(
+      preferences.mutedUntil && new Date(preferences.mutedUntil) > new Date() ? 'keep' : 0,
+    );
   }, [open, preferences]);
-
-  const currentlyMuted =
-    preferences?.mutedUntil && new Date(preferences.mutedUntil) > new Date();
 
   const toggleCategory = (category: NotificationCategory) => {
     setDisabled((old) => {
@@ -67,9 +73,11 @@ export function PreferencesDialog({ open, onClose }: PreferencesDialogProps) {
 
   const submit = () => {
     const mutedUntil =
-      muteHours > 0
-        ? new Date(Date.now() + muteHours * 3600_000).toISOString()
-        : null;
+      mute === 'keep'
+        ? (preferences?.mutedUntil ?? null)
+        : mute > 0
+          ? new Date(Date.now() + mute * 3600_000).toISOString()
+          : null;
     save.mutate(
       {
         mutedUntil,
@@ -153,16 +161,23 @@ export function PreferencesDialog({ open, onClose }: PreferencesDialogProps) {
           </label>
           {currentlyMuted && preferences?.mutedUntil && (
             <p className="mt-1 text-xs text-steel">
-              Currently muted until {new Date(preferences.mutedUntil).toLocaleString()}. Saving
-              with “Not muted” lifts it.
+              Currently muted until {new Date(preferences.mutedUntil).toLocaleString()}. Pick
+              “Not muted” to lift it.
             </p>
           )}
           <select
             id="notification-mute"
-            value={muteHours}
-            onChange={(event) => setMuteHours(Number(event.target.value))}
+            value={mute}
+            onChange={(event) =>
+              setMute(event.target.value === 'keep' ? 'keep' : Number(event.target.value))
+            }
             className={`mt-2 ${controlClasses}`}
           >
+            {currentlyMuted && preferences?.mutedUntil && (
+              <option value="keep">
+                Keep muted (until {new Date(preferences.mutedUntil).toLocaleString()})
+              </option>
+            )}
             {MUTE_OPTIONS.map((option) => (
               <option key={option.hours} value={option.hours}>
                 {option.label}

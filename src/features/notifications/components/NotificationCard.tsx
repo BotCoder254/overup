@@ -3,11 +3,7 @@ import { useRef, useState, type TouchEvent } from 'react';
 import { formatDistanceToNow } from 'date-fns';
 import { cn } from '../../../lib/cn';
 import type { Notification } from '../../../types/notification';
-import {
-  categoryIcon,
-  severityAccentClass,
-  severityTextClass,
-} from '../lib/notificationPresentation';
+import { categoryIcon, severityDotClass } from '../lib/notificationPresentation';
 
 /** Horizontal travel (px) that commits a swipe action on release. */
 const SWIPE_COMMIT_PX = 56;
@@ -30,9 +26,10 @@ interface NotificationCardProps {
 }
 
 /**
- * One notification row: category icon, severity accent, server-rendered
- * title/body, relative timestamp, unread dot, and a ×N badge when dedup
- * merged repeated occurrences into this row.
+ * One notification row, deliberately neutral (the search-row idiom): steel
+ * category icon, charcoal title, steel body/timestamp — the ONLY color is
+ * the severity-tinted unread dot on the right, which disappears once the
+ * row is read. A ×N chip marks dedup-merged repeats.
  */
 export function NotificationCard({
   notification,
@@ -105,19 +102,13 @@ export function NotificationCard({
       onTouchCancel={onTouchEnd}
       style={swipeable ? { transform: `translateX(${dx}px)` } : undefined}
       className={cn(
-        'relative flex w-full items-start gap-2.5 rounded border-l-2 text-left transition-colors',
-        'hover:bg-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary',
-        severityAccentClass(notification.severity),
+        'relative flex w-full items-start gap-2.5 rounded bg-canvas text-left transition-colors',
+        'hover:bg-charcoal/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary',
         compact ? 'px-2.5 py-2' : 'px-3 py-2.5',
-        unread ? 'bg-primary/[0.03]' : 'bg-canvas',
         swipeable && settling && 'transition-transform duration-200',
       )}
     >
-      <Icon
-        size={16}
-        aria-hidden="true"
-        className={cn('mt-0.5 shrink-0', severityTextClass(notification.severity))}
-      />
+      <Icon size={16} aria-hidden="true" className="mt-0.5 shrink-0 text-steel" />
       <span className="min-w-0 flex-1">
         <span className="flex items-start gap-1.5">
           <span
@@ -133,12 +124,6 @@ export function NotificationCard({
               ×{notification.occurrenceCount}
             </span>
           )}
-          {unread && (
-            <span
-              className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-primary"
-              aria-label="Unread"
-            />
-          )}
         </span>
         {notification.body && (
           <span className="mt-0.5 block break-words text-xs leading-relaxed text-steel">
@@ -150,6 +135,15 @@ export function NotificationCard({
           {notification.archivedAt && ' · archived'}
         </span>
       </span>
+      {unread && (
+        <span
+          aria-label="Unread"
+          className={cn(
+            'mt-1.5 h-2 w-2 shrink-0 rounded-full',
+            severityDotClass(notification.severity),
+          )}
+        />
+      )}
     </button>
   );
 

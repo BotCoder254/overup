@@ -92,7 +92,7 @@ export function NotificationPanel({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 items-center gap-2 px-3 pb-2 pt-3">
+      <div className="flex shrink-0 items-center gap-2 px-2.5 pb-1.5 pt-2.5">
         <h2 className="text-sm font-semibold text-charcoal">Notifications</h2>
         {unreadCount > 0 && <Badge variant="primary">{unreadCount} unread</Badge>}
         <div className="ml-auto flex items-center gap-0.5">
@@ -119,7 +119,7 @@ export function NotificationPanel({
       </div>
 
       <Tabs
-        className="shrink-0 px-3"
+        className="shrink-0 px-2.5"
         ariaLabel="Notification filters"
         active={tab}
         onChange={(id) => setTab(id as 'all' | 'unread')}
@@ -140,7 +140,7 @@ export function NotificationPanel({
 
       {/* Rapid narrowing without leaving the popover; native selects keep
           it keyboard/screen-reader accessible for free. */}
-      <div className="flex shrink-0 items-center gap-1.5 px-3 py-2">
+      <div className="flex shrink-0 items-center gap-1.5 px-2.5 py-1.5">
         <select
           aria-label="Filter by category"
           value={category}
