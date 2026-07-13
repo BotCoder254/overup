@@ -39,56 +39,23 @@ export function categoryIcon(category: NotificationCategory): LucideIcon {
 }
 
 /**
- * Severity → design-token text color. Strictly the solid palette: success
- * rides primary (the Badge convention), warnings stay charcoal, errors and
- * critical use danger.
+ * Severity → unread-dot background color, the ONLY colored element on a
+ * notification card (the rest of the row is deliberately neutral, the
+ * search-row idiom). Strictly the solid palette; the dot renders only
+ * while unread and disappears on read.
  */
-export function severityTextClass(severity: NotificationSeverity): string {
+export function severityDotClass(severity: NotificationSeverity): string {
   switch (severity) {
     case 'success':
-      return 'text-primary';
+      return 'bg-primary';
     case 'warning':
-      return 'text-charcoal';
+      return 'bg-steel';
     case 'error':
     case 'critical':
-      return 'text-danger';
+      return 'bg-danger';
     case 'info':
     default:
-      return 'text-steel';
-  }
-}
-
-/** Severity → left-accent border color for cards (palette tokens only). */
-export function severityAccentClass(severity: NotificationSeverity): string {
-  switch (severity) {
-    case 'success':
-      return 'border-l-primary';
-    case 'warning':
-      return 'border-l-steel';
-    case 'error':
-      return 'border-l-danger/70';
-    case 'critical':
-      return 'border-l-danger';
-    case 'info':
-    default:
-      return 'border-l-steel/40';
-  }
-}
-
-/** Severity → Badge variant (the Activity Feed convention). */
-export function severityBadgeVariant(
-  severity: NotificationSeverity,
-): 'info' | 'success' | 'neutral' | 'danger' {
-  switch (severity) {
-    case 'success':
-      return 'success';
-    case 'warning':
-      return 'neutral';
-    case 'error':
-    case 'critical':
-      return 'danger';
-    default:
-      return 'info';
+      return 'bg-link';
   }
 }
 

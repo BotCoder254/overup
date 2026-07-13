@@ -99,7 +99,7 @@ export function NotificationBell() {
         role="dialog"
         align="end"
         ariaLabel="Notifications"
-        panelClassName="flex w-96 max-w-[calc(100vw-16px)] flex-col p-0 shadow-lg"
+        panelClassName="flex w-80 max-w-[calc(100vw-16px)] flex-col p-0 shadow-lg"
         renderTrigger={(triggerProps, isOpen) => (
           <button
             type="button"
@@ -112,7 +112,7 @@ export function NotificationBell() {
         )}
       >
         {({ close }) => (
-          <div className="flex max-h-[min(70vh,560px)] min-h-0 flex-col">
+          <div className="flex max-h-[min(60vh,420px)] min-h-0 flex-col">
             <NotificationPanel
               onClose={close}
               onOpenPreferences={() => {
