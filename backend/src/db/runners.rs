@@ -555,18 +555,19 @@ pub async fn find_expired_bootstrap_managed(
 
 /// Sweep: a bootstrap credential that was never exchanged is a dead runner
 /// row (no permanent identity was ever established) — delete it outright
-/// rather than leaving an inert placeholder behind.
-pub async fn purge_expired_bootstrap(pool: &PgPool) -> sqlx::Result<u64> {
-    let result = sqlx::query(
+/// rather than leaving an inert placeholder behind. Returns the purged
+/// rows' `(workspace_id, name)` so the janitor can notify each workspace.
+pub async fn purge_expired_bootstrap(pool: &PgPool) -> sqlx::Result<Vec<(Uuid, String)>> {
+    sqlx::query_as(
         r#"
         DELETE FROM runners
         WHERE token_hash IS NULL AND bootstrap_expires_at IS NOT NULL
           AND bootstrap_expires_at < now()
+        RETURNING workspace_id, name
         "#,
     )
-    .execute(pool)
-    .await?;
-    Ok(result.rows_affected())
+    .fetch_all(pool)
+    .await
 }
 
 pub async fn find_by_id(

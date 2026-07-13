@@ -30,9 +30,9 @@ const DEFAULT_PAGE: i64 = 30;
 /// GitHub App installation surface).
 fn category_prefixes(category: &str) -> Option<Vec<String>> {
     let prefixes: &[&str] = match category {
-        "workspace" => &["workspace"],
+        "workspace" => &["workspace", "notification"],
         "integration" => &["installation"],
-        "repository" => &["repository"],
+        "repository" => &["repository", "workflow"],
         "pipeline" => &["pipeline", "job"],
         "runner" => &["runner"],
         "artifact" => &["artifact"],
@@ -171,7 +171,7 @@ pub async fn summary(
 /// names, repo names, descriptions), and a cell starting with `=`, `+`,
 /// `-`, `@`, tab, or CR executes as a formula when the export is opened in
 /// Excel/Sheets. Such cells get a leading `'` before quoting.
-fn csv_field(raw: &str) -> String {
+pub(crate) fn csv_field(raw: &str) -> String {
     let neutralized = match raw.chars().next() {
         Some('=' | '+' | '-' | '@' | '\t' | '\r') => format!("'{raw}"),
         _ => raw.to_string(),

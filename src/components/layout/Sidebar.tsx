@@ -1,5 +1,6 @@
 import { Search } from 'lucide-react';
 import { useMe } from '../../features/auth/hooks/useAuth';
+import { NotificationBell } from '../../features/notifications/components/NotificationBell';
 import { Logo } from '../brand/Logo';
 import { SidebarNav } from './SidebarNav';
 import { UserFooter } from './UserFooter';
@@ -28,6 +29,11 @@ export function Sidebar({ onNavigate, onSearch }: SidebarProps) {
         <div className="flex items-center gap-1.5">
           <Logo size="sm" withWordmark={false} className="shrink-0 px-1 text-charcoal" />
           <WorkspaceSwitcher workspace={me.workspace} />
+          {/* Operational inbox: right edge of the shell header, before the
+              user's own controls — the "top of the app" position. */}
+          <div className="shrink-0">
+            <NotificationBell />
+          </div>
         </div>
         {/* Real search input, centered at the top of the sidebar. Focusing
             or typing hands off to the floating palette (seeded with the

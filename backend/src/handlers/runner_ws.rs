@@ -229,6 +229,26 @@ async fn handle(state: AppState, runner: Runner, is_bootstrap: bool, socket: Web
         let _ = sink.close().await;
         return;
     }
+    // Offline -> online edge on a runner that has connected before: record
+    // the recovery in the ledger (drives the Activity Feed + Notification
+    // Center). First-ever connects are routine, not recoveries. Best-effort:
+    // a failed audit write must not tear down a healthy runner socket.
+    if runner.status == "offline"
+        && runner.last_seen_at.is_some()
+        && let Err(error) = sqlx::query(
+            r#"
+            INSERT INTO audit_logs (workspace_id, actor_user_id, action, subject_type, subject_id, metadata)
+            VALUES ($1, NULL, 'runner.recovered', 'runner', $2, $3)
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(runner_id)
+        .bind(serde_json::json!({ "name": runner.name }))
+        .execute(&state.pool)
+        .await
+    {
+        tracing::warn!(%runner_id, error = ?error, "failed to record runner.recovered audit entry");
+    }
     publish_runner(&state, workspace_id, runner_id).await;
 
     // A bootstrap-authenticated connection must leave with a permanent

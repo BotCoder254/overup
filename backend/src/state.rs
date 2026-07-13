@@ -9,6 +9,8 @@ use sqlx::PgPool;
 use crate::config::Config;
 use crate::services::github_app::GitHubApp;
 use crate::services::log_hub::LogHub;
+use crate::services::notification_hub::NotificationHub;
+use crate::services::notification_projector::NotificationProjector;
 use crate::services::r2::R2;
 use crate::services::runner_hub::RunnerHub;
 use crate::services::runner_provisioner::RunnerProvisioner;
@@ -42,6 +44,10 @@ pub struct AppState {
     pub scheduler: Arc<Scheduler>,
     /// Dirty-workspace queue for the Global Search indexer loop.
     pub search_indexer: Arc<SearchIndexer>,
+    /// Per-user live fan-out for the Notification Center bell.
+    pub notification_hub: Arc<NotificationHub>,
+    /// Wake handle for the audit-tail notification projector loop.
+    pub notification_projector: Arc<NotificationProjector>,
     /// Artifact storage; None disables artifact grants cleanly.
     pub r2: Option<Arc<R2>>,
     /// One-time tickets for cross-origin browser WebSocket auth
@@ -100,8 +106,10 @@ impl AppState {
         });
 
         // Every WorkspaceHub::publish marks its workspace dirty on this
-        // indexer, so the hub is constructed around it.
+        // indexer and pokes the notification projector, so the hub is
+        // constructed around both.
         let search_indexer = Arc::new(SearchIndexer::default());
+        let notification_projector = Arc::new(NotificationProjector::default());
 
         Ok(Self {
             pool,
@@ -111,9 +119,14 @@ impl AppState {
             github_app: Arc::new(github_app),
             log_hub: Arc::new(LogHub::default()),
             runner_hub: Arc::new(RunnerHub::default()),
-            workspace_hub: Arc::new(WorkspaceHub::new(search_indexer.clone())),
+            workspace_hub: Arc::new(WorkspaceHub::new(
+                search_indexer.clone(),
+                notification_projector.clone(),
+            )),
             scheduler: Arc::new(Scheduler::default()),
             search_indexer,
+            notification_hub: Arc::new(NotificationHub::default()),
+            notification_projector,
             r2,
             ws_tickets: Arc::new(WsTicketStore::default()),
             // Requires async Docker probing; main fills it in right after.
