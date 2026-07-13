@@ -88,6 +88,10 @@ async fn main() -> anyhow::Result<()> {
     // periodic reconcile pass over the search_documents projection.
     tokio::spawn(services::search_indexer::run(state.clone()));
 
+    // Notification projector: tails the audit ledger past its persisted
+    // cursor and materializes per-user Notification Center rows.
+    tokio::spawn(services::notification_projector::run(state.clone()));
+
     let router = routes::build_router(state)?;
 
     let listener = tokio::net::TcpListener::bind(&config.bind_addr)

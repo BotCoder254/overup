@@ -13,8 +13,9 @@ use tower_http::trace::TraceLayer;
 use crate::error::AppError;
 use crate::handlers::{
     activity, artifacts, auth, browser_ws, dashboard, dashboard_ws, environments,
-    github_installations, github_webhooks, health, jobs, me, pipelines, repositories, runner_ws,
-    runners, search, secrets, workflows, workspaces, ws_tickets,
+    github_installations, github_webhooks, health, jobs, me, notification_ws, notifications,
+    pipelines, repositories, runner_ws, runners, search, secrets, workflows, workspaces,
+    ws_tickets,
 };
 use crate::middleware::{csrf, security_headers};
 use crate::state::AppState;
@@ -292,6 +293,36 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
             "/workspaces/{workspace_id}/activity/export",
             get(activity::export),
         )
+        // Notification Center: per-user projection of the ledger. Reads and
+        // mutations are all self-scoped (user_id = caller in SQL).
+        .route(
+            "/workspaces/{workspace_id}/notifications",
+            get(notifications::list),
+        )
+        .route(
+            "/workspaces/{workspace_id}/notifications/unread-count",
+            get(notifications::unread_count),
+        )
+        .route(
+            "/workspaces/{workspace_id}/notifications/export",
+            get(notifications::export),
+        )
+        .route(
+            "/workspaces/{workspace_id}/notifications/read-all",
+            post(notifications::read_all),
+        )
+        .route(
+            "/workspaces/{workspace_id}/notifications/bulk",
+            post(notifications::bulk),
+        )
+        .route(
+            "/workspaces/{workspace_id}/notifications/{id}/read",
+            post(notifications::mark_read),
+        )
+        .route(
+            "/workspaces/{workspace_id}/notification-preferences",
+            get(notifications::get_preferences).put(notifications::put_preferences),
+        )
         // One-time WS auth tickets for deployments whose SPA proxy cannot
         // forward upgrades (see handlers/ws_tickets.rs).
         .route("/workspaces/{workspace_id}/ws-ticket", post(ws_tickets::create))
@@ -354,6 +385,10 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
         .route(
             "/workspaces/{workspace_id}/dashboard",
             get(dashboard_ws::connect),
+        )
+        .route(
+            "/workspaces/{workspace_id}/notifications",
+            get(notification_ws::connect),
         )
         .layer(GovernorLayer::new(browser_ws_governor));
 

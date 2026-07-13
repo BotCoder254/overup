@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Outlet, useLocation } from 'react-router-dom';
+import { NotificationStreamProvider } from '../../features/notifications/hooks/useNotificationStream';
 import { cn } from '../../lib/cn';
 import { CommandPalette } from './CommandPalette';
 import { MobileTopBar } from './MobileTopBar';
@@ -43,6 +44,9 @@ export function AppShell() {
   }, [drawerOpen]);
 
   return (
+    // The notification socket lives at the shell level so the bell is live
+    // on every page; the bell and the history page share its `connected`.
+    <NotificationStreamProvider>
     <div className="flex h-dvh overflow-hidden bg-surface text-charcoal">
       {/* Desktop sidebar */}
       <div className="hidden w-[272px] shrink-0 lg:block">
@@ -111,5 +115,6 @@ export function AppShell() {
         }}
       />
     </div>
+    </NotificationStreamProvider>
   );
 }

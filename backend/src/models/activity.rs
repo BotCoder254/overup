@@ -19,6 +19,8 @@ pub const ACTIONS: &[&str] = &[
     "repository.imported",
     "repository.removed",
     "repository.synced",
+    "repository.sync_failed",
+    "workflow.invalid",
     "pipeline.created",
     "pipeline.completed",
     "pipeline.cancelled",
@@ -32,6 +34,8 @@ pub const ACTIONS: &[&str] = &[
     "runner.resumed",
     "runner.provisioned",
     "runner.provision_failed",
+    "runner.offline",
+    "runner.recovered",
     "secret.created",
     "secret.updated",
     "secret.deleted",
@@ -42,6 +46,9 @@ pub const ACTIONS: &[&str] = &[
     "artifact.downloaded",
     "artifact.deleted",
     "artifact.retention_updated",
+    "notification.read_all",
+    "notification.bulk_archived",
+    "notification.preferences_updated",
 ];
 
 /// Presentation severity for a ledger entry.
@@ -72,12 +79,17 @@ pub fn category(action: &str) -> &'static str {
         "workspace" => "workspace",
         "installation" => "integration",
         "repository" => "repository",
-        // Job-level entries roll up into the pipeline category.
+        // Job-level entries roll up into the pipeline category; workflow
+        // validation entries live with their repository.
         "pipeline" | "job" => "pipeline",
+        "workflow" => "repository",
         "runner" => "runner",
         "secret" => "secret",
         "environment" => "environment",
         "artifact" => "artifact",
+        // Notification lifecycle entries (read-all, bulk archive,
+        // preference changes) are workspace housekeeping.
+        "notification" => "workspace",
         _ => "other",
     }
 }
@@ -97,8 +109,8 @@ pub fn classify(action: &str, metadata: &serde_json::Value) -> (Severity, &'stat
 
     let severity = match action {
         "workspace.created" | "installation.linked" | "repository.imported"
-        | "runner.created" | "runner.provisioned" | "runner.resumed" | "secret.created"
-        | "environment.created" => Severity::Success,
+        | "runner.created" | "runner.provisioned" | "runner.resumed" | "runner.recovered"
+        | "secret.created" | "environment.created" => Severity::Success,
         "pipeline.completed" => {
             if metadata.get("conclusion").and_then(serde_json::Value::as_str) == Some("success") {
                 Severity::Success
@@ -107,10 +119,12 @@ pub fn classify(action: &str, metadata: &serde_json::Value) -> (Severity, &'stat
             }
         }
         "pipeline.cancelled" | "job.cancelled" | "runner.drained" | "runner.disabled"
-        | "artifact.deleted" => Severity::Warning,
+        | "artifact.deleted" | "workflow.invalid" => Severity::Warning,
         "installation.unlinked" | "repository.removed" | "runner.revoked"
-        | "runner.token_regenerated" | "runner.provision_failed" | "secret.deleted"
-        | "environment.deleted" => Severity::Danger,
+        | "runner.token_regenerated" | "runner.provision_failed" | "runner.offline"
+        | "repository.sync_failed" | "secret.deleted" | "environment.deleted" => {
+            Severity::Danger
+        }
         _ => Severity::Info,
     };
 
