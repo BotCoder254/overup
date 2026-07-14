@@ -197,7 +197,10 @@ impl Config {
 
         // Parsed ahead of the provisioner group: it doubles as the default
         // pre-pull list, so the image jobs fall back to is always warm.
-        let default_job_image = optional("DEFAULT_JOB_IMAGE", "ubuntu:24.04");
+        // catthehacker/ubuntu:act-* is the GitHub-runner-compatible family
+        // nektos/act and Gitea Actions default to — bare ubuntu images have
+        // no toolchains, so real workflows die on `npm: not found`.
+        let default_job_image = optional("DEFAULT_JOB_IMAGE", "catthehacker/ubuntu:act-latest");
 
         // Hosted-runner provisioning is opt-in: the server needs Docker
         // access and a URL that provisioned containers can reach it on.

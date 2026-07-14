@@ -609,7 +609,8 @@ RUNNER_LABELS=self-hosted,linux,x64,ubuntu-latest cargo run
 #                                   the server daemon under the same tag: pulls
 #                                   fall back to a locally present image when the
 #                                   registry denies them)
-#   RUNNER_PREPULL_IMAGES=ubuntu:24.04  job images warmed into the daemon
+#   RUNNER_PREPULL_IMAGES=catthehacker/ubuntu:act-latest
+#                                   job images warmed into the daemon
 #                                   after every provisioner (re)connect (so
 #                                   every deploy/restart); comma-separated,
 #                                   default = DEFAULT_JOB_IMAGE, runner image

@@ -211,16 +211,54 @@ async fn execute(
         None,
         None,
     );
+    // Per-layer byte counts aggregated into one throttled progress line, so
+    // a large first pull reads as live progress in the streaming log rather
+    // than minutes of silence that look like a hang.
+    let mut layer_progress: std::collections::HashMap<String, (i64, i64)> =
+        std::collections::HashMap::new();
+    let mut last_progress_log = Instant::now();
     while let Some(progress) = pull.next().await {
         if *cancel.borrow() {
             return (JobConclusion::Cancelled, None, None);
         }
-        if let Err(error) = progress {
-            log.system(&format!("image pull failed: {error}")).await;
-            return fail("image_pull_failed");
+        match progress {
+            Err(error) => {
+                log.system(&format!("image pull failed: {error}")).await;
+                return fail("image_pull_failed");
+            }
+            Ok(info) => {
+                if let (Some(id), Some(detail)) = (&info.id, &info.progress_detail)
+                    && let (Some(current), Some(total)) = (detail.current, detail.total)
+                    && total > 0
+                {
+                    layer_progress.insert(id.clone(), (current.min(total), total));
+                }
+                if last_progress_log.elapsed() >= Duration::from_secs(2)
+                    && !layer_progress.is_empty()
+                {
+                    let (done, total) = layer_progress
+                        .values()
+                        .fold((0i64, 0i64), |(d, t), (c, tot)| (d + c, t + tot));
+                    if total > 0 {
+                        log.system(&format!(
+                            "pulling image: {}% ({} / {})",
+                            done * 100 / total,
+                            format_mib(done),
+                            format_mib(total),
+                        ))
+                        .await;
+                        last_progress_log = Instant::now();
+                    }
+                }
+            }
         }
     }
     metrics.image_pull_ms = Some(pull_started.elapsed().as_millis() as u64);
+    log.system(&format!(
+        "image ready in {:.1}s",
+        pull_started.elapsed().as_secs_f64()
+    ))
+    .await;
 
     // --- container ----------------------------------------------------------
     stage(out, job_id, "starting_container").await;
@@ -598,6 +636,10 @@ async fn remove_container(docker: &Docker, container: &str) {
 
 fn short_id(id: &str) -> &str {
     &id[..id.len().min(12)]
+}
+
+fn format_mib(bytes: i64) -> String {
+    format!("{:.0} MiB", bytes.max(0) as f64 / (1024.0 * 1024.0))
 }
 
 /// Download the repository tarball (size-capped) and extract it with the

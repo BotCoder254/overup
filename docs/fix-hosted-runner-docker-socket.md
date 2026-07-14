@@ -110,7 +110,7 @@ RUNNER_PROVISIONER=docker
 # single host; otherwise use the public API origin.
 RUNNER_PROVISIONER_OVERUP_URL=http://172.17.0.1:8080
 # Optional: job images pre-pulled on every deploy/restart (default = DEFAULT_JOB_IMAGE)
-#RUNNER_PREPULL_IMAGES=ubuntu:24.04
+#RUNNER_PREPULL_IMAGES=catthehacker/ubuntu:act-latest
 ```
 
 ## Stage 3 — publish the runner image (fixes `error from registry: denied`)

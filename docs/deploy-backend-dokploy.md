@@ -188,7 +188,7 @@ GITHUB_APP_SLUG=<your-app-slug>
 # Generate: openssl rand -hex 32
 RUNNER_JOB_SIGNING_KEY=<64-hex-chars>
 
-DEFAULT_JOB_IMAGE=ubuntu:24.04
+DEFAULT_JOB_IMAGE=catthehacker/ubuntu:act-latest
 JOB_TIMEOUT_SECONDS=3600
 PIPELINE_TIMEOUT_SECONDS=7200
 MAX_LOG_BYTES_PER_JOB=10485760
@@ -213,7 +213,7 @@ MAX_ARTIFACTS_PER_JOB=10
 #RUNNER_PROVISIONER_DOCKER_HOST=
 # Job images pre-pulled on every deploy/restart so jobs start instantly —
 # see "Pre-pulling job images" below. Default: DEFAULT_JOB_IMAGE.
-#RUNNER_PREPULL_IMAGES=ubuntu:24.04
+#RUNNER_PREPULL_IMAGES=catthehacker/ubuntu:act-latest
 
 # --- Cloudflare R2 (OPTIONAL — all four or none) ------------------------------
 # Without these, pipelines run fine; artifact uploads are denied and logs
@@ -345,8 +345,10 @@ somewhere non-standard (e.g. rootless Docker).
 
 ### 5.3 Pre-pulling job images (why the Dockerfile can't do it)
 
-Job containers run on images like `ubuntu:24.04`; the first job that needs one waits
-for the pull. It is tempting to "install" those images in `backend/Dockerfile` so a
+Job containers run on images like `catthehacker/ubuntu:act-latest` (the
+GitHub-runner-compatible default with Node/Python/build tools preinstalled) or
+whatever a job pins with the workflow `container:` key; the first job that needs one
+waits for the pull. It is tempting to "install" those images in `backend/Dockerfile` so a
 deploy ships them — **that cannot work**: Docker images live in the *host daemon's*
 store (`/var/lib/docker`), not inside another image's filesystem. There is no daemon
 available during `docker build`, and an image buried inside the backend image would be
