@@ -200,8 +200,10 @@ async fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<(Runner, 
 /// Entries are trimmed, filtered through the registration allow-list,
 /// case-insensitively deduped, and capped at the registration limit —
 /// invalid entries are dropped, never stored. An empty validated list
-/// leaves the stored labels untouched (an old agent that sends nothing
-/// must not wipe a configured fleet).
+/// leaves configured stored labels untouched (an old agent that sends
+/// nothing must not wipe a fleet), but a runner that is label-less on
+/// BOTH sides heals to the platform default set — an empty set satisfies
+/// no labeled runs-on, which strands every job as `no_matching_runner`.
 async fn sync_advertised_labels(state: &AppState, runner: &Runner, advertised: Vec<String>) {
     let mut labels: Vec<String> = Vec::new();
     for label in advertised {
@@ -215,7 +217,14 @@ async fn sync_advertised_labels(state: &AppState, runner: &Runner, advertised: V
             break;
         }
     }
-    if labels.is_empty() || labels == runner.labels {
+    if labels.is_empty() {
+        if !runner.labels.is_empty() {
+            return;
+        }
+        labels = super::runners::default_labels();
+        tracing::info!(runner_id = %runner.id, ?labels, "runner has no labels anywhere; adopting platform defaults");
+    }
+    if labels == runner.labels {
         return;
     }
     if let Err(error) = db::runners::update_labels(&state.pool, runner.id, &labels).await {

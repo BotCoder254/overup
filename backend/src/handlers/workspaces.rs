@@ -307,10 +307,7 @@ fn spawn_auto_provision_runner(
             tracing::warn!(%workspace_id, "hosted runner auto-provision skipped: docker unavailable");
             return;
         }
-        let labels: Vec<String> = ["self-hosted", "linux", "x64", "ubuntu-latest"]
-            .into_iter()
-            .map(String::from)
-            .collect();
+        let labels = crate::handlers::runners::default_labels();
         match crate::services::runner_provision_flow::start_hosted_provision(
             &task_state,
             crate::services::runner_provision_flow::HostedProvisionRequest {

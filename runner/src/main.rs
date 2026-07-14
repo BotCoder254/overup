@@ -176,17 +176,30 @@ async fn main() -> anyhow::Result<()> {
         // gets a baffling 401 from the control plane.
         .map_or_else(|| required("RUNNER_TOKEN").map(|t| t.trim().to_string()), Ok)?;
 
+    // RUNNER_LABELS set-but-blank must not produce an empty label set: an
+    // empty set can never satisfy a labeled runs-on, so the runner would sit
+    // idle while jobs queue forever. Mirror GitHub's unremovable default
+    // labels (jobs run in containers picked from runs-on, so these describe
+    // the execution environment, not the host).
+    let mut labels: Vec<String> = optional("RUNNER_LABELS", "self-hosted")
+        .split(',')
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if labels.is_empty() {
+        labels = ["self-hosted", "linux", "x64", "ubuntu-latest"]
+            .map(String::from)
+            .to_vec();
+        tracing::warn!(?labels, "RUNNER_LABELS is empty; falling back to default labels");
+    }
+
     let mut config = RunnerConfig {
         server_url: optional("OVERUP_URL", "http://localhost:8080")
             .trim_end_matches('/')
             .to_string(),
         token: initial_token,
         name: optional("RUNNER_NAME", "overup-runner"),
-        labels: optional("RUNNER_LABELS", "self-hosted")
-            .split(',')
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty())
-            .collect(),
+        labels,
         signing_key,
         isolation: JobIsolation {
             // Least privilege by default: opting OUT requires an explicit
