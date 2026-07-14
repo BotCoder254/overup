@@ -35,6 +35,21 @@ async fn publish_runner(state: &AppState, workspace_id: Uuid, runner_id: Uuid) {
 
 pub(crate) const MAX_LABELS: usize = 16;
 
+/// GitHub guarantees every runner an unremovable default label set
+/// (`self-hosted` + OS + arch) precisely so a runner can never exist with
+/// an empty, unmatchable one — an empty set satisfies no labeled `runs-on`
+/// and the runner sits idle while jobs queue forever. Mirror that here:
+/// any registration or hello sync that would leave a runner label-less
+/// gets this set instead. `ubuntu-latest` is included because jobs execute
+/// in containers chosen from `runs-on` (the host OS is not the execution
+/// environment), and it matches the hosted auto-provision default.
+pub(crate) const DEFAULT_RUNNER_LABELS: [&str; 4] =
+    ["self-hosted", "linux", "x64", "ubuntu-latest"];
+
+pub(crate) fn default_labels() -> Vec<String> {
+    DEFAULT_RUNNER_LABELS.iter().map(|s| s.to_string()).collect()
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateRunnerRequest {
@@ -78,11 +93,12 @@ pub async fn create(
     let (token, token_hash) = session::generate_token();
 
     let request_id = headers.get("x-request-id").and_then(|v| v.to_str().ok());
+    let labels = if body.labels.is_empty() { default_labels() } else { body.labels.clone() };
     let outcome = db::runners::create(
         &state.pool,
         workspace_id,
         &body.name,
-        &body.labels,
+        &labels,
         &token_hash,
         user.id,
         request_id,
@@ -178,6 +194,7 @@ pub async fn bootstrap(
         ));
     }
 
+    let labels = if body.labels.is_empty() { default_labels() } else { body.labels.clone() };
     let (token, token_hash) = session::generate_token();
     let expires_at = chrono::Utc::now() + chrono::Duration::hours(1);
 
@@ -187,7 +204,7 @@ pub async fn bootstrap(
         db::runners::CreateBootstrapParams {
             workspace_id,
             name: &body.name,
-            labels: &body.labels,
+            labels: &labels,
             bootstrap_token_hash: &token_hash,
             bootstrap_expires_at: expires_at,
             created_by: user.id,
@@ -262,6 +279,7 @@ pub async fn create_hosted(
         ));
     }
 
+    let labels = if body.labels.is_empty() { default_labels() } else { body.labels.clone() };
     let profile = match &body.resource_profile {
         None => state
             .config
@@ -302,7 +320,7 @@ pub async fn create_hosted(
             workspace_id,
             created_by: user.id,
             name: &body.name,
-            labels: &body.labels,
+            labels: &labels,
             profile,
             instances,
             request_id,
