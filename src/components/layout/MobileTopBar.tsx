@@ -1,6 +1,7 @@
 import { Menu, Search } from 'lucide-react';
 import { forwardRef } from 'react';
 import { useMe } from '../../features/auth/hooks/useAuth';
+import { NotificationBell } from '../../features/notifications/components/NotificationBell';
 import { Logo } from '../brand/Logo';
 
 interface MobileTopBarProps {
@@ -34,6 +35,7 @@ export const MobileTopBar = forwardRef<HTMLButtonElement, MobileTopBarProps>(
         <span className="min-w-0 flex-1 truncate text-sm font-medium">
           {me?.workspace?.name}
         </span>
+        <NotificationBell />
         <button
           type="button"
           aria-label="Search"

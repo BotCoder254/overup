@@ -37,6 +37,24 @@ pub async fn schedule(state: &AppState, repository_id: Uuid, trigger: &str) -> s
                     error = ?source,
                     "repository sync failed"
                 );
+                // Ledger entry (Activity Feed + Notification Center) with
+                // the static category only — upstream detail stays in
+                // tracing. Best-effort: the sync row is the authority.
+                if let Err(audit_err) = sqlx::query(
+                    r#"
+                    INSERT INTO audit_logs (workspace_id, actor_user_id, action, subject_type, subject_id, metadata)
+                    VALUES ($1, NULL, 'repository.sync_failed', 'repository', $2, $3)
+                    "#,
+                )
+                .bind(repository.workspace_id)
+                .bind(repository.id)
+                .bind(serde_json::json!({ "name": repository.name, "syncError": category }))
+                .execute(&state.pool)
+                .await
+                {
+                    tracing::warn!(repository_id = %repository.id, error = ?audit_err, "failed to record sync_failed audit entry");
+                }
+                state.notification_projector.poke();
                 (Some(category), serde_json::json!({}))
             }
         };
@@ -196,7 +214,19 @@ async fn run_sync(
             .as_ref()
             .map(|c| (c.sha.as_str(), c.message.as_str(), c.date));
 
-        db::workflows::upsert(
+        // Edge detection for the validation ledger entry: only a
+        // valid/warnings -> errors transition records workflow.invalid, so
+        // re-syncing a persistently broken file stays quiet.
+        let previous_status: Option<(String,)> = sqlx::query_as(
+            "SELECT validation_status FROM workflows WHERE repository_id = $1 AND path = $2",
+        )
+        .bind(repository.id)
+        .bind(&entry.path)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| fail("database error")(e.into()))?;
+
+        let workflow_id = db::workflows::upsert(
             &mut tx,
             repository.id,
             &entry.path,
@@ -213,6 +243,25 @@ async fn run_sync(
         )
         .await
         .map_err(|e| fail("database error")(e.into()))?;
+
+        if status == "errors" && previous_status.map(|(s,)| s).as_deref() != Some("errors") {
+            sqlx::query(
+                r#"
+                INSERT INTO audit_logs (workspace_id, actor_user_id, action, subject_type, subject_id, metadata)
+                VALUES ($1, NULL, 'workflow.invalid', 'workflow', $2, $3)
+                "#,
+            )
+            .bind(repository.workspace_id)
+            .bind(workflow_id)
+            .bind(serde_json::json!({
+                "path": entry.path,
+                "name": repository.name,
+                "diagnosticCount": diagnostics.len(),
+            }))
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| fail("database error")(e.into()))?;
+        }
     }
 
     let keep: Vec<String> = eligible.iter().map(|e| e.path.clone()).collect();

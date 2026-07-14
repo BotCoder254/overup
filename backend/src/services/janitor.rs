@@ -110,6 +110,36 @@ async fn pass(state: &AppState) {
         }
     }
 
+    // 4b. Notification lifecycle: read rows auto-archive after their window,
+    //     archived rows hard-delete past retention, and two derived
+    //     conditions (stale secrets, artifacts about to expire) generate
+    //     reminders. All warn-on-error; each insert path dedups itself.
+    match db::notifications::auto_archive_read(
+        &state.pool,
+        state.config.notification_auto_archive_days,
+        BATCH,
+    )
+    .await
+    {
+        Ok(0) => {}
+        Ok(archived) => tracing::info!(archived, "auto-archived read notifications"),
+        Err(error) => tracing::warn!(error = ?error, "failed to auto-archive read notifications"),
+    }
+    match db::notifications::purge_archived(
+        &state.pool,
+        state.config.notification_retention_days,
+        BATCH,
+    )
+    .await
+    {
+        Ok(0) => {}
+        Ok(purged) => tracing::info!(purged, "purged archived notifications past retention"),
+        Err(error) => tracing::warn!(error = ?error, "failed to purge archived notifications"),
+    }
+    scan_stale_secrets(state).await;
+    scan_expiring_artifacts(state).await;
+    scan_queue_congestion(state).await;
+
     // Docker-touching cleanup below only makes sense with a live daemon
     // connection; skipping it while Docker is down avoids a warn-per-row
     // spray, and the DB-only purges still run either way (any containers
@@ -144,8 +174,11 @@ async fn pass(state: &AppState) {
         }
     }
     match db::runners::purge_expired_bootstrap(&state.pool).await {
-        Ok(0) => {}
-        Ok(purged) => tracing::info!(purged, "purged abandoned runner bootstrap registrations"),
+        Ok(purged) if purged.is_empty() => {}
+        Ok(purged) => {
+            tracing::info!(purged = purged.len(), "purged abandoned runner bootstrap registrations");
+            notify_expired_bootstraps(state, purged).await;
+        }
         Err(error) => tracing::warn!(error = ?error, "failed to purge expired runner bootstrap tokens"),
     }
 
@@ -184,6 +217,201 @@ async fn pass(state: &AppState) {
     //    next pass retries anything that failed.
     if let Some(provisioner) = live_provisioner {
         reconcile_managed_containers(state, provisioner).await;
+    }
+}
+
+/// Rotation reminders for secrets whose value is past the staleness window.
+/// Derived STATE, not an event — nothing rides the audit ledger; rows insert
+/// directly with a weekly re-fire guard in the candidate query, and the
+/// per-user dedup upsert absorbs anything the guard misses.
+async fn scan_stale_secrets(state: &AppState) {
+    let candidates = match db::notifications::stale_secret_candidates(
+        &state.pool,
+        db::secrets::SECRET_STALE_DAYS as i32,
+        BATCH,
+    )
+    .await
+    {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            tracing::warn!(error = ?error, "failed to scan stale secrets for reminders");
+            return;
+        }
+    };
+    for secret in candidates {
+        let spec = crate::services::notification::NotificationSpec {
+            category: "security",
+            severity: "warning",
+            recipients: crate::services::notification::Recipients::Permission(
+                crate::services::authz::SECRETS_MANAGE,
+            ),
+            suppress_actor: false,
+            title: format!(
+                "Secret {} has not been rotated in {}+ days",
+                secret.name,
+                db::secrets::SECRET_STALE_DAYS
+            ),
+            body: "Rotate the value to keep the workspace's credential posture healthy.".into(),
+            subject_type: Some("secret".into()),
+            subject_id: Some(secret.id),
+            link: serde_json::json!({ "kind": "secret", "secretId": secret.id }),
+            dedup_key: Some(format!("secret.stale:{}", secret.id)),
+        };
+        if let Err(error) = crate::services::notification::deliver_direct(
+            state,
+            secret.workspace_id,
+            "secret.stale",
+            &spec,
+        )
+        .await
+        {
+            tracing::warn!(secret_id = %secret.id, error = ?error, "failed to deliver stale-secret reminder");
+        }
+    }
+}
+
+/// Expiry warnings for uploaded artifacts inside their last 24 hours.
+async fn scan_expiring_artifacts(state: &AppState) {
+    let candidates =
+        match db::notifications::expiring_artifact_candidates(&state.pool, BATCH).await {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                tracing::warn!(error = ?error, "failed to scan expiring artifacts");
+                return;
+            }
+        };
+    for artifact in candidates {
+        // Warn the pipeline's triggering actor when there is one; push
+        // pipelines fall back to everyone who can manage content.
+        let recipients = match artifact.triggered_by {
+            Some(actor) => crate::services::notification::Recipients::Direct(actor),
+            None => crate::services::notification::Recipients::Permission(
+                crate::services::authz::CONTENT_WRITE,
+            ),
+        };
+        let spec = crate::services::notification::NotificationSpec {
+            category: "artifact",
+            severity: "warning",
+            recipients,
+            suppress_actor: false,
+            title: format!("Artifact {} expires within 24 hours", artifact.name),
+            body: format!(
+                "From pipeline #{} — download it before retention removes it.",
+                artifact.pipeline_number
+            ),
+            subject_type: Some("artifact".into()),
+            subject_id: Some(artifact.id),
+            link: serde_json::json!({ "kind": "artifact", "artifactId": artifact.id }),
+            dedup_key: Some(format!("artifact.expiring:{}", artifact.id)),
+        };
+        if let Err(error) = crate::services::notification::deliver_direct(
+            state,
+            artifact.workspace_id,
+            "artifact.expiring",
+            &spec,
+        )
+        .await
+        {
+            tracing::warn!(artifact_id = %artifact.id, error = ?error, "failed to deliver artifact expiry warning");
+        }
+    }
+}
+
+/// Registration tokens that expired unused: one summarized warning per
+/// affected workspace (the purge already happened — this is awareness that
+/// a planned runner never came online). Dedup absorbs repeats while unread.
+async fn notify_expired_bootstraps(state: &AppState, purged: Vec<(uuid::Uuid, String)>) {
+    let mut by_workspace: std::collections::HashMap<uuid::Uuid, Vec<String>> =
+        std::collections::HashMap::new();
+    for (workspace_id, name) in purged {
+        by_workspace.entry(workspace_id).or_default().push(name);
+    }
+    for (workspace_id, names) in by_workspace {
+        let title = if names.len() == 1 {
+            format!("Runner registration for {} expired unused", names[0])
+        } else {
+            format!("{} runner registrations expired unused", names.len())
+        };
+        let spec = crate::services::notification::NotificationSpec {
+            category: "runner",
+            severity: "warning",
+            recipients: crate::services::notification::Recipients::Permission(
+                crate::services::authz::CONTENT_WRITE,
+            ),
+            suppress_actor: false,
+            title,
+            body: "The registration token was never used to connect a runner. Create a new one from the Runners page.".into(),
+            subject_type: Some("runner".into()),
+            subject_id: None,
+            link: serde_json::json!({ "kind": "runners" }),
+            dedup_key: Some(format!("runner.bootstrap_expired:{workspace_id}")),
+        };
+        if let Err(error) = crate::services::notification::deliver_direct(
+            state,
+            workspace_id,
+            "runner.bootstrap_expired",
+            &spec,
+        )
+        .await
+        {
+            tracing::warn!(%workspace_id, error = ?error, "failed to deliver bootstrap-expiry notification");
+        }
+    }
+}
+
+/// Scheduler congestion: queued, unassigned jobs older than 15 minutes.
+/// Escalates to error when no runner is online at all (nothing can drain
+/// the queue). The candidate query carries a 24 h re-fire guard.
+async fn scan_queue_congestion(state: &AppState) {
+    const CONGESTION_MINUTES: i32 = 15;
+    let candidates =
+        match db::notifications::congested_workspaces(&state.pool, CONGESTION_MINUTES, BATCH)
+            .await
+        {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                tracing::warn!(error = ?error, "failed to scan queue congestion");
+                return;
+            }
+        };
+    for workspace in candidates {
+        let none_online = workspace.online_runners == 0;
+        let spec = crate::services::notification::NotificationSpec {
+            category: "system",
+            severity: if none_online { "error" } else { "warning" },
+            recipients: crate::services::notification::Recipients::Permission(
+                crate::services::authz::CONTENT_READ,
+            ),
+            suppress_actor: false,
+            title: format!(
+                "{} job{} waiting over {CONGESTION_MINUTES} minutes in the queue",
+                workspace.queued_jobs,
+                if workspace.queued_jobs == 1 { "" } else { "s" },
+            ),
+            body: if none_online {
+                "No runners are online — queued pipelines cannot start until one connects.".into()
+            } else {
+                format!(
+                    "{} runner{} online but the queue is not draining — check runner labels against the workflows' runs-on values.",
+                    workspace.online_runners,
+                    if workspace.online_runners == 1 { " is" } else { "s are" },
+                )
+            },
+            subject_type: None,
+            subject_id: None,
+            link: serde_json::json!({ "kind": "runners" }),
+            dedup_key: Some(format!("queue.congested:{}", workspace.workspace_id)),
+        };
+        if let Err(error) = crate::services::notification::deliver_direct(
+            state,
+            workspace.workspace_id,
+            "queue.congested",
+            &spec,
+        )
+        .await
+        {
+            tracing::warn!(workspace_id = %workspace.workspace_id, error = ?error, "failed to deliver congestion notification");
+        }
     }
 }
 

@@ -25,6 +25,7 @@ import { EnvironmentsPage } from '../features/environments/pages/EnvironmentsPag
 import { EnvironmentDetailPage } from '../features/environments/pages/EnvironmentDetailPage';
 import { SearchPage } from '../features/search/pages/SearchPage';
 import { SettingsPage } from '../features/settings/pages/SettingsPage';
+import { NotificationsPage } from '../features/notifications/pages/NotificationsPage';
 import { NAV_ITEMS } from './navigation';
 import { ProtectedRoute } from './guards/ProtectedRoute';
 import { PublicOnlyRoute } from './guards/PublicOnlyRoute';
@@ -95,6 +96,9 @@ export const router = createBrowserRouter([
               // Not a nav item — reached from the sidebar input, the
               // command palette's "See all results", or a shared URL.
               { path: 'search', element: <SearchPage /> },
+              // Not a nav item either — the bell's "View all notifications"
+              // is the entry point (the search-page precedent).
+              { path: 'notifications', element: <NotificationsPage /> },
               ...NAV_ITEMS.filter(
                 (item) => item.segment !== '' && !IMPLEMENTED_SEGMENTS.has(item.segment),
               ).map((item) => ({

@@ -12,7 +12,10 @@ environment secrets, dispatch-time injection with unconditional log masking, ded
 `secrets.read`/`secrets.manage` RBAC, full catalog + detail UI), and the **Environments
 module** (named deployment targets bound from workflow YAML `environment:`, acting as the
 highest-precedence secrets scope with `environments.manage` RBAC and a catalog + detail
-UI). Matrix expansion and PR/cron triggers build on this foundation.
+UI), and the **Notification Center** (a per-user, actionable projection of the audit
+ledger: bell + popover/bottom-sheet in the shell, per-user WebSocket delivery, dedup
+grouping, preferences, and a history page — see below). Matrix expansion and PR/cron
+triggers build on this foundation.
 
 ## Architecture
 
@@ -169,6 +172,56 @@ catalog (summary strip + URL-synced filters + keyset infinite scroll + detail pa
 audit history) plus a create/replace dialog that never echoes values and a security
 posture card that warns when `SECRETS_MASTER_KEY` is unset.
 
+**Notification Center (operational inbox).** Notifications are a per-user, actionable
+PROJECTION of the immutable `audit_logs` ledger — the Activity Feed keeps the complete
+history, notifications hold only what a user should act on (OWASP's audit-vs-messaging
+separation). Ingestion is an **audit-tail projector** (`services/notification_projector.rs`,
+the search-indexer pattern): poked by `WorkspaceHub::publish` (5 s tick as the correctness
+backstop), it tails `audit_logs` past a persisted singleton checkpoint
+(`notification_cursor`, seeded at `now()` — history never backfills) and, per batch of 200,
+maps rows through `services/notification.rs` (action → category/severity/recipients/static
+title template/link kind; routine successes, downloads, and `notification.*` itself are
+excluded), fans out to `workspace_members × role_permissions` holders (per-category
+permission, actor suppression, and **write-time preference filtering** — mute/disabled
+categories/min-severity, critical always delivers), then commits per-recipient upserts AND
+the cursor advance in ONE transaction (exactly-once across crashes). Dedup: a `dedup_key`
+(e.g. `runner.offline:{id}`, `pipeline.failed:{repo}:{workflow}:{ref}`) with a partial
+UNIQUE index over live unread rows merges repeats into `occurrence_count + 1` — read rows
+never merge. Four audit actions were added at their hook sites to feed it (`runner.offline`
+edge-triggered in the scheduler stale sweep, `runner.recovered` on the reconnect edge,
+`repository.sync_failed` with the static category only, `workflow.invalid` on the
+valid→errors transition), and four derived STATES insert directly from the hourly janitor
+(stale secrets ≥90 d with a weekly re-fire guard; artifacts expiring <24 h; queue
+congestion — queued unassigned jobs >15 min, error severity when no runner is online,
+24 h re-fire guard; registration tokens that expired unused, summarized per workspace).
+Failed-pipeline bodies carry the first failed job's STATIC `error_category`
+(image_pull_failed/container_error/… — the Docker-failure surface). Real-time
+delivery rides a **per-USER hub** (`services/notification_hub.rs` — user-keyed so one
+member's preference-filtered feed can never broadcast to another's socket) behind
+`GET /ws/workspaces/{ws}/notifications` (`handlers/notification_ws.rs`, reusing
+`dashboard_ws::authenticate_browser`: Origin allow-list → ticket XOR cookie →
+`content.read`, all pre-upgrade; snapshot frame carries the authoritative unread count).
+REST (`handlers/notifications.rs`): keyset list with allow-listed category/severity +
+escaped ILIKE search + archived mode, unread-count, mark-read (flat 404), read-all, bulk
+(≤100 ids), preferences GET/PUT, and a CSV export (5000-row cap, shared formula-injection
+hardening via activity's `csv_field`) — every query pins `user_id = caller` in SQL, and
+`notification.read_all`/`notification.bulk_archived`/`notification.preferences_updated`
+are audited in-transaction (individual mark-read deliberately isn't). Retention is
+independent from audit: `NOTIFICATION_AUTO_ARCHIVE_DAYS` (14) archives read rows,
+`NOTIFICATION_RETENTION_DAYS` (90) hard-deletes archived ones — janitor steps. Frontend:
+`features/notifications/` — a bell in the sidebar header (desktop) and mobile top bar with
+a `99+`-capped count pill, opening a right-aligned `Popover` (desktop) or a full-height
+bottom sheet (`NotificationSheet`, below `lg`) with identical content
+(`NotificationPanel`: All/Unread tabs, mark-all-read, settings, View All); the socket
+mounts once in `AppShell` (`NotificationStreamProvider`) so the bell is live on every page
+(critical severity also raises a sonner toast); the popover carries category/severity
+selects, and the bottom sheet adds touch swipe (right = read, left = archive — additive,
+buttons stay the accessible path); `/w/:slug/notifications` is the history page
+(URL-synced filters, IntersectionObserver infinite scroll, checkbox bulk
+read/unread/archive, CSV export) routed WITHOUT a nav item, like `search`. Link targets are
+server-built `{kind, …Id}` objects resolved client-side through an allow-list
+(`lib/notificationPresentation.ts`) — never URLs.
+
 **Dev networking.** CRA's `"proxy": "http://localhost:8080"` forwards XHR (`/api/*`,
 `/auth/logout`) to the backend. Full-page navigations are NOT proxied (CRA serves index.html
 for `Accept: text/html`), so the login redirect uses the absolute `REACT_APP_API_ORIGIN`.
@@ -215,6 +268,9 @@ overup/
 │   │   ├── environments/       # deployment environments: catalog (summary strip +
 │   │   │                       #   URL-synced search + keyset infinite scroll), detail
 │   │   │                       #   page with scoped secrets + audit, create/edit dialog
+│   │   ├── notifications/      # operational inbox: NotificationBell (badge, popover/
+│   │   │                       #   bottom-sheet switch), NotificationPanel, history page,
+│   │   │                       #   PreferencesDialog, useNotificationStream (per-user WS)
 │   │   └── dashboard/          # dashboard page; runners/etc. slot in here
 │   ├── lib/                    # api (ky), cn, env, queryClient, slug
 │   └── types/                  # shared API types (Me, Workspace, Repository, Workflow,
@@ -233,7 +289,8 @@ overup/
     │                           #   pipeline_log_chunks/artifacts/pipeline_counters),
     │                           #   secrets (ciphertext-only + RBAC backfill),
     │                           #   environments (+secrets.environment_id scope +
-    │                           #   RBAC backfill), secret value_set_at rotation clock
+    │                           #   RBAC backfill), secret value_set_at rotation clock,
+    │                           #   notifications (+preferences/projector cursor)
     └── src/
         ├── main.rs             # bootstrap: env, tracing, pool, migrate, orphan recovery,
         │                       #   scheduler spawn, janitor, serve
@@ -248,14 +305,17 @@ overup/
         │                       #   WS nests (/runner, /ws) live OUTSIDE the CSRF layer
         ├── handlers/           # health, auth, me, workspaces, github_installations,
         │                       #   repositories, workflows, github_webhooks, pipelines,
-        │                       #   runners, runner_ws, browser_ws, secrets
+        │                       #   runners, runner_ws, browser_ws, secrets,
+        │                       #   notifications, notification_ws
         ├── middleware/         # security_headers, csrf, auth (CurrentUser extractor)
         └── services/           # session, github, github_app (JWT + token cache),
                                 #   auth_flow, workspace, authz (RBAC), repo_sync,
                                 #   workflow_parse, pipeline_plan, pipeline_run (state
                                 #   machine), scheduler, log_hub (mask+cap+broadcast),
                                 #   runner_hub, r2 (presign + HeadObject),
-                                #   secrets_crypto (AES-256-GCM envelope encryption)
+                                #   secrets_crypto (AES-256-GCM envelope encryption),
+                                #   notification (mapping) + notification_hub (per-user
+                                #   fan-out) + notification_projector (audit tail)
 ```
 
 **Authenticated app shell.** Everything under `/w/:slug` renders inside one persistent
@@ -485,6 +545,15 @@ endpoint, region `auto`, presigned URLs; isolated in `services/r2.rs`), and the 
   `environment.created/updated/deleted` audit rows in-transaction, and a delete cascade
   audits every removed secret. A secret create with an `environmentId` from another
   workspace gets the same flat error as a bad `repositoryId` — no existence oracle
+- **Notifications are self-scoped by construction**: every read/mutation predicate pins
+  `user_id = caller` in SQL (a forged notification id 404s flat), the live hub is keyed by
+  the AUTHENTICATED user id (routing, not filtering, is the isolation), titles/bodies are
+  rendered server-side from static templates + DB names (never runner/upstream text, never
+  secret values), link targets are allow-listed `{kind, …Id}` objects resolved client-side
+  (never URLs), list filters are allow-listed/escaped/cursor-capped like every other
+  ledger, preferences are enforced at WRITE time in the fan-out SQL (the read API cannot
+  bypass them; critical always delivers), and the projector skips `notification.*` audit
+  actions so its own lifecycle audits can never feed back into notifications
 - Hosted-runner Docker access is held behind a reconnect loop with candidate probing
   (explicit socket env → DOCKER_HOST+TLS → well-known local/rootless sockets) — outages
   degrade to `hosted_runner_unavailable` (static category) instead of disabling the

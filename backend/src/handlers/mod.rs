@@ -10,6 +10,8 @@ pub mod github_webhooks;
 pub mod health;
 pub mod jobs;
 pub mod me;
+pub mod notification_ws;
+pub mod notifications;
 pub mod pipelines;
 pub mod repositories;
 pub mod runner_ws;

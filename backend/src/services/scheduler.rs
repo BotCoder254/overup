@@ -92,6 +92,20 @@ async fn sweep_stale_runners(state: &AppState) -> anyhow::Result<()> {
         state.runner_hub.unregister(runner_id);
         db::runners::mark_offline(&state.pool, runner_id).await?;
         pipeline_run::orphan_runner_jobs(state, runner_id).await?;
+        // Edge-triggered by this sweep (never per-heartbeat), so the ledger
+        // stays quiet: one entry per lost runner, driving the Activity Feed
+        // and the Notification Center.
+        sqlx::query(
+            r#"
+            INSERT INTO audit_logs (workspace_id, actor_user_id, action, subject_type, subject_id, metadata)
+            VALUES ($1, NULL, 'runner.offline', 'runner', $2, $3)
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(runner_id)
+        .bind(serde_json::json!({ "name": runner.name }))
+        .execute(&state.pool)
+        .await?;
         // Sweep-interval scale, not chatty — the one server-initiated
         // offline transition not already covered by a handler call site.
         if let Some(updated) = db::runners::find_by_id(&state.pool, workspace_id, runner_id).await? {

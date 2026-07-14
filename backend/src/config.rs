@@ -57,6 +57,12 @@ pub struct Config {
     /// been archived to R2. Only relevant when R2 is configured — without it,
     /// chunks are never pruned.
     pub log_hot_retention_days: i64,
+    /// Days an ARCHIVED notification is kept before the janitor hard-deletes
+    /// it. Independent from audit retention: notifications are operational
+    /// awareness, the ledger is the permanent record.
+    pub notification_retention_days: i32,
+    /// Days after a notification is read before the janitor auto-archives it.
+    pub notification_auto_archive_days: i32,
     /// Cloudflare R2 storage (artifacts + gzip'd log archives) — all-or-none
     /// optional group; without it, artifact grants are cleanly denied and
     /// logs simply stay in Postgres.
@@ -304,6 +310,19 @@ impl Config {
         if log_hot_retention_days < 1 {
             anyhow::bail!("LOG_HOT_RETENTION_DAYS must be at least 1");
         }
+        let notification_retention_days: i32 = optional("NOTIFICATION_RETENTION_DAYS", "90")
+            .parse()
+            .context("NOTIFICATION_RETENTION_DAYS must be an integer")?;
+        if notification_retention_days < 1 {
+            anyhow::bail!("NOTIFICATION_RETENTION_DAYS must be at least 1");
+        }
+        let notification_auto_archive_days: i32 =
+            optional("NOTIFICATION_AUTO_ARCHIVE_DAYS", "14")
+                .parse()
+                .context("NOTIFICATION_AUTO_ARCHIVE_DAYS must be an integer")?;
+        if notification_auto_archive_days < 1 {
+            anyhow::bail!("NOTIFICATION_AUTO_ARCHIVE_DAYS must be at least 1");
+        }
 
         Ok(Self {
             database_url: required("DATABASE_URL")?,
@@ -349,6 +368,8 @@ impl Config {
             artifact_retention_days,
             artifact_pending_ttl_hours,
             log_hot_retention_days,
+            notification_retention_days,
+            notification_auto_archive_days,
             r2,
             runner_provisioner,
             secrets_master_key,

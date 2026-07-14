@@ -16,6 +16,7 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::models::runner::RunnerResponse;
+use crate::services::notification_projector::NotificationProjector;
 use crate::services::search_indexer::SearchIndexer;
 
 /// Per-workspace broadcast depth. These are idempotent state deltas, not a
@@ -68,13 +69,18 @@ pub struct WorkspaceHub {
     /// only; the indexer's tick + reconcile passes are the correctness
     /// backstop.
     indexer: Arc<SearchIndexer>,
+    /// Same choke-point trick for the Notification Center: publishes ride
+    /// the audit writes they announce, so poking the projector here gets
+    /// near-instant bell updates. Its 5 s tick is the correctness backstop.
+    projector: Arc<NotificationProjector>,
 }
 
 impl WorkspaceHub {
-    pub fn new(indexer: Arc<SearchIndexer>) -> Self {
+    pub fn new(indexer: Arc<SearchIndexer>, projector: Arc<NotificationProjector>) -> Self {
         Self {
             channels: DashMap::new(),
             indexer,
+            projector,
         }
     }
 
@@ -87,9 +93,11 @@ impl WorkspaceHub {
 
     /// Fan an event out to subscribers; idle channels are pruned lazily.
     pub fn publish(&self, workspace_id: Uuid, event: WorkspaceEvent) {
-        // Unconditionally, BEFORE the no-subscriber early-out: search
-        // freshness must not depend on someone watching the dashboard.
+        // Unconditionally, BEFORE the no-subscriber early-out: search and
+        // notification freshness must not depend on someone watching the
+        // dashboard.
         self.indexer.mark_dirty(workspace_id);
+        self.projector.poke();
         if let Some(tx) = self.channels.get(&workspace_id)
             && tx.send(event).is_err()
         {
@@ -106,7 +114,10 @@ mod tests {
     use super::*;
 
     fn test_hub() -> WorkspaceHub {
-        WorkspaceHub::new(Arc::new(SearchIndexer::default()))
+        WorkspaceHub::new(
+            Arc::new(SearchIndexer::default()),
+            Arc::new(NotificationProjector::default()),
+        )
     }
 
     #[test]
