@@ -1,6 +1,7 @@
 import { GitBranch, Layers, MoreHorizontal, Square } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { workspacePath } from '../../../app/navigation';
+import { Avatar } from '../../../components/ui/Avatar';
 import { Badge } from '../../../components/ui/Badge';
 import { MenuItem, Popover } from '../../../components/ui/Popover';
 import { TBody, THead, Table, Td, Th, Tr } from '../../../components/ui/Table';
@@ -68,6 +69,12 @@ export function QueueTable({ slug, jobs, onCancel }: QueueTableProps) {
                   <GitBranch size={11} aria-hidden="true" />
                   {branchOfRef(job.gitRef)}
                 </span>
+                {(job.actorLogin || job.actorAvatarUrl) && (
+                  <span className="inline-flex items-center gap-1 pl-2 align-middle">
+                    <Avatar size="xs" login={job.actorLogin} avatarUrl={job.actorAvatarUrl} />
+                    {job.actorLogin}
+                  </span>
+                )}
               </div>
               {/* On phones the Repository column is hidden; fold it in here. */}
               <div className="text-xs text-steel md:hidden">{job.repoFullName}</div>

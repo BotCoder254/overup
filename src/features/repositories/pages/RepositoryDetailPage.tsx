@@ -1,8 +1,9 @@
 import { format, formatDistanceToNow } from 'date-fns';
-import { GitBranch, Lock, RefreshCw, Trash2, Workflow as WorkflowIcon } from 'lucide-react';
+import { FileCode2, GitBranch, Lock, RefreshCw, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { PageHeader } from '../../../components/layout/PageHeader';
+import { Avatar } from '../../../components/ui/Avatar';
 import { Badge } from '../../../components/ui/Badge';
 import { Button } from '../../../components/ui/Button';
 import { Card } from '../../../components/ui/Card';
@@ -86,6 +87,10 @@ export function RepositoryDetailPage() {
       />
 
       <div className="mb-6 flex flex-wrap items-center gap-2 text-xs text-steel">
+        <span className="inline-flex items-center gap-1.5">
+          <Avatar size="sm" login={repository.owner} avatarUrl={repository.ownerAvatarUrl} />
+          <span className="font-medium text-charcoal">{repository.owner}</span>
+        </span>
         <SyncStatusBadge status={repository.syncStatus} />
         {repository.private && (
           <Badge variant="outline">
@@ -131,8 +136,8 @@ export function RepositoryDetailPage() {
             <THead>
               <Tr>
                 <Th>Workflow</Th>
-                <Th>Triggers</Th>
-                <Th>Jobs</Th>
+                <Th className="hidden sm:table-cell">Triggers</Th>
+                <Th className="hidden sm:table-cell">Jobs</Th>
                 <Th>Validation</Th>
               </Tr>
             </THead>
@@ -145,13 +150,18 @@ export function RepositoryDetailPage() {
                       className="font-medium text-charcoal hover:text-primary"
                     >
                       <span className="inline-flex items-center gap-1.5">
-                        <WorkflowIcon size={14} className="text-steel" aria-hidden="true" />
+                        <FileCode2 size={14} className="text-steel" aria-hidden="true" />
                         {workflow.name}
                       </span>
                     </Link>
                     <p className="mt-0.5 font-mono text-xs text-steel">{workflow.path}</p>
+                    {/* Phones hide the Triggers/Jobs columns; fold a compact line in. */}
+                    <p className="mt-0.5 text-xs text-steel sm:hidden">
+                      {workflow.triggers.join(', ')} · {workflow.jobCount} job
+                      {workflow.jobCount === 1 ? '' : 's'}
+                    </p>
                   </Td>
-                  <Td>
+                  <Td className="hidden sm:table-cell">
                     <div className="flex flex-wrap gap-1">
                       {workflow.triggers.map((trigger) => (
                         <Badge key={trigger} variant="info">
@@ -160,7 +170,7 @@ export function RepositoryDetailPage() {
                       ))}
                     </div>
                   </Td>
-                  <Td className="text-steel">{workflow.jobCount}</Td>
+                  <Td className="hidden text-steel sm:table-cell">{workflow.jobCount}</Td>
                   <Td>
                     <ValidationBadge status={workflow.validationStatus} />
                   </Td>
@@ -179,7 +189,7 @@ export function RepositoryDetailPage() {
               <Tr>
                 <Th>Branch</Th>
                 <Th>Commit</Th>
-                <Th>Updated</Th>
+                <Th className="hidden sm:table-cell">Updated</Th>
               </Tr>
             </THead>
             <TBody>
@@ -191,9 +201,12 @@ export function RepositoryDetailPage() {
                       <span className="font-medium">{branch.name}</span>
                       {branch.isDefault && <Badge variant="primary">default</Badge>}
                     </span>
+                    <p className="mt-0.5 text-xs text-steel sm:hidden">
+                      {formatDistanceToNow(new Date(branch.updatedAt), { addSuffix: true })}
+                    </p>
                   </Td>
                   <Td className="font-mono text-xs text-steel">{branch.commitSha.slice(0, 7)}</Td>
-                  <Td className="text-steel">
+                  <Td className="hidden text-steel sm:table-cell">
                     <span title={format(new Date(branch.updatedAt), 'PPpp')}>
                       {formatDistanceToNow(new Date(branch.updatedAt), { addSuffix: true })}
                     </span>

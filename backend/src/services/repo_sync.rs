@@ -183,6 +183,7 @@ async fn run_sync(
         &mut tx,
         repository.id,
         &remote.owner.login,
+        github_app::sanitize_avatar_url(remote.owner.avatar_url.as_deref()),
         &remote.name,
         &remote.full_name,
         remote.private,

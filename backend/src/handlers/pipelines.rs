@@ -14,7 +14,7 @@ use crate::models::artifact::ArtifactResponse;
 use crate::models::pipeline::{
     LogChunkResponse, PipelineEventResponse, PipelineJobResponse, PipelineResponse,
 };
-use crate::services::{authz, pipeline_run};
+use crate::services::{authz, github_app, pipeline_run};
 use crate::state::AppState;
 
 const DEFAULT_PAGE: i64 = 50;
@@ -254,6 +254,9 @@ pub async fn rerun(
         commit_sha: &original.commit_sha,
         commit_message: original.commit_message.as_deref(),
         commit_author: original.commit_author.as_deref(),
+        // The rerunning user is the actor, not whoever triggered the original.
+        actor_login: Some(&user.username),
+        actor_avatar_url: github_app::sanitize_avatar_url(user.avatar_url.as_deref()),
         git_ref: &original.git_ref,
         // Reruns reproduce the original run, inputs included.
         inputs: original.trigger_inputs.as_ref(),
@@ -485,6 +488,8 @@ pub async fn dispatch(
         commit_sha: &commit_sha,
         commit_message: None,
         commit_author: Some(&user.username),
+        actor_login: Some(&user.username),
+        actor_avatar_url: github_app::sanitize_avatar_url(user.avatar_url.as_deref()),
         git_ref: &git_ref,
         inputs: inputs.as_ref(),
         request_id,

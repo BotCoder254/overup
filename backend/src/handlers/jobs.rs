@@ -225,6 +225,8 @@ mod tests {
             workflow_name: "ci".into(),
             git_ref: "refs/heads/main".into(),
             trigger: "push".into(),
+            actor_login: None,
+            actor_avatar_url: None,
             blocked_by_needs: blocked,
         }
     }

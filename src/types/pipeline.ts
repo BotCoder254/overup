@@ -18,6 +18,9 @@ export interface Pipeline {
   commitSha: string;
   commitMessage: string | null;
   commitAuthor: string | null;
+  /** Actor snapshot: webhook sender (push) or the dispatching/rerunning user. */
+  actorLogin: string | null;
+  actorAvatarUrl: string | null;
   gitRef: string;
   /** Manual dispatch inputs (workflow_dispatch-style); absent otherwise. */
   triggerInputs?: Record<string, string | number | boolean> | null;

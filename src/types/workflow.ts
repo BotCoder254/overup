@@ -6,6 +6,8 @@ export interface WorkflowSummary {
   id: string;
   repositoryId: string;
   repoFullName: string;
+  repoOwner: string;
+  repoOwnerAvatarUrl: string | null;
   path: string;
   name: string;
   triggers: string[];

@@ -11,7 +11,7 @@ import {
   eventLink,
   severityBadgeVariant,
 } from '../lib/eventPresentation';
-import { ActorAvatar } from './ActorAvatar';
+import { Avatar } from '../../../components/ui/Avatar';
 
 /** "token_regenerated" → "Token regenerated" for the severity badge. */
 function actionLabel(action: string): string {
@@ -56,7 +56,7 @@ export function ActivityEventRow({ event, slug, onSelectActor }: ActivityEventRo
   return (
     <li className="py-3">
       <div className="flex items-start gap-3">
-        <ActorAvatar login={event.actorLogin} avatarUrl={event.actorAvatarUrl} />
+        <Avatar login={event.actorLogin} avatarUrl={event.actorAvatarUrl} />
 
         <div className="min-w-0 flex-1">
           <p className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-sm text-charcoal">

@@ -139,8 +139,9 @@ pub async fn list_for_workspace(
 ) -> sqlx::Result<Vec<WorkflowSummaryRow>> {
     sqlx::query_as::<_, WorkflowSummaryRow>(
         r#"
-        SELECT w.id, w.repository_id, r.full_name AS repo_full_name, w.path, w.name,
-               w.triggers, w.validation_status, w.job_count,
+        SELECT w.id, w.repository_id, r.full_name AS repo_full_name,
+               r.owner AS repo_owner, r.owner_avatar_url AS repo_owner_avatar_url,
+               w.path, w.name, w.triggers, w.validation_status, w.job_count,
                w.last_commit_sha, w.last_commit_at, w.updated_at
         FROM workflows w
         JOIN repositories r ON r.id = w.repository_id
@@ -159,8 +160,9 @@ pub async fn summaries_for_repo(
 ) -> sqlx::Result<Vec<WorkflowSummaryRow>> {
     sqlx::query_as::<_, WorkflowSummaryRow>(
         r#"
-        SELECT w.id, w.repository_id, r.full_name AS repo_full_name, w.path, w.name,
-               w.triggers, w.validation_status, w.job_count,
+        SELECT w.id, w.repository_id, r.full_name AS repo_full_name,
+               r.owner AS repo_owner, r.owner_avatar_url AS repo_owner_avatar_url,
+               w.path, w.name, w.triggers, w.validation_status, w.job_count,
                w.last_commit_sha, w.last_commit_at, w.updated_at
         FROM workflows w
         JOIN repositories r ON r.id = w.repository_id
@@ -180,7 +182,9 @@ pub async fn find_detail_for_workspace(
 ) -> sqlx::Result<Option<WorkflowDetailRow>> {
     sqlx::query_as::<_, WorkflowDetailRow>(
         r#"
-        SELECT w.id, w.repository_id, r.full_name AS repo_full_name, r.default_branch,
+        SELECT w.id, w.repository_id, r.full_name AS repo_full_name,
+               r.owner AS repo_owner, r.owner_avatar_url AS repo_owner_avatar_url,
+               r.default_branch,
                w.path, w.name, w.file_size, w.raw_content, w.triggers, w.metadata,
                w.job_count, w.validation_status, w.validation_errors,
                w.last_commit_sha, w.last_commit_message, w.last_commit_at, w.updated_at

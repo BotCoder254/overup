@@ -18,6 +18,8 @@ pub struct Pipeline {
     pub commit_sha: String,
     pub commit_message: Option<String>,
     pub commit_author: Option<String>,
+    pub actor_login: Option<String>,
+    pub actor_avatar_url: Option<String>,
     pub git_ref: String,
     pub trigger_inputs: Option<serde_json::Value>,
     pub status: String,
@@ -51,6 +53,8 @@ pub struct PipelineResponse {
     pub commit_sha: String,
     pub commit_message: Option<String>,
     pub commit_author: Option<String>,
+    pub actor_login: Option<String>,
+    pub actor_avatar_url: Option<String>,
     pub git_ref: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trigger_inputs: Option<serde_json::Value>,
@@ -75,6 +79,8 @@ impl PipelineResponse {
             commit_sha: pipeline.commit_sha,
             commit_message: pipeline.commit_message,
             commit_author: pipeline.commit_author,
+            actor_login: pipeline.actor_login,
+            actor_avatar_url: pipeline.actor_avatar_url,
             git_ref: pipeline.git_ref,
             trigger_inputs: pipeline.trigger_inputs,
             status: pipeline.status,
@@ -191,6 +197,8 @@ pub struct QueueJobRow {
     pub workflow_name: String,
     pub git_ref: String,
     pub trigger: String,
+    pub actor_login: Option<String>,
+    pub actor_avatar_url: Option<String>,
     pub blocked_by_needs: bool,
 }
 
@@ -221,6 +229,8 @@ pub struct QueueJobResponse {
     pub workflow_name: String,
     pub git_ref: String,
     pub trigger: String,
+    pub actor_login: Option<String>,
+    pub actor_avatar_url: Option<String>,
     pub queue_reason: &'static str,
 }
 
@@ -249,6 +259,8 @@ impl QueueJobResponse {
             workflow_name: row.workflow_name,
             git_ref: row.git_ref,
             trigger: row.trigger,
+            actor_login: row.actor_login,
+            actor_avatar_url: row.actor_avatar_url,
             queue_reason,
         }
     }

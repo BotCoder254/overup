@@ -2,6 +2,7 @@ import { format, formatDistanceToNow } from 'date-fns';
 import { GitBranch, GitCommitHorizontal, MousePointerClick, Webhook } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { workspacePath } from '../../../app/navigation';
+import { Avatar } from '../../../components/ui/Avatar';
 import { TBody, THead, Table, Td, Th, Tr } from '../../../components/ui/Table';
 import type { Pipeline } from '../../../types/pipeline';
 import { branchOfRef, formatDuration, shortSha } from '../lib/format';
@@ -51,9 +52,20 @@ export function PipelinesTable({ slug, pipelines }: { slug: string; pipelines: P
                 <span className="font-mono text-xs text-steel">#{pipeline.number}</span>
               </div>
               <div className="text-xs text-steel">{pipeline.repoFullName}</div>
-              {/* On phones the Created column is hidden; fold it in here. */}
-              <div className="text-xs text-steel sm:hidden">
-                {formatDistanceToNow(new Date(pipeline.createdAt), { addSuffix: true })}
+              {/* On phones the Commit/Created columns are hidden; fold the
+                  actor + relative time in here. */}
+              <div className="mt-0.5 flex items-center gap-1.5 text-xs text-steel sm:hidden">
+                <Avatar
+                  size="xs"
+                  login={pipeline.actorLogin ?? pipeline.commitAuthor}
+                  avatarUrl={pipeline.actorAvatarUrl}
+                />
+                <span className="truncate">
+                  {pipeline.actorLogin ?? pipeline.commitAuthor ?? 'system'}
+                </span>
+                <span className="shrink-0">
+                  · {formatDistanceToNow(new Date(pipeline.createdAt), { addSuffix: true })}
+                </span>
               </div>
             </Td>
             <Td className="hidden sm:table-cell">
@@ -61,12 +73,17 @@ export function PipelinesTable({ slug, pipelines }: { slug: string; pipelines: P
                 <GitCommitHorizontal size={13} className="text-steel" aria-hidden="true" />
                 {shortSha(pipeline.commitSha)}
               </div>
-              {pipeline.commitMessage && (
-                <div className="max-w-[220px] truncate text-xs text-steel">
-                  {pipeline.commitMessage}
-                  {pipeline.commitAuthor ? ` — ${pipeline.commitAuthor}` : ''}
-                </div>
-              )}
+              <div className="mt-0.5 flex max-w-[220px] items-center gap-1.5 text-xs text-steel">
+                <Avatar
+                  size="xs"
+                  login={pipeline.actorLogin ?? pipeline.commitAuthor}
+                  avatarUrl={pipeline.actorAvatarUrl}
+                  title={pipeline.actorLogin ?? pipeline.commitAuthor ?? undefined}
+                />
+                <span className="truncate">
+                  {pipeline.commitMessage ?? pipeline.actorLogin ?? pipeline.commitAuthor ?? '—'}
+                </span>
+              </div>
             </Td>
             <Td className="hidden md:table-cell">
               <span className="inline-flex items-center gap-1.5 font-mono text-xs text-charcoal">

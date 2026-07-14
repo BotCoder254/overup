@@ -19,6 +19,7 @@ export interface InstallationsResponse {
 export interface Repository {
   id: string;
   owner: string;
+  ownerAvatarUrl: string | null;
   name: string;
   fullName: string;
   private: boolean;
@@ -36,6 +37,7 @@ export interface AvailableRepo {
   githubRepoId: number;
   installationId: string;
   owner: string;
+  ownerAvatarUrl: string | null;
   name: string;
   fullName: string;
   private: boolean;

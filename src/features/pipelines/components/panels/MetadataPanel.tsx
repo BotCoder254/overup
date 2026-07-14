@@ -1,6 +1,7 @@
 import { format } from 'date-fns';
 import { ArrowUpRight } from 'lucide-react';
 import { Link } from 'react-router-dom';
+import { Avatar } from '../../../../components/ui/Avatar';
 import { Badge } from '../../../../components/ui/Badge';
 import type { Pipeline, PipelineJob } from '../../../../types/pipeline';
 import { branchOfRef, formatDuration, shortSha } from '../../lib/format';
@@ -33,7 +34,17 @@ export function MetadataPanel({
             <span className="font-mono text-xs">{shortSha(pipeline.commitSha)}</span>
             {pipeline.commitMessage ? ` — ${pipeline.commitMessage}` : ''}
           </Field>
-          <Field label="Author">{pipeline.commitAuthor ?? '—'}</Field>
+          <Field label="Author">
+            <span className="inline-flex items-center gap-1.5">
+              <Avatar
+                size="xs"
+                login={pipeline.actorLogin ?? pipeline.commitAuthor}
+                avatarUrl={pipeline.actorAvatarUrl}
+                title={pipeline.actorLogin ?? undefined}
+              />
+              {pipeline.commitAuthor ?? pipeline.actorLogin ?? '—'}
+            </span>
+          </Field>
           <Field label="Branch">
             <span className="font-mono text-xs">{branchOfRef(pipeline.gitRef)}</span>
           </Field>

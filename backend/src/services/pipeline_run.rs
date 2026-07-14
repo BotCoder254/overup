@@ -25,6 +25,10 @@ pub struct TriggerContext<'a> {
     pub commit_sha: &'a str,
     pub commit_message: Option<&'a str>,
     pub commit_author: Option<&'a str>,
+    /// Actor identity snapshot: webhook sender (push) or the acting user
+    /// (dispatch/rerun). Login capped and avatar sanitized by the caller.
+    pub actor_login: Option<&'a str>,
+    pub actor_avatar_url: Option<&'a str>,
     pub git_ref: &'a str,
     /// Validated workflow_dispatch-style inputs (manual dispatch/rerun only).
     /// Always an object; values are strings/numbers/booleans, already checked
@@ -130,6 +134,8 @@ pub async fn create_pipeline(
         commit_sha: ctx.commit_sha,
         commit_message: ctx.commit_message,
         commit_author: ctx.commit_author,
+        actor_login: ctx.actor_login,
+        actor_avatar_url: ctx.actor_avatar_url,
         git_ref: ctx.git_ref,
         trigger_inputs: ctx.inputs,
         timeout_seconds: state.config.pipeline_timeout_seconds,

@@ -50,6 +50,8 @@ export interface QueueJob {
   workflowName: string;
   gitRef: string;
   trigger: PipelineTrigger;
+  actorLogin: string | null;
+  actorAvatarUrl: string | null;
   queueReason: QueueReason;
 }
 

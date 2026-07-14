@@ -77,6 +77,8 @@ pub async fn available(
                 connected: connected.contains(&repo.id),
                 github_repo_id: repo.id,
                 installation_id: installation.id,
+                owner_avatar_url: github_app::sanitize_avatar_url(repo.owner.avatar_url.as_deref())
+                    .map(str::to_string),
                 owner: repo.owner.login,
                 name: repo.name,
                 full_name: repo.full_name,
@@ -147,6 +149,7 @@ pub async fn import(
         installation.id,
         remote.id,
         &remote.owner.login,
+        github_app::sanitize_avatar_url(remote.owner.avatar_url.as_deref()),
         &remote.name,
         &remote.full_name,
         remote.private,

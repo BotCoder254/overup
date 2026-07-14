@@ -1,6 +1,7 @@
 import { GitBranch, GitCommitHorizontal, MousePointerClick, Server, Webhook } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { workspacePath } from '../../../app/navigation';
+import { Avatar } from '../../../components/ui/Avatar';
 import { useNow } from '../../../lib/useNow';
 import type { Pipeline, PipelineJob } from '../../../types/pipeline';
 import type { Runner } from '../../../types/runner';
@@ -67,6 +68,16 @@ export function JobIdentityBar({ slug, pipeline, job, runner }: JobIdentityBarPr
           <span className="inline-flex items-center gap-1">
             <TriggerIcon size={12} className="text-steel" aria-hidden="true" />
             {pipeline.trigger}
+          </span>
+        </Item>
+        <Item label="by">
+          <span className="inline-flex items-center gap-1">
+            <Avatar
+              size="xs"
+              login={pipeline.actorLogin ?? pipeline.commitAuthor}
+              avatarUrl={pipeline.actorAvatarUrl}
+            />
+            {pipeline.actorLogin ?? pipeline.commitAuthor ?? '—'}
           </span>
         </Item>
         <Item label="branch">

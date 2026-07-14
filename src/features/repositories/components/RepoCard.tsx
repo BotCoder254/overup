@@ -1,6 +1,7 @@
 import { formatDistanceToNow } from 'date-fns';
-import { GitBranch, Lock, Workflow } from 'lucide-react';
+import { FileCode2, GitBranch, Lock } from 'lucide-react';
 import { Link, useParams } from 'react-router-dom';
+import { Avatar } from '../../../components/ui/Avatar';
 import { Badge } from '../../../components/ui/Badge';
 import type { Repository } from '../../../types/repository';
 import { SyncStatusBadge } from './SyncStatusBadge';
@@ -15,6 +16,7 @@ export function RepoCard({ repository }: { repository: Repository }) {
       className="group flex flex-col gap-3 rounded border border-steel/20 bg-canvas p-4 transition-colors hover:border-primary/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
     >
       <div className="flex items-start gap-2">
+        <Avatar login={repository.owner} avatarUrl={repository.ownerAvatarUrl} />
         <div className="min-w-0">
           <p className="truncate text-xs text-steel">{repository.owner}/</p>
           <h3 className="truncate text-sm font-semibold text-charcoal group-hover:text-primary">
@@ -42,7 +44,7 @@ export function RepoCard({ repository }: { repository: Repository }) {
           {repository.defaultBranch}
         </span>
         <span className="inline-flex items-center gap-1">
-          <Workflow size={12} aria-hidden="true" />
+          <FileCode2 size={12} aria-hidden="true" />
           {repository.workflowCount} workflow{repository.workflowCount === 1 ? '' : 's'}
         </span>
         {repository.language && <span>{repository.language}</span>}

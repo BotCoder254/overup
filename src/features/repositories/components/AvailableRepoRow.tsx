@@ -1,4 +1,5 @@
 import { Lock } from 'lucide-react';
+import { Avatar } from '../../../components/ui/Avatar';
 import { Badge } from '../../../components/ui/Badge';
 import { Button } from '../../../components/ui/Button';
 import type { AvailableRepo } from '../../../types/repository';
@@ -13,6 +14,7 @@ interface AvailableRepoRowProps {
 export function AvailableRepoRow({ repo, onImport, importing }: AvailableRepoRowProps) {
   return (
     <li className="flex items-center gap-3 px-4 py-3">
+      <Avatar size="sm" login={repo.owner} avatarUrl={repo.ownerAvatarUrl} />
       <div className="min-w-0">
         <p className="truncate text-sm text-charcoal">
           <span className="text-steel">{repo.owner}/</span>

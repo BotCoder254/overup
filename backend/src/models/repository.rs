@@ -10,6 +10,7 @@ pub struct Repository {
     pub installation_id: Uuid,
     pub github_repo_id: i64,
     pub owner: String,
+    pub owner_avatar_url: Option<String>,
     pub name: String,
     pub full_name: String,
     pub private: bool,
@@ -39,6 +40,7 @@ pub struct RepositoryWithCount {
 pub struct RepositoryResponse {
     pub id: Uuid,
     pub owner: String,
+    pub owner_avatar_url: Option<String>,
     pub name: String,
     pub full_name: String,
     pub private: bool,
@@ -57,6 +59,7 @@ impl RepositoryResponse {
         Self {
             id: repository.id,
             owner: repository.owner,
+            owner_avatar_url: repository.owner_avatar_url,
             name: repository.name,
             full_name: repository.full_name,
             private: repository.private,
@@ -86,6 +89,7 @@ pub struct AvailableRepoResponse {
     pub github_repo_id: i64,
     pub installation_id: Uuid,
     pub owner: String,
+    pub owner_avatar_url: Option<String>,
     pub name: String,
     pub full_name: String,
     pub private: bool,
