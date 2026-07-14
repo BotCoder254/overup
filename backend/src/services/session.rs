@@ -51,13 +51,20 @@ pub fn client_info(headers: &HeaderMap, addr: SocketAddr, trust_proxy: bool) -> 
         .then(|| forwarded_client_ip(headers))
         .flatten();
     ClientInfo {
-        ip: Some(forwarded_ip.unwrap_or_else(|| addr.ip().to_string())),
+        ip: Some(
+            forwarded_ip
+                .map(|ip| ip.to_string())
+                .unwrap_or_else(|| addr.ip().to_string()),
+        ),
         user_agent,
     }
 }
 
-/// The rightmost parseable IP in X-Forwarded-For, else X-Real-Ip.
-fn forwarded_client_ip(headers: &HeaderMap) -> Option<String> {
+/// The rightmost parseable IP in X-Forwarded-For, else X-Real-Ip — the hop
+/// the trusted proxy itself appended, never a client-chosen leftmost entry.
+/// Shared with the rate-limiter key extractor (routes) so both surfaces
+/// resolve the same client identity behind TRUST_PROXY.
+pub fn forwarded_client_ip(headers: &HeaderMap) -> Option<std::net::IpAddr> {
     let from_xff = headers
         .get("x-forwarded-for")
         .and_then(|value| value.to_str().ok())
@@ -67,14 +74,12 @@ fn forwarded_client_ip(headers: &HeaderMap) -> Option<String> {
                 .map(str::trim)
                 .find_map(|hop| hop.parse::<std::net::IpAddr>().ok())
         });
-    from_xff
-        .or_else(|| {
-            headers
-                .get("x-real-ip")
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.trim().parse::<std::net::IpAddr>().ok())
-        })
-        .map(|ip| ip.to_string())
+    from_xff.or_else(|| {
+        headers
+            .get("x-real-ip")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<std::net::IpAddr>().ok())
+    })
 }
 
 /// Generate a fresh session token. Returns `(cookie_value, token_hash)` —

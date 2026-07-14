@@ -51,7 +51,7 @@ pub async fn summary(pool: &PgPool, workspace_id: Uuid, since: DateTime<Utc>) ->
             COUNT(*) FILTER (WHERE status = 'in_progress') AS in_progress,
             COUNT(*) FILTER (WHERE status = 'queued') AS queued,
             COUNT(*) AS total,
-            AVG(EXTRACT(EPOCH FROM (finished_at - started_at)))
+            AVG(EXTRACT(EPOCH FROM (finished_at - started_at))::double precision)
                 FILTER (WHERE finished_at IS NOT NULL AND started_at IS NOT NULL) AS avg_duration_secs
         FROM pipelines
         WHERE workspace_id = $1 AND created_at >= $2

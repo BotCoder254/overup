@@ -196,6 +196,33 @@ async fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<(Runner, 
     Err("invalid_token")
 }
 
+/// Validate and persist the labels the agent advertised in its hello.
+/// Entries are trimmed, filtered through the registration allow-list,
+/// case-insensitively deduped, and capped at the registration limit —
+/// invalid entries are dropped, never stored. An empty validated list
+/// leaves the stored labels untouched (an old agent that sends nothing
+/// must not wipe a configured fleet).
+async fn sync_advertised_labels(state: &AppState, runner: &Runner, advertised: Vec<String>) {
+    let mut labels: Vec<String> = Vec::new();
+    for label in advertised {
+        let label = label.trim().to_string();
+        if super::runners::is_valid_name(&label)
+            && !labels.iter().any(|have| have.eq_ignore_ascii_case(&label))
+        {
+            labels.push(label);
+        }
+        if labels.len() == super::runners::MAX_LABELS {
+            break;
+        }
+    }
+    if labels.is_empty() || labels == runner.labels {
+        return;
+    }
+    if let Err(error) = db::runners::update_labels(&state.pool, runner.id, &labels).await {
+        tracing::warn!(runner_id = %runner.id, error = ?error, "failed to sync advertised runner labels");
+    }
+}
+
 async fn handle(state: AppState, runner: Runner, is_bootstrap: bool, socket: WebSocket) {
     let runner_id = runner.id;
     let workspace_id = runner.workspace_id;
@@ -203,12 +230,12 @@ async fn handle(state: AppState, runner: Runner, is_bootstrap: bool, socket: Web
 
     // First frame must be hello.
     let hello = tokio::time::timeout(HELLO_TIMEOUT, stream.next()).await;
-    let version = match hello {
+    let (version, advertised_labels) = match hello {
         Ok(Some(Ok(Message::Text(text)))) => {
             match serde_json::from_str::<RunnerMsg>(&text) {
                 Ok(RunnerMsg::Hello { version, labels, name, .. }) => {
                     tracing::info!(%runner_id, runner = %name, ?labels, "runner connected");
-                    version
+                    (version, labels)
                 }
                 _ => {
                     let _ = sink.close().await;
@@ -229,6 +256,13 @@ async fn handle(state: AppState, runner: Runner, is_bootstrap: bool, socket: Web
         let _ = sink.close().await;
         return;
     }
+    // The agent's RUNNER_LABELS config — not the registration-time guess —
+    // describes what the machine can actually run; keeping the row in sync
+    // is what stops jobs stranding as `no_matching_runner`. The runner only
+    // ever touches its own row, and every label passes the same allow-list
+    // as registration. Best-effort: a failed sync must not tear down a
+    // healthy socket, and the `publish_runner` below broadcasts the result.
+    sync_advertised_labels(&state, &runner, advertised_labels).await;
     // Offline -> online edge on a runner that has connected before: record
     // the recovery in the ledger (drives the Activity Feed + Notification
     // Center). First-ever connects are routine, not recoveries. Best-effort:

@@ -25,13 +25,16 @@ export const jobsQueueKey = (workspaceId: string, filters: QueueFilters = {}) =>
 export const jobsSummaryKey = (workspaceId: string) =>
   ['workspaces', workspaceId, 'jobs', 'summary'] as const;
 
-/** Every row in the queue is active by definition, so poll briskly while
- * any exist; an empty queue only needs an occasional check — the workspace
- * stream invalidates on pipeline transitions anyway. */
+/** Every row in the queue is active by definition. While the workspace
+ * stream is live it already invalidates on every pipeline transition, so a
+ * slow keep-fresh poll (wait-time aggregates advance without any event) is
+ * enough; while disconnected, polling is the only freshness source — poll
+ * briskly when anything is active, occasionally when the queue is empty. */
+const pollWhileConnected = 15000;
 const pollWhileActive = 5000;
 const pollWhileEmpty = 30000;
 
-export function useQueueJobs(filters: QueueFilters = {}) {
+export function useQueueJobs(filters: QueueFilters = {}, connected = false) {
   const workspaceId = useWorkspaceId();
   return useInfiniteQuery({
     queryKey: jobsQueueKey(workspaceId ?? '', filters),
@@ -41,18 +44,20 @@ export function useQueueJobs(filters: QueueFilters = {}) {
     getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
     enabled: Boolean(workspaceId),
     refetchInterval: (query) =>
-      query.state.data?.pages.some((page) => page.jobs.length > 0)
-        ? pollWhileActive
-        : pollWhileEmpty,
+      connected
+        ? pollWhileConnected
+        : query.state.data?.pages.some((page) => page.jobs.length > 0)
+          ? pollWhileActive
+          : pollWhileEmpty,
   });
 }
 
-export function useQueueSummary() {
+export function useQueueSummary(connected = false) {
   const workspaceId = useWorkspaceId();
   return useQuery({
     queryKey: jobsSummaryKey(workspaceId ?? ''),
     queryFn: () => getQueueSummary(workspaceId!),
     enabled: Boolean(workspaceId),
-    refetchInterval: pollWhileActive,
+    refetchInterval: connected ? pollWhileConnected : pollWhileActive,
   });
 }

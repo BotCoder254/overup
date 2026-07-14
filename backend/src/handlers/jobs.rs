@@ -94,7 +94,10 @@ pub async fn summary(
 ) -> AppResult<Json<serde_json::Value>> {
     authz::require_permission(&state.pool, user.id, workspace_id, authz::CONTENT_READ).await?;
 
-    let summary = db::pipeline_jobs::queue_summary(&state.pool, workspace_id).await?;
+    // The fleet numbers mirror scheduler eligibility: only runners with a
+    // live hub connection count as idle/busy (see queue_summary).
+    let connected = state.runner_hub.connected_ids();
+    let summary = db::pipeline_jobs::queue_summary(&state.pool, workspace_id, &connected).await?;
     Ok(Json(json!({ "summary": summary })))
 }
 

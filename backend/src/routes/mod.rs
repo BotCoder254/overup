@@ -1,10 +1,14 @@
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
-use axum::http::{HeaderName, HeaderValue, Method, header};
+use axum::extract::ConnectInfo;
+use axum::http::{HeaderName, HeaderValue, Method, Request, header};
 use axum::routing::{delete, get, patch, post, put};
 use axum::{Router, middleware as axum_middleware};
 use tower_governor::GovernorLayer;
+use tower_governor::errors::GovernorError;
 use tower_governor::governor::GovernorConfigBuilder;
+use tower_governor::key_extractor::KeyExtractor;
 use tower_http::cors::CorsLayer;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
@@ -18,6 +22,7 @@ use crate::handlers::{
     workspaces, ws_tickets,
 };
 use crate::middleware::{csrf, security_headers};
+use crate::services::session;
 use crate::state::AppState;
 
 /// Browser-facing surfaces: JSON API calls and OAuth redirects are small.
@@ -31,17 +36,45 @@ const LARGE_BODY_BYTES: usize = 1024 * 1024;
 const LOGO_BODY_BYTES: usize = 2 * 1024 * 1024 + 1024;
 const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 
+/// Rate-limit key: the client IP. Without TRUST_PROXY this is the socket
+/// peer address — forwarded headers are client-controlled and deliberately
+/// ignored, so limits cannot be bypassed by spoofing (behind a reverse proxy
+/// this collapses every client into one bucket; set TRUST_PROXY=true there).
+/// With TRUST_PROXY (deployment behind exactly one trusted reverse proxy)
+/// the key is the RIGHTMOST parseable X-Forwarded-For hop — the entry the
+/// trusted proxy itself appended; leftmost hops remain whatever the client
+/// chose to send, so rotation/spoofing still buys nothing. Identical trust
+/// model to the session display IP (services::session::client_info).
+#[derive(Clone, Copy)]
+struct ClientIpKeyExtractor {
+    trust_proxy: bool,
+}
+
+impl KeyExtractor for ClientIpKeyExtractor {
+    type Key = IpAddr;
+
+    fn extract<T>(&self, req: &Request<T>) -> Result<Self::Key, GovernorError> {
+        if self.trust_proxy
+            && let Some(ip) = session::forwarded_client_ip(req.headers())
+        {
+            return Ok(ip);
+        }
+        req.extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|addr| addr.ip())
+            .ok_or(GovernorError::UnableToExtractKey)
+    }
+}
+
 pub fn build_router(state: AppState) -> anyhow::Result<Router> {
-    // Brute-force / abuse protection on the authentication surface,
-    // keyed by peer IP. Every governor below deliberately keys on the SOCKET
-    // peer address, even behind a reverse proxy where that collapses all
-    // clients into one bucket: forwarded-header extractors trust the
-    // client-controlled leftmost X-Forwarded-For hop, which would let any
-    // client rotate spoofed IPs and bypass rate limiting entirely.
-    // Bypass-resistance beats per-client fairness here. (TRUST_PROXY only
-    // affects the display IP recorded on sessions — see services/session.)
+    // Brute-force / abuse protection on the authentication surface. Every
+    // governor below keys on ClientIpKeyExtractor: the socket peer address,
+    // or — only under TRUST_PROXY — the rightmost X-Forwarded-For hop the
+    // trusted proxy appended (see the extractor above for the trust model).
+    let rate_key = ClientIpKeyExtractor { trust_proxy: state.config.trust_proxy };
     let governor_config = Arc::new(
         GovernorConfigBuilder::default()
+            .key_extractor(rate_key)
             .per_second(2)
             .burst_size(10)
             .finish()
@@ -60,16 +93,21 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
 
     // General abuse protection for the API surface, plus much stricter
     // budgets on expensive operations: workspace provisioning and manual
-    // repository syncs (each fans out into GitHub API calls).
+    // repository syncs (each fans out into GitHub API calls). The shared
+    // budget is sized for an SPA: one page navigation legitimately fans out
+    // 10-15 authenticated reads on top of background polling and WS-ticket
+    // mints, all from one client IP.
     let api_governor = Arc::new(
         GovernorConfigBuilder::default()
-            .per_second(5)
-            .burst_size(30)
+            .key_extractor(rate_key)
+            .per_second(20)
+            .burst_size(60)
             .finish()
             .expect("valid governor configuration"),
     );
     let workspace_governor = Arc::new(
         GovernorConfigBuilder::default()
+            .key_extractor(rate_key)
             .per_second(1)
             .burst_size(5)
             .finish()
@@ -77,6 +115,7 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
     );
     let sync_governor = Arc::new(
         GovernorConfigBuilder::default()
+            .key_extractor(rate_key)
             .per_second(1)
             .burst_size(5)
             .finish()
@@ -86,6 +125,7 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
     // runner traffic — same strict budget as manual syncs.
     let dispatch_governor = Arc::new(
         GovernorConfigBuilder::default()
+            .key_extractor(rate_key)
             .per_second(1)
             .burst_size(5)
             .finish()
@@ -95,6 +135,7 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
     // strictest budget of all.
     let hosted_runner_governor = Arc::new(
         GovernorConfigBuilder::default()
+            .key_extractor(rate_key)
             .per_second(1)
             .burst_size(5)
             .finish()
@@ -105,6 +146,7 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
     // other cheap single-row writes).
     let secrets_value_governor = Arc::new(
         GovernorConfigBuilder::default()
+            .key_extractor(rate_key)
             .per_second(1)
             .burst_size(5)
             .finish()
@@ -115,6 +157,7 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
     // riding the general api_governor headroom.
     let search_governor = Arc::new(
         GovernorConfigBuilder::default()
+            .key_extractor(rate_key)
             .per_second(5)
             .burst_size(20)
             .finish()
@@ -124,6 +167,7 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
     // account deletion) get the strict write budget.
     let account_governor = Arc::new(
         GovernorConfigBuilder::default()
+            .key_extractor(rate_key)
             .per_second(1)
             .burst_size(5)
             .finish()
@@ -132,6 +176,7 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
     // Workspace settings mutations (rename, logo) share the same shape.
     let workspace_settings_governor = Arc::new(
         GovernorConfigBuilder::default()
+            .key_extractor(rate_key)
             .per_second(1)
             .burst_size(5)
             .finish()
@@ -413,6 +458,7 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
     // deliberately outside the CSRF layer and under the large body budget.
     let webhook_governor = Arc::new(
         GovernorConfigBuilder::default()
+            .key_extractor(rate_key)
             .per_second(10)
             .burst_size(20)
             .finish()
@@ -429,6 +475,7 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
     // a strict Origin check + session cookie + workspace RBAC.
     let runner_ws_governor = Arc::new(
         GovernorConfigBuilder::default()
+            .key_extractor(rate_key)
             .per_second(1)
             .burst_size(5)
             .finish()
@@ -440,6 +487,7 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
 
     let browser_ws_governor = Arc::new(
         GovernorConfigBuilder::default()
+            .key_extractor(rate_key)
             .per_second(2)
             .burst_size(10)
             .finish()

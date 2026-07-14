@@ -760,6 +760,24 @@ pub async fn mark_connected(pool: &PgPool, id: Uuid, version: &str) -> sqlx::Res
     Ok(())
 }
 
+/// Adopt the labels a connected agent advertised in its hello. Guarded to
+/// the runner's own non-revoked row — scheduling always reads the stored
+/// value, never the transient socket frame.
+pub async fn update_labels(pool: &PgPool, id: Uuid, labels: &[String]) -> sqlx::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE runners
+        SET labels = $2
+        WHERE id = $1 AND revoked_at IS NULL
+        "#,
+    )
+    .bind(id)
+    .bind(labels)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub async fn touch_last_seen(pool: &PgPool, id: Uuid) -> sqlx::Result<()> {
     sqlx::query("UPDATE runners SET last_seen_at = now() WHERE id = $1")
         .bind(id)

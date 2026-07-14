@@ -176,7 +176,11 @@ struct QueueCounts {
     oldest_queued_at: Option<DateTime<Utc>>,
 }
 
-pub async fn queue_summary(pool: &PgPool, workspace_id: Uuid) -> sqlx::Result<QueueSummary> {
+pub async fn queue_summary(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    connected_runner_ids: &[Uuid],
+) -> sqlx::Result<QueueSummary> {
     let counts = sqlx::query_as::<_, QueueCounts>(
         r#"
         SELECT
@@ -209,24 +213,40 @@ pub async fn queue_summary(pool: &PgPool, workspace_id: Uuid) -> sqlx::Result<Qu
     .fetch_one(pool)
     .await?;
 
-    let runner_counts: Vec<(String, i64)> = sqlx::query_as(
+    // Fleet counts mirror scheduler eligibility, not raw row status: a
+    // runner only counts as idle/busy while its socket is live in the hub
+    // (`connected_runner_ids`) — a dead connection the stale sweep hasn't
+    // reaped yet must not present as claimable capacity (it makes the
+    // "idle runners exist, check labels" banner cry wolf). Everything
+    // non-revoked that is neither claimable nor disabled reads as offline.
+    #[derive(sqlx::FromRow)]
+    struct FleetCounts {
+        idle: i64,
+        busy: i64,
+        offline: i64,
+        disabled: i64,
+    }
+    let fleet = sqlx::query_as::<_, FleetCounts>(
         r#"
-        SELECT status, COUNT(*) AS count
+        SELECT
+            COUNT(*) FILTER (WHERE status = 'idle' AND draining_at IS NULL
+                               AND id = ANY($2::uuid[])) AS idle,
+            COUNT(*) FILTER (WHERE status = 'busy'
+                               AND id = ANY($2::uuid[])) AS busy,
+            COUNT(*) FILTER (WHERE status = 'disabled') AS disabled,
+            COUNT(*) FILTER (WHERE status <> 'disabled'
+                               AND NOT (status = 'idle' AND draining_at IS NULL
+                                          AND id = ANY($2::uuid[]))
+                               AND NOT (status = 'busy'
+                                          AND id = ANY($2::uuid[]))) AS offline
         FROM runners
         WHERE workspace_id = $1 AND revoked_at IS NULL
-        GROUP BY status
         "#,
     )
     .bind(workspace_id)
-    .fetch_all(pool)
+    .bind(connected_runner_ids)
+    .fetch_one(pool)
     .await?;
-    let runner_count = |status: &str| {
-        runner_counts
-            .iter()
-            .find(|(s, _)| s == status)
-            .map(|(_, count)| *count)
-            .unwrap_or(0)
-    };
 
     Ok(QueueSummary {
         queued_total: counts.queued_total,
@@ -236,10 +256,10 @@ pub async fn queue_summary(pool: &PgPool, workspace_id: Uuid) -> sqlx::Result<Qu
         avg_queue_wait_secs: counts.avg_queue_wait_secs,
         max_queue_wait_secs: counts.max_queue_wait_secs,
         oldest_queued_at: counts.oldest_queued_at,
-        runners_idle: runner_count("idle"),
-        runners_busy: runner_count("busy"),
-        runners_offline: runner_count("offline"),
-        runners_disabled: runner_count("disabled"),
+        runners_idle: fleet.idle,
+        runners_busy: fleet.busy,
+        runners_offline: fleet.offline,
+        runners_disabled: fleet.disabled,
     })
 }
 

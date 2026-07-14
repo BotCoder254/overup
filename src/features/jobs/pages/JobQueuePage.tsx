@@ -89,8 +89,8 @@ export function JobQueuePage() {
   );
 
   const stream = useWorkspaceStream();
-  const query = useQueueJobs(apiFilters);
-  const summary = useQueueSummary();
+  const query = useQueueJobs(apiFilters, stream.connected);
+  const summary = useQueueSummary(stream.connected);
   const runners = useRunners(stream.connected);
   const cancelJob = useCancelJob();
 
