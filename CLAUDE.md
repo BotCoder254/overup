@@ -430,7 +430,10 @@ endpoint, region `auto`, presigned URLs; isolated in `services/r2.rs`), and the 
 - Strict CORS: frontend origin only, credentials allowed, minimal methods/headers
   (GET/POST/DELETE)
 - Per-IP rate limiting on `/auth/*`, `/api/*`, `/webhooks/*`, plus stricter budgets on
-  workspace creation and manual repo sync
+  workspace creation and manual repo sync; keyed on the socket peer IP, or — only with
+  `TRUST_PROXY=true` (exactly one trusted reverse proxy) — the rightmost X-Forwarded-For
+  hop the proxy appended, so per-client fairness survives a proxy without becoming
+  spoofable (same trust model as the session display IP)
 - **Per-scope body limits** (not global): 64 KB on `/auth` + `/api`, 1 MiB on
   `/webhooks/github` and `POST …/workflows/validate` — an outer global limit would cap
   webhook payloads, so don't reintroduce one

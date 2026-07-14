@@ -214,12 +214,18 @@ async fn assign_eligible(state: &AppState) -> anyhow::Result<()> {
 }
 
 /// GitHub-style label matching: every requested label must be offered by
-/// the runner. Jobs with no labels accept any runner. Shared with the queue
-/// handler so its "no matching runner" diagnosis uses the exact same rule.
+/// the runner. Jobs with no labels accept any runner. Comparison is
+/// trimmed and ASCII-case-insensitive — GitHub Actions labels are
+/// case-insensitive, and stored rows may predate write-time normalization.
+/// Shared with the queue handler so its "no matching runner" diagnosis
+/// uses the exact same rule.
 pub(crate) fn labels_satisfy(runs_on: &[String], runner_labels: &[String]) -> bool {
-    runs_on
-        .iter()
-        .all(|wanted| runner_labels.iter().any(|have| have == wanted))
+    runs_on.iter().all(|wanted| {
+        let wanted = wanted.trim();
+        runner_labels
+            .iter()
+            .any(|have| have.trim().eq_ignore_ascii_case(wanted))
+    })
 }
 
 /// Commit refs are interpolated into the tarball URL; only plain hex-ish
@@ -490,4 +496,45 @@ async fn build_checkout(
         ),
         token,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::labels_satisfy;
+
+    fn v(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn empty_runs_on_matches_any_runner() {
+        assert!(labels_satisfy(&[], &v(&["self-hosted"])));
+        assert!(labels_satisfy(&[], &[]));
+    }
+
+    #[test]
+    fn requires_every_requested_label() {
+        let fleet = v(&["self-hosted", "linux", "x64", "ubuntu-latest"]);
+        assert!(labels_satisfy(&v(&["ubuntu-latest"]), &fleet));
+        assert!(labels_satisfy(&v(&["self-hosted", "linux"]), &fleet));
+        assert!(!labels_satisfy(&v(&["windows-latest"]), &fleet));
+        assert!(!labels_satisfy(&v(&["linux", "gpu"]), &fleet));
+    }
+
+    #[test]
+    fn matching_ignores_ascii_case() {
+        assert!(labels_satisfy(&v(&["Ubuntu-Latest"]), &v(&["ubuntu-latest"])));
+        assert!(labels_satisfy(&v(&["ubuntu-latest"]), &v(&["UBUNTU-LATEST"])));
+    }
+
+    #[test]
+    fn matching_ignores_surrounding_whitespace() {
+        assert!(labels_satisfy(&v(&[" ubuntu-latest "]), &v(&["ubuntu-latest"])));
+        assert!(labels_satisfy(&v(&["ubuntu-latest"]), &v(&["ubuntu-latest "])));
+    }
+
+    #[test]
+    fn no_runner_labels_fails_nonempty_request() {
+        assert!(!labels_satisfy(&v(&["ubuntu-latest"]), &[]));
+    }
 }

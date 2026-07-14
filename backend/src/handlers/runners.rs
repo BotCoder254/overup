@@ -33,7 +33,7 @@ async fn publish_runner(state: &AppState, workspace_id: Uuid, runner_id: Uuid) {
     }
 }
 
-const MAX_LABELS: usize = 16;
+pub(crate) const MAX_LABELS: usize = 16;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -43,7 +43,7 @@ pub struct CreateRunnerRequest {
     labels: Vec<String>,
 }
 
-fn is_valid_name(value: &str) -> bool {
+pub(crate) fn is_valid_name(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
         && !value.starts_with('.')

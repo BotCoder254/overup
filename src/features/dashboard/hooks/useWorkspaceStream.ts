@@ -65,6 +65,21 @@ export function useWorkspaceStream() {
       }
     };
 
+    // Pipeline transitions arrive in bursts (one frame per pipeline edge,
+    // and a multi-job pipeline emits several in quick succession); a
+    // trailing debounce collapses each burst into a single jobs refetch so
+    // the queue page doesn't multiply its own polling.
+    let jobsInvalidateTimer: ReturnType<typeof setTimeout> | undefined;
+    const invalidateJobsSoon = () => {
+      if (jobsInvalidateTimer) return;
+      jobsInvalidateTimer = setTimeout(() => {
+        jobsInvalidateTimer = undefined;
+        void queryClient.invalidateQueries({
+          queryKey: ['workspaces', workspaceId, 'jobs'],
+        });
+      }, 1000);
+    };
+
     // Every delta frame is written to the audit ledger at (or before) the
     // moment it is emitted, so any frame is a cheap "the feed moved" signal.
     // Coarse prefix invalidation covers the feed AND its summary strip; a
@@ -95,9 +110,7 @@ export function useWorkspaceStream() {
           });
           // Pipeline transitions are exactly when the job queue changes
           // shape; a no-op when the queue page isn't mounted.
-          void queryClient.invalidateQueries({
-            queryKey: ['workspaces', workspaceId, 'jobs'],
-          });
+          invalidateJobsSoon();
           invalidateActivity();
           break;
         case 'runner_update':
@@ -212,6 +225,7 @@ export function useWorkspaceStream() {
     return () => {
       disposed = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (jobsInvalidateTimer) clearTimeout(jobsInvalidateTimer);
       socketRef.current?.close();
       socketRef.current = null;
       setConnected(false);
