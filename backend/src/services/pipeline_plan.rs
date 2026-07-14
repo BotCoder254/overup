@@ -77,9 +77,21 @@ pub fn build_plans(raw_content: &str, default_image: &str) -> Result<Vec<Planned
             notices.push("matrix strategy is not expanded yet; the job runs once".into());
         }
 
-        let image = container_image(&job_node)
-            .or_else(|| image_for_runs_on(&job.runs_on))
-            .unwrap_or_else(|| default_image.to_string());
+        // `container:` wins, but only when it is a plausible image reference
+        // — the string lands verbatim in the signed job payload, so garbage
+        // (whitespace, control chars, oversized values) is rejected here
+        // with a visible notice rather than shipped to a runner.
+        let image = match container_image(&job_node) {
+            Some(reference) if is_valid_image_reference(&reference) => reference,
+            Some(reference) => {
+                notices.push(format!(
+                    "container image `{}` is not a valid image reference; using the image for `runs-on` instead",
+                    sanitize_for_notice(&reference)
+                ));
+                image_for_runs_on(&job.runs_on).unwrap_or_else(|| default_image.to_string())
+            }
+            None => image_for_runs_on(&job.runs_on).unwrap_or_else(|| default_image.to_string()),
+        };
 
         let mut env = root_env.clone();
         env.extend(env_map(job_node.get("env")));
@@ -92,7 +104,14 @@ pub fn build_plans(raw_content: &str, default_image: &str) -> Result<Vec<Planned
         } else if let Some(list) = job_node.get("steps").and_then(Value::as_sequence) {
             for (index, step) in list.iter().enumerate() {
                 if let Some(uses) = step.get("uses").and_then(Value::as_str) {
-                    notices.push(format!("step `uses: {uses}` is not supported yet; skipped"));
+                    let uses = sanitize_for_notice(uses);
+                    match setup_action_hint(&uses) {
+                        Some(hint) => notices.push(format!(
+                            "step `uses: {uses}` is not executed; the default job image ships common toolchains — pin this one by adding `{hint}` to the job"
+                        )),
+                        None => notices
+                            .push(format!("step `uses: {uses}` is not supported yet; skipped")),
+                    }
                     continue;
                 }
                 let Some(run) = step.get("run").and_then(Value::as_str) else {
@@ -183,13 +202,19 @@ fn container_image(job_node: &Value) -> Option<String> {
 }
 
 /// Conservative `runs-on` → image map for GitHub-style labels; anything
-/// unrecognized falls through to the configured default image.
+/// unrecognized falls through to the configured default image. The targets
+/// are the `catthehacker/ubuntu:act-*` family — the GitHub-runner-compatible
+/// medium images nektos/act and Gitea Actions default to (Node/npm/yarn,
+/// Python, git, build-essential, …) — because bare `ubuntu:*` images have no
+/// toolchains and every real workflow immediately fails with `npm: not
+/// found`. Heavier toolchains pin an image per job via `container:`.
 fn image_for_runs_on(runs_on: &[String]) -> Option<String> {
     for label in runs_on {
-        let image = match label.as_str() {
-            "ubuntu-latest" | "ubuntu-24.04" => Some("ubuntu:24.04"),
-            "ubuntu-22.04" => Some("ubuntu:22.04"),
-            "ubuntu-20.04" => Some("ubuntu:20.04"),
+        let image = match label.trim().to_ascii_lowercase().as_str() {
+            "ubuntu-latest" => Some("catthehacker/ubuntu:act-latest"),
+            "ubuntu-24.04" => Some("catthehacker/ubuntu:act-24.04"),
+            "ubuntu-22.04" => Some("catthehacker/ubuntu:act-22.04"),
+            "ubuntu-20.04" => Some("catthehacker/ubuntu:act-20.04"),
             _ => None,
         };
         if let Some(image) = image {
@@ -197,6 +222,44 @@ fn image_for_runs_on(runs_on: &[String]) -> Option<String> {
         }
     }
     None
+}
+
+/// A plausible Docker image reference: registry/repo/name plus optional
+/// tag/digest. Deliberately conservative — start alphanumeric, then only the
+/// reference charset, hard length cap. Anything else is rejected at plan
+/// time so the signed job payload never carries an arbitrary string.
+fn is_valid_image_reference(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/' | ':' | '@'))
+}
+
+/// Notices land in the plan JSONB and the UI: strip control characters and
+/// cap the echoed fragment so a hostile workflow can't bloat or garble them.
+fn sanitize_for_notice(value: &str) -> String {
+    value.chars().filter(|c| !c.is_control()).take(100).collect()
+}
+
+/// Well-known `setup-*` actions mapped to the per-job `container:` image
+/// that provides the same toolchain. `uses:` steps are not executed on
+/// overup, so the notice points authors at the mechanism that is.
+fn setup_action_hint(uses: &str) -> Option<&'static str> {
+    let action = uses.split('@').next().unwrap_or(uses);
+    match action {
+        "actions/setup-node" => Some("container: node:22"),
+        "actions/setup-python" => Some("container: python:3.12"),
+        "actions/setup-go" => Some("container: golang:1.23"),
+        "actions/setup-java" => Some("container: eclipse-temurin:21"),
+        "actions/setup-dotnet" => Some("container: mcr.microsoft.com/dotnet/sdk:8.0"),
+        "ruby/setup-ruby" => Some("container: ruby:3.3"),
+        "dtolnay/rust-toolchain"
+        | "actions-rust-lang/setup-rust-toolchain"
+        | "actions-rs/toolchain" => Some("container: rust:1"),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -233,7 +296,7 @@ jobs:
 
         let build = &plans[0];
         assert_eq!(build.key, "build");
-        assert_eq!(build.plan["image"], "ubuntu:24.04");
+        assert_eq!(build.plan["image"], "catthehacker/ubuntu:act-latest");
         assert_eq!(build.plan["env"]["CI"], "true");
         assert_eq!(build.plan["env"]["MODE"], "release");
         let steps = build.plan["steps"].as_array().unwrap();
@@ -245,7 +308,7 @@ jobs:
 
         let test = &plans[1];
         assert_eq!(test.needs, vec!["build".to_string()]);
-        assert_eq!(test.plan["image"], "ubuntu:22.04");
+        assert_eq!(test.plan["image"], "catthehacker/ubuntu:act-22.04");
         assert_eq!(test.plan["steps"][0]["shell"], "bash");
     }
 
@@ -336,5 +399,71 @@ jobs:
 "#;
         let plans = build_plans(with_container, "ubuntu:24.04").ok().unwrap();
         assert_eq!(plans[0].plan["image"], "node:22");
+    }
+
+    #[test]
+    fn invalid_container_image_falls_back_with_notice() {
+        let bad_container = r#"
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: "node:22 && rm -rf /"
+    steps: [{ run: node --version }]
+"#;
+        let plans = build_plans(bad_container, "ubuntu:24.04").ok().unwrap();
+        assert_eq!(plans[0].plan["image"], "catthehacker/ubuntu:act-latest");
+        let notices = plans[0].plan["notices"].as_array().unwrap();
+        assert!(
+            notices
+                .iter()
+                .any(|n| n.as_str().unwrap().contains("not a valid image reference"))
+        );
+    }
+
+    #[test]
+    fn image_reference_validation() {
+        assert!(is_valid_image_reference("node:22"));
+        assert!(is_valid_image_reference("rust:1"));
+        assert!(is_valid_image_reference("catthehacker/ubuntu:act-latest"));
+        assert!(is_valid_image_reference(
+            "ghcr.io/org/image:tag@sha256:0123456789abcdef"
+        ));
+        assert!(!is_valid_image_reference(""));
+        assert!(!is_valid_image_reference("node:22 extra"));
+        assert!(!is_valid_image_reference("-leading-dash"));
+        assert!(!is_valid_image_reference("bad\nimage"));
+        assert!(!is_valid_image_reference(&"a".repeat(257)));
+    }
+
+    #[test]
+    fn runs_on_image_map_is_case_insensitive() {
+        assert_eq!(
+            image_for_runs_on(&["Ubuntu-Latest".to_string()]).as_deref(),
+            Some("catthehacker/ubuntu:act-latest")
+        );
+        assert_eq!(image_for_runs_on(&["windows-latest".to_string()]), None);
+    }
+
+    #[test]
+    fn setup_actions_get_container_hints() {
+        let with_setup = r#"
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+      - run: npm test
+"#;
+        let plans = build_plans(with_setup, "ubuntu:24.04").ok().unwrap();
+        let notices = plans[0].plan["notices"].as_array().unwrap();
+        assert!(
+            notices
+                .iter()
+                .any(|n| n.as_str().unwrap().contains("container: node:22"))
+        );
+        assert_eq!(setup_action_hint("dtolnay/rust-toolchain@stable"), Some("container: rust:1"));
+        assert_eq!(setup_action_hint("actions/checkout@v4"), None);
     }
 }
