@@ -11,7 +11,7 @@ use serde::Deserialize;
 use sha2::Sha256;
 
 use crate::db;
-use crate::services::{pipeline_run, repo_sync};
+use crate::services::{github_app, pipeline_run, repo_sync};
 use crate::state::AppState;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -77,6 +77,7 @@ struct RepositoryIdRef {
 #[derive(Debug, Deserialize)]
 struct SenderRef {
     login: String,
+    avatar_url: Option<String>,
 }
 
 /// POST /webhooks/github
@@ -313,6 +314,17 @@ async fn trigger_push_pipelines(
         .and_then(|a| a.name.as_deref())
         .or(envelope.pusher.as_ref().and_then(|p| p.name.as_deref()));
 
+    // Actor identity snapshot: the webhook sender is who pushed. Untrusted
+    // upstream text — cap the login, https-check the avatar, else NULL.
+    let actor_login = envelope
+        .sender
+        .as_ref()
+        .map(|s| s.login.as_str())
+        .filter(|l| !l.is_empty() && l.len() <= 200);
+    let actor_avatar_url = github_app::sanitize_avatar_url(
+        envelope.sender.as_ref().and_then(|s| s.avatar_url.as_deref()),
+    );
+
     let workflows = db::workflows::push_runnable_for_repo(&state.pool, repo.id).await?;
     for workflow in workflows {
         let ctx = pipeline_run::TriggerContext {
@@ -321,6 +333,8 @@ async fn trigger_push_pipelines(
             commit_sha,
             commit_message: commit_message.as_deref(),
             commit_author,
+            actor_login,
+            actor_avatar_url,
             git_ref,
             inputs: None,
             request_id: None,

@@ -18,6 +18,8 @@ pub struct NewPipeline<'a> {
     pub commit_sha: &'a str,
     pub commit_message: Option<&'a str>,
     pub commit_author: Option<&'a str>,
+    pub actor_login: Option<&'a str>,
+    pub actor_avatar_url: Option<&'a str>,
     pub git_ref: &'a str,
     pub trigger_inputs: Option<&'a serde_json::Value>,
     pub timeout_seconds: i32,
@@ -53,8 +55,8 @@ pub async fn create(
         INSERT INTO pipelines
             (workspace_id, repository_id, workflow_id, workflow_name, workflow_path,
              number, trigger, triggered_by, commit_sha, commit_message, commit_author,
-             git_ref, trigger_inputs, timeout_seconds)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+             actor_login, actor_avatar_url, git_ref, trigger_inputs, timeout_seconds)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
         RETURNING *
         "#,
     )
@@ -69,6 +71,8 @@ pub async fn create(
     .bind(new.commit_sha)
     .bind(new.commit_message)
     .bind(new.commit_author)
+    .bind(new.actor_login)
+    .bind(new.actor_avatar_url)
     .bind(new.git_ref)
     .bind(new.trigger_inputs)
     .bind(new.timeout_seconds)

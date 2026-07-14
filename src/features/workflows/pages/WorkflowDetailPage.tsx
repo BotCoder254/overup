@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { Group, Panel, Separator } from 'react-resizable-panels';
 import { PageHeader } from '../../../components/layout/PageHeader';
+import { Avatar } from '../../../components/ui/Avatar';
 import { Button } from '../../../components/ui/Button';
 import { Spinner } from '../../../components/ui/Spinner';
 import { Tabs } from '../../../components/ui/Tabs';
@@ -151,8 +152,11 @@ export function WorkflowDetailPage() {
         workflow={workflow}
         workspaceSlug={slug}
       />
-      <p className="-mt-4 mb-4 font-mono text-xs text-steel">
-        {workflow.repoFullName} · {workflow.path}
+      <p className="-mt-4 mb-4 flex items-center gap-1.5 font-mono text-xs text-steel">
+        <Avatar size="xs" login={workflow.repoOwner} avatarUrl={workflow.repoOwnerAvatarUrl} />
+        <span className="truncate">
+          {workflow.repoFullName} · {workflow.path}
+        </span>
       </p>
 
       <WorkflowMetaStrip workflow={workflow} slug={slug} />

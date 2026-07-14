@@ -189,6 +189,7 @@ pub struct GitHubRepo {
 #[derive(Debug, Deserialize)]
 pub struct RepoOwner {
     pub login: String,
+    pub avatar_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -250,6 +251,13 @@ pub fn is_safe_name_segment(value: &str) -> bool {
         && value
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// Upstream avatar URLs (GitHub API responses, webhook payloads) are stored
+/// as opaque text, but only when they are https and sanely sized; anything
+/// else becomes NULL — never an error, never logged.
+pub fn sanitize_avatar_url(url: Option<&str>) -> Option<&str> {
+    url.filter(|u| u.starts_with("https://") && u.len() <= 512)
 }
 
 fn require_safe_segments(owner: &str, repo: &str) -> anyhow::Result<()> {
@@ -412,4 +420,28 @@ async fn api_get<T: serde::de::DeserializeOwned>(
         .await?
         .error_for_status()?;
     Ok(response.json::<T>().await?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_avatar_url;
+
+    #[test]
+    fn sanitize_avatar_url_accepts_https_within_cap() {
+        assert_eq!(
+            sanitize_avatar_url(Some("https://avatars.githubusercontent.com/u/1?v=4")),
+            Some("https://avatars.githubusercontent.com/u/1?v=4"),
+        );
+    }
+
+    #[test]
+    fn sanitize_avatar_url_rejects_non_https_and_oversized() {
+        assert_eq!(sanitize_avatar_url(None), None);
+        assert_eq!(sanitize_avatar_url(Some("")), None);
+        assert_eq!(sanitize_avatar_url(Some("http://example.com/a.png")), None);
+        assert_eq!(sanitize_avatar_url(Some("javascript:alert(1)")), None);
+        assert_eq!(sanitize_avatar_url(Some("data:image/png;base64,AAAA")), None);
+        let oversized = format!("https://{}", "a".repeat(512));
+        assert_eq!(sanitize_avatar_url(Some(&oversized)), None);
+    }
 }

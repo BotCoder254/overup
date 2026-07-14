@@ -1,8 +1,9 @@
 import { formatDistanceToNow } from 'date-fns';
-import { Search, Workflow as WorkflowIcon } from 'lucide-react';
+import { FileCode2, Search } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { PageHeader } from '../../../components/layout/PageHeader';
+import { Avatar } from '../../../components/ui/Avatar';
 import { Badge } from '../../../components/ui/Badge';
 import { EmptyState } from '../../../components/ui/EmptyState';
 import { Input } from '../../../components/ui/Input';
@@ -60,7 +61,7 @@ export function WorkflowsPage() {
         </div>
       ) : (workflows.data?.length ?? 0) === 0 ? (
         <EmptyState
-          icon={WorkflowIcon}
+          icon={FileCode2}
           title="No workflows discovered yet"
           description="Connect a repository with files in .github/workflows and they will be discovered, parsed, and validated automatically on every sync."
           className="min-h-[50vh] border-0 bg-transparent"
@@ -72,11 +73,11 @@ export function WorkflowsPage() {
           <THead>
             <Tr>
               <Th>Workflow</Th>
-              <Th>Repository</Th>
-              <Th>Triggers</Th>
-              <Th>Jobs</Th>
+              <Th className="hidden sm:table-cell">Repository</Th>
+              <Th className="hidden md:table-cell">Triggers</Th>
+              <Th className="hidden md:table-cell">Jobs</Th>
               <Th>Validation</Th>
-              <Th>Updated</Th>
+              <Th className="hidden sm:table-cell">Updated</Th>
             </Tr>
           </THead>
           <TBody>
@@ -89,9 +90,30 @@ export function WorkflowsPage() {
                 <Td>
                   <p className="font-medium text-charcoal">{workflow.name}</p>
                   <p className="mt-0.5 font-mono text-xs text-steel">{workflow.path}</p>
+                  {/* Phones hide the Repository/Updated columns; fold them in. */}
+                  <div className="mt-1 flex items-center gap-1.5 text-xs text-steel sm:hidden">
+                    <Avatar
+                      size="xs"
+                      login={workflow.repoOwner}
+                      avatarUrl={workflow.repoOwnerAvatarUrl}
+                    />
+                    <span className="truncate">{workflow.repoFullName}</span>
+                    <span className="shrink-0">
+                      · {formatDistanceToNow(new Date(workflow.updatedAt), { addSuffix: true })}
+                    </span>
+                  </div>
                 </Td>
-                <Td className="text-steel">{workflow.repoFullName}</Td>
-                <Td>
+                <Td className="hidden text-steel sm:table-cell">
+                  <span className="flex min-w-0 items-center gap-2">
+                    <Avatar
+                      size="xs"
+                      login={workflow.repoOwner}
+                      avatarUrl={workflow.repoOwnerAvatarUrl}
+                    />
+                    <span className="truncate">{workflow.repoFullName}</span>
+                  </span>
+                </Td>
+                <Td className="hidden md:table-cell">
                   <div className="flex max-w-[14rem] flex-wrap gap-1">
                     {workflow.triggers.slice(0, 4).map((trigger) => (
                       <Badge key={trigger} variant="info">
@@ -103,11 +125,11 @@ export function WorkflowsPage() {
                     )}
                   </div>
                 </Td>
-                <Td className="text-steel">{workflow.jobCount}</Td>
+                <Td className="hidden text-steel md:table-cell">{workflow.jobCount}</Td>
                 <Td>
                   <ValidationBadge status={workflow.validationStatus} />
                 </Td>
-                <Td className="whitespace-nowrap text-xs text-steel">
+                <Td className="hidden whitespace-nowrap text-xs text-steel sm:table-cell">
                   {formatDistanceToNow(new Date(workflow.updatedAt), { addSuffix: true })}
                 </Td>
               </Tr>

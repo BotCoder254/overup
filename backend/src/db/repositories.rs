@@ -24,6 +24,7 @@ pub async fn import(
     installation_id: Uuid,
     github_repo_id: i64,
     owner: &str,
+    owner_avatar_url: Option<&str>,
     name: &str,
     full_name: &str,
     private: bool,
@@ -38,9 +39,9 @@ pub async fn import(
     let repository = match sqlx::query_as::<_, Repository>(
         r#"
         INSERT INTO repositories
-            (workspace_id, installation_id, github_repo_id, owner, name, full_name,
-             private, default_branch, language, description, imported_by)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            (workspace_id, installation_id, github_repo_id, owner, owner_avatar_url,
+             name, full_name, private, default_branch, language, description, imported_by)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         RETURNING *
         "#,
     )
@@ -48,6 +49,7 @@ pub async fn import(
     .bind(installation_id)
     .bind(github_repo_id)
     .bind(owner)
+    .bind(owner_avatar_url)
     .bind(name)
     .bind(full_name)
     .bind(private)
@@ -243,6 +245,7 @@ pub async fn update_metadata(
     tx: &mut Transaction<'_, Postgres>,
     id: Uuid,
     owner: &str,
+    owner_avatar_url: Option<&str>,
     name: &str,
     full_name: &str,
     private: bool,
@@ -253,13 +256,14 @@ pub async fn update_metadata(
     sqlx::query(
         r#"
         UPDATE repositories
-        SET owner = $2, name = $3, full_name = $4, private = $5,
-            default_branch = $6, language = $7, description = $8, updated_at = now()
+        SET owner = $2, owner_avatar_url = $3, name = $4, full_name = $5, private = $6,
+            default_branch = $7, language = $8, description = $9, updated_at = now()
         WHERE id = $1
         "#,
     )
     .bind(id)
     .bind(owner)
+    .bind(owner_avatar_url)
     .bind(name)
     .bind(full_name)
     .bind(private)

@@ -106,6 +106,8 @@ pub async fn list_queue_for_workspace(
                p.workflow_name AS workflow_name,
                p.git_ref AS git_ref,
                p.trigger AS trigger,
+               p.actor_login AS actor_login,
+               p.actor_avatar_url AS actor_avatar_url,
                EXISTS (
                    SELECT 1 FROM pipeline_jobs d
                    WHERE d.pipeline_id = j.pipeline_id
