@@ -322,6 +322,7 @@ async fn trigger_push_pipelines(
             commit_message: commit_message.as_deref(),
             commit_author,
             git_ref,
+            inputs: None,
             request_id: None,
         };
         if let Err(error) = pipeline_run::create_pipeline(

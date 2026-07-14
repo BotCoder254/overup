@@ -47,7 +47,7 @@ export function PageHeader({ title, description, actions, parent }: PageHeaderPr
       )}
       <div className="flex flex-wrap items-center gap-3">
         <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">{title}</h1>
-        {actions && <div className="ml-auto flex items-center gap-2">{actions}</div>}
+        {actions && <div className="ml-auto flex flex-wrap items-center gap-2">{actions}</div>}
       </div>
       {description && (
         <p className="max-w-2xl text-sm leading-relaxed text-steel">{description}</p>

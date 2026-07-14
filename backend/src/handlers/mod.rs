@@ -18,6 +18,7 @@ pub mod runner_ws;
 pub mod search;
 pub mod runners;
 pub mod secrets;
+pub mod sessions;
 pub mod workflows;
 pub mod workspaces;
 pub mod ws_tickets;

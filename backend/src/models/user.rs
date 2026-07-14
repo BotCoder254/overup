@@ -15,6 +15,8 @@ pub struct User {
     pub email: Option<String>,
     pub avatar_url: Option<String>,
     pub onboarded_at: Option<DateTime<Utc>>,
+    pub display_name_customized: bool,
+    pub email_customized: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

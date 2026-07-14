@@ -18,6 +18,7 @@ import {
   getPipelineDetail,
   getPipelines,
   rerunPipeline,
+  type DispatchOptions,
   type PipelineFilters,
 } from '../api/pipelinesApi';
 
@@ -178,8 +179,12 @@ export function useDispatchWorkflow() {
   const workspaceId = useWorkspaceId();
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (input: { workflowId: string; branch?: string }) =>
-      dispatchWorkflow(workspaceId!, input.workflowId, input.branch),
+    mutationFn: (input: { workflowId: string } & DispatchOptions) =>
+      dispatchWorkflow(workspaceId!, input.workflowId, {
+        branch: input.branch,
+        commitSha: input.commitSha,
+        inputs: input.inputs,
+      }),
     onSuccess: () => {
       toast.success('Pipeline dispatched.');
       if (workspaceId) {

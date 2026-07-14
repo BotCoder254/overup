@@ -3,6 +3,7 @@ pub mod auth_flow;
 pub mod authz;
 pub mod github;
 pub mod github_app;
+pub mod image_sniff;
 pub mod janitor;
 pub mod log_archive;
 pub mod log_hub;

@@ -19,6 +19,8 @@ export interface Pipeline {
   commitMessage: string | null;
   commitAuthor: string | null;
   gitRef: string;
+  /** Manual dispatch inputs (workflow_dispatch-style); absent otherwise. */
+  triggerInputs?: Record<string, string | number | boolean> | null;
   status: PipelineStatus;
   conclusion: PipelineConclusion | null;
   createdAt: string;

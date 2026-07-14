@@ -18,6 +18,12 @@ pub struct Config {
     pub cookie_secure: bool,
     pub cookie_name: String,
     pub session_ttl_hours: i64,
+    /// True when this deployment sits behind a trusted reverse proxy
+    /// (Traefik/Dokploy/nginx). Enables reading the client IP for session
+    /// metadata from the RIGHTMOST X-Forwarded-For hop (the one appended by
+    /// the trusted proxy — the leftmost is client-spoofable). Display-only;
+    /// rate limiting deliberately stays keyed on the socket peer address.
+    pub trust_proxy: bool,
     /// GitHub App client ID — the JWT `iss` claim (GitHub recommends the
     /// client ID over the numeric app ID).
     pub github_app_client_id: String,
@@ -335,6 +341,9 @@ impl Config {
             session_ttl_hours: optional("SESSION_TTL_HOURS", "168")
                 .parse()
                 .context("SESSION_TTL_HOURS must be an integer")?,
+            trust_proxy: optional("TRUST_PROXY", "false")
+                .parse()
+                .context("TRUST_PROXY must be true or false")?,
             github_app_client_id: required("GITHUB_APP_CLIENT_ID")?,
             github_app_private_key_pem,
             github_webhook_secret: required("GITHUB_WEBHOOK_SECRET")?,

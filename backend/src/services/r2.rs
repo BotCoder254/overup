@@ -53,6 +53,13 @@ impl R2 {
         format!("logs/{workspace_id}/{pipeline_id}/{job_id}-{attempt}.log.gz")
     }
 
+    /// Server-generated key for a workspace logo. Every segment is a UUID;
+    /// the extension comes from server-side magic-byte detection, never from
+    /// the client's filename or declared content type.
+    pub fn logo_key(workspace_id: Uuid, ext: &str) -> String {
+        format!("logos/{workspace_id}/{}.{ext}", Uuid::new_v4())
+    }
+
     /// Server-side upload for control-plane-generated objects (log
     /// archives). Bodies are small — bounded by the per-job log cap.
     pub async fn put_object(
@@ -109,6 +116,22 @@ impl R2 {
             .presigned(PresigningConfig::expires_in(DOWNLOAD_URL_TTL)?)
             .await
             .context("failed to presign artifact download")?;
+        Ok(presigned.uri().to_string())
+    }
+
+    /// Presigned GET for inline display (no attachment disposition) — used
+    /// for workspace logos rendered in `<img>` tags. Same short TTL; the SPA
+    /// re-mints through the authenticated logo-url endpoint.
+    pub async fn presign_get_inline(&self, key: &str) -> anyhow::Result<String> {
+        let presigned = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .response_content_disposition("inline")
+            .presigned(PresigningConfig::expires_in(DOWNLOAD_URL_TTL)?)
+            .await
+            .context("failed to presign inline download")?;
         Ok(presigned.uri().to_string())
     }
 

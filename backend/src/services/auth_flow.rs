@@ -47,6 +47,7 @@ pub async fn complete_login(
     code: String,
     oauth_state: String,
     previous_session_token: Option<String>,
+    client: &session::ClientInfo,
 ) -> AppResult<Cookie<'static>> {
     // Single-use, expiring lookup: a replayed or forged `state` finds nothing.
     let verifier = db::oauth_states::take(&state.pool, &session::hash_token(&oauth_state))
@@ -73,7 +74,7 @@ pub async fn complete_login(
         db::sessions::delete_by_token_hash(&state.pool, &session::hash_token(&previous)).await?;
     }
 
-    let cookie = session::create_session(&state.pool, &state.config, user.id).await?;
+    let cookie = session::create_session(&state.pool, &state.config, user.id, client).await?;
 
     tracing::info!(user_id = %user.id, username = %user.username, "user signed in via GitHub");
 

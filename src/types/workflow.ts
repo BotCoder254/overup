@@ -33,6 +33,16 @@ export interface Diagnostic {
   line?: number;
 }
 
+/** One `on.workflow_dispatch.inputs` entry parsed server-side. */
+export interface WorkflowDispatchInput {
+  name: string;
+  type: 'string' | 'number' | 'boolean' | 'choice' | 'environment';
+  required: boolean;
+  default?: string;
+  description?: string;
+  options?: string[];
+}
+
 export interface WorkflowDetail extends WorkflowSummary {
   defaultBranch: string;
   fileSize: number;
@@ -42,6 +52,8 @@ export interface WorkflowDetail extends WorkflowSummary {
     concurrency?: unknown;
     envKeys?: string[];
     secretRefs?: string[];
+    /** Absent on workflows synced before dispatch-input parsing shipped. */
+    dispatchInputs?: WorkflowDispatchInput[];
   };
   validationErrors: Diagnostic[];
   lastCommitMessage: string | null;

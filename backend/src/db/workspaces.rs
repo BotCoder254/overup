@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::models::workspace::{Workspace, WorkspaceSummary};
+use crate::models::workspace::{Workspace, WorkspaceMemberRow, WorkspaceSummary};
 
 /// Result of one provisioning attempt. Both non-`Created` outcomes are
 /// detected via named unique constraints so races lose cleanly.
@@ -196,5 +196,73 @@ pub async fn find_summary_for_user(
     )
     .bind(user_id)
     .fetch_optional(pool)
+    .await
+}
+
+pub async fn find_by_id(pool: &PgPool, workspace_id: Uuid) -> sqlx::Result<Option<Workspace>> {
+    sqlx::query_as::<_, Workspace>("SELECT * FROM workspaces WHERE id = $1")
+        .bind(workspace_id)
+        .fetch_optional(pool)
+        .await
+}
+
+/// Rename the workspace. The slug is deliberately immutable — it anchors
+/// routing, bookmarks, and the reserved-slug policy.
+pub async fn update_name(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    name: &str,
+) -> sqlx::Result<Option<Workspace>> {
+    sqlx::query_as::<_, Workspace>(
+        "UPDATE workspaces SET name = $2, updated_at = now() WHERE id = $1 RETURNING *",
+    )
+    .bind(workspace_id)
+    .bind(name)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Point the workspace at a new logo object (or clear it with `None`).
+/// Returns the previous key so the caller can best-effort delete the old
+/// R2 object after the row is safely updated.
+pub async fn set_logo_key(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    logo_key: Option<&str>,
+) -> sqlx::Result<Option<Option<String>>> {
+    let previous: Option<(Option<String>,)> = sqlx::query_as(
+        r#"
+        UPDATE workspaces w
+        SET logo_key = $2, updated_at = now()
+        FROM (SELECT id, logo_key FROM workspaces WHERE id = $1 FOR UPDATE) old
+        WHERE w.id = old.id
+        RETURNING old.logo_key
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(logo_key)
+    .fetch_optional(pool)
+    .await?;
+    Ok(previous.map(|(key,)| key))
+}
+
+/// Members with their role, owner first, then by join date.
+pub async fn list_members(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> sqlx::Result<Vec<WorkspaceMemberRow>> {
+    sqlx::query_as::<_, WorkspaceMemberRow>(
+        r#"
+        SELECT u.id AS user_id, u.username, u.display_name, u.email, u.avatar_url,
+               r.key AS role_key, r.name AS role_name, m.created_at AS joined_at
+        FROM workspace_members m
+        JOIN users u ON u.id = m.user_id
+        JOIN workspace_roles r ON r.id = m.role_id
+        WHERE m.workspace_id = $1
+        ORDER BY (r.key = 'owner') DESC, m.created_at ASC
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_all(pool)
     .await
 }

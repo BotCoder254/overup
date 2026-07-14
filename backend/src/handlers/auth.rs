@@ -1,4 +1,7 @@
-use axum::extract::{Query, State};
+use std::net::SocketAddr;
+
+use axum::extract::{ConnectInfo, Query, State};
+use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::cookie::CookieJar;
@@ -37,7 +40,9 @@ const SETUP_ACTIONS: [&str; 3] = ["install", "update", "request"];
 /// carry a single opaque marker and nothing else.
 pub async fn callback(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     jar: CookieJar,
+    headers: HeaderMap,
     Query(params): Query<CallbackParams>,
 ) -> Response {
     let frontend = &state.config.frontend_url;
@@ -101,7 +106,10 @@ pub async fn callback(
         .get(&state.config.cookie_name)
         .map(|cookie| cookie.value().to_string());
 
-    match auth_flow::complete_login(&state, code, oauth_state, previous_session_token).await {
+    let client = session::client_info(&headers, addr, state.config.trust_proxy);
+    match auth_flow::complete_login(&state, code, oauth_state, previous_session_token, &client)
+        .await
+    {
         Ok(cookie) => {
             let destination = format!("{frontend}/auth/callback");
             (jar.add(cookie), Redirect::to(&destination)).into_response()

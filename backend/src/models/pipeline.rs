@@ -19,6 +19,7 @@ pub struct Pipeline {
     pub commit_message: Option<String>,
     pub commit_author: Option<String>,
     pub git_ref: String,
+    pub trigger_inputs: Option<serde_json::Value>,
     pub status: String,
     pub conclusion: Option<String>,
     #[allow(dead_code)] // enforced in SQL sweeps, mapped for completeness
@@ -51,6 +52,8 @@ pub struct PipelineResponse {
     pub commit_message: Option<String>,
     pub commit_author: Option<String>,
     pub git_ref: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trigger_inputs: Option<serde_json::Value>,
     pub status: String,
     pub conclusion: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -73,6 +76,7 @@ impl PipelineResponse {
             commit_message: pipeline.commit_message,
             commit_author: pipeline.commit_author,
             git_ref: pipeline.git_ref,
+            trigger_inputs: pipeline.trigger_inputs,
             status: pipeline.status,
             conclusion: pipeline.conclusion,
             created_at: pipeline.created_at,
