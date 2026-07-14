@@ -52,6 +52,18 @@ export function MetadataPanel({
         </FieldList>
       </PanelSection>
 
+      {pipeline.triggerInputs && Object.keys(pipeline.triggerInputs).length > 0 && (
+        <PanelSection title="Inputs">
+          <FieldList>
+            {Object.entries(pipeline.triggerInputs).map(([name, value]) => (
+              <Field key={name} label={name}>
+                <span className="font-mono text-xs">{String(value)}</span>
+              </Field>
+            ))}
+          </FieldList>
+        </PanelSection>
+      )}
+
       {job && (
         <PanelSection title={`Job · ${job.name ?? job.key}`}>
           <FieldList>

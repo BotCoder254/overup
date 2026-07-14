@@ -1,14 +1,20 @@
 use axum::Json;
-use axum::extract::State;
+use axum::body::Bytes;
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
+use serde_json::json;
+use uuid::Uuid;
 
 use crate::db;
 use crate::db::workspaces::ProvisionOutcome;
 use crate::error::{AppError, AppResult};
 use crate::middleware::auth::CurrentUser;
-use crate::models::workspace::WorkspaceResponse;
+use crate::models::workspace::{WorkspaceMemberResponse, WorkspaceResponse};
+use crate::services::r2::R2;
 use crate::services::workspace as workspace_service;
+use crate::services::{authz, image_sniff};
 use crate::state::AppState;
 
 /// Only the name and optional description are accepted. Any other field a
@@ -82,6 +88,190 @@ pub async fn create_workspace(
     Err(AppError::Internal(anyhow::anyhow!(
         "slug candidate space exhausted for base '{base}'"
     )))
+}
+
+/// Same allow-list stance as creation: only the name is accepted, and the
+/// slug is immutable (it anchors routing and the reserved-slug policy).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateWorkspaceRequest {
+    name: String,
+}
+
+const STORAGE_NOT_CONFIGURED: &str = "object storage is not configured";
+/// Server-side cap on logo bytes (the route's body limit is the transport
+/// cap; this is the authoritative one).
+pub const MAX_LOGO_BYTES: usize = 2 * 1024 * 1024;
+
+/// PATCH /api/workspaces/{workspace_id} — rename (name only; slug immutable).
+pub async fn update_workspace(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    Path(workspace_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(body): Json<UpdateWorkspaceRequest>,
+) -> AppResult<Json<WorkspaceResponse>> {
+    authz::require_permission(&state.pool, user.id, workspace_id, authz::WORKSPACE_MANAGE).await?;
+
+    let name = workspace_service::normalize_and_validate_name(&body.name)?;
+    let workspace = db::workspaces::update_name(&state.pool, workspace_id, &name)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    let request_id = headers.get("x-request-id").and_then(|v| v.to_str().ok());
+    sqlx::query(
+        r#"
+        INSERT INTO audit_logs
+            (workspace_id, actor_user_id, action, subject_type, subject_id, metadata, request_id)
+        VALUES ($1, $2, 'workspace.updated', 'workspace', $1, $3, $4)
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(user.id)
+    .bind(json!({ "name": name }))
+    .bind(request_id)
+    .execute(&state.pool)
+    .await?;
+
+    Ok(Json(workspace.into()))
+}
+
+/// GET /api/workspaces/{workspace_id}/members — read-only members table.
+pub async fn list_members(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    Path(workspace_id): Path<Uuid>,
+) -> AppResult<Json<serde_json::Value>> {
+    authz::require_permission(&state.pool, user.id, workspace_id, authz::CONTENT_READ).await?;
+    let members: Vec<WorkspaceMemberResponse> =
+        db::workspaces::list_members(&state.pool, workspace_id)
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect();
+    Ok(Json(json!({ "members": members })))
+}
+
+/// PUT /api/workspaces/{workspace_id}/logo — raw image bytes through the
+/// backend (never a presigned PUT: the server must see the content to
+/// verify it). Magic-byte detection decides the type; the client's
+/// Content-Type and filename are ignored entirely (OWASP File Upload).
+pub async fn upload_logo(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    Path(workspace_id): Path<Uuid>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> AppResult<Json<serde_json::Value>> {
+    authz::require_permission(&state.pool, user.id, workspace_id, authz::WORKSPACE_MANAGE).await?;
+    let r2 = state
+        .r2
+        .as_ref()
+        .ok_or(AppError::Conflict(STORAGE_NOT_CONFIGURED))?;
+
+    if body.is_empty() {
+        return Err(AppError::Validation("logo image is empty".into()));
+    }
+    if body.len() > MAX_LOGO_BYTES {
+        return Err(AppError::Validation("logo image is too large".into()));
+    }
+    let Some((content_type, ext)) = image_sniff::detect(&body) else {
+        return Err(AppError::Validation(
+            "unsupported image format (PNG, JPEG, GIF, or WebP required)".into(),
+        ));
+    };
+
+    // Server-generated key — the object lands before the row points at it,
+    // so a crash in between leaves only an unreferenced object.
+    let key = R2::logo_key(workspace_id, ext);
+    r2.put_object(&key, body.to_vec(), content_type).await?;
+
+    let previous = db::workspaces::set_logo_key(&state.pool, workspace_id, Some(&key))
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    // Best-effort removal of the replaced object; the row already moved on.
+    if let Some(old_key) = previous.filter(|old| old != &key)
+        && let Err(error) = r2.delete_object(&old_key).await
+    {
+        tracing::warn!(key = %old_key, error = ?error, "failed to delete replaced workspace logo");
+    }
+
+    let request_id = headers.get("x-request-id").and_then(|v| v.to_str().ok());
+    sqlx::query(
+        r#"
+        INSERT INTO audit_logs
+            (workspace_id, actor_user_id, action, subject_type, subject_id, metadata, request_id)
+        VALUES ($1, $2, 'workspace.logo_updated', 'workspace', $1, $3, $4)
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(user.id)
+    .bind(json!({ "contentType": content_type, "sizeBytes": body.len() }))
+    .bind(request_id)
+    .execute(&state.pool)
+    .await?;
+
+    let url = r2.presign_get_inline(&key).await?;
+    Ok(Json(json!({ "logoUrl": url })))
+}
+
+/// DELETE /api/workspaces/{workspace_id}/logo
+pub async fn remove_logo(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    Path(workspace_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> AppResult<Response> {
+    authz::require_permission(&state.pool, user.id, workspace_id, authz::WORKSPACE_MANAGE).await?;
+
+    let previous = db::workspaces::set_logo_key(&state.pool, workspace_id, None)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    if let Some(old_key) = previous {
+        if let Some(r2) = state.r2.as_ref()
+            && let Err(error) = r2.delete_object(&old_key).await
+        {
+            tracing::warn!(key = %old_key, error = ?error, "failed to delete removed workspace logo");
+        }
+        let request_id = headers.get("x-request-id").and_then(|v| v.to_str().ok());
+        sqlx::query(
+            r#"
+            INSERT INTO audit_logs
+                (workspace_id, actor_user_id, action, subject_type, subject_id, metadata, request_id)
+            VALUES ($1, $2, 'workspace.logo_removed', 'workspace', $1, $3, $4)
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(user.id)
+        .bind(json!({}))
+        .bind(request_id)
+        .execute(&state.pool)
+        .await?;
+    }
+
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// GET /api/workspaces/{workspace_id}/logo-url — short-lived presigned GET
+/// for the current logo, or null. Reads never 409 on missing R2 config.
+pub async fn logo_url(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    Path(workspace_id): Path<Uuid>,
+) -> AppResult<Json<serde_json::Value>> {
+    authz::require_permission(&state.pool, user.id, workspace_id, authz::CONTENT_READ).await?;
+
+    let workspace = db::workspaces::find_by_id(&state.pool, workspace_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    let url = match (workspace.logo_key.as_deref(), state.r2.as_ref()) {
+        (Some(key), Some(r2)) => Some(r2.presign_get_inline(key).await?),
+        _ => None,
+    };
+    Ok(Json(json!({ "url": url })))
 }
 
 /// Zero-config runners: when this deployment can provision hosted runners

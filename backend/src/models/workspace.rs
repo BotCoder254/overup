@@ -12,6 +12,7 @@ pub struct Workspace {
     pub slug: String,
     pub description: Option<String>,
     pub created_by: Uuid,
+    pub logo_key: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -44,4 +45,45 @@ pub struct WorkspaceSummary {
     pub id: Uuid,
     pub name: String,
     pub slug: String,
+}
+
+/// One row of the read-only members table in Settings → Workspace.
+#[derive(Debug, sqlx::FromRow)]
+pub struct WorkspaceMemberRow {
+    pub user_id: Uuid,
+    pub username: String,
+    pub display_name: Option<String>,
+    pub email: Option<String>,
+    pub avatar_url: Option<String>,
+    pub role_key: String,
+    pub role_name: String,
+    pub joined_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceMemberResponse {
+    pub user_id: Uuid,
+    pub username: String,
+    pub display_name: Option<String>,
+    pub email: Option<String>,
+    pub avatar_url: Option<String>,
+    pub role_key: String,
+    pub role_name: String,
+    pub joined_at: DateTime<Utc>,
+}
+
+impl From<WorkspaceMemberRow> for WorkspaceMemberResponse {
+    fn from(row: WorkspaceMemberRow) -> Self {
+        Self {
+            user_id: row.user_id,
+            username: row.username,
+            display_name: row.display_name,
+            email: row.email,
+            avatar_url: row.avatar_url,
+            role_key: row.role_key,
+            role_name: row.role_name,
+            joined_at: row.joined_at,
+        }
+    }
 }

@@ -27,6 +27,26 @@ export function describeEvent(event: ActivityEvent): EventDescription {
   switch (event.action) {
     case 'workspace.created':
       return { verb: 'created the workspace', subjectLabel: name };
+    case 'workspace.updated':
+      return { verb: 'renamed the workspace to', subjectLabel: name };
+    case 'workspace.logo_updated':
+      return { verb: 'updated the workspace logo', subjectLabel: null };
+    case 'workspace.logo_removed':
+      return { verb: 'removed the workspace logo', subjectLabel: null };
+    case 'user.profile_updated':
+      return { verb: 'updated their profile', subjectLabel: null };
+    case 'session.revoked':
+      return { verb: 'revoked a session', subjectLabel: null };
+    case 'sessions.revoked_all': {
+      const count = num(m, 'count');
+      return {
+        verb:
+          count !== null
+            ? `signed out ${count} other session${count === 1 ? '' : 's'}`
+            : 'signed out their other sessions',
+        subjectLabel: null,
+      };
+    }
     case 'installation.linked':
       return { verb: 'linked the GitHub App installation', subjectLabel: str(m, 'accountLogin') };
     case 'installation.unlinked':
@@ -203,7 +223,18 @@ export const ACTION_GROUPS: { category: ActivityCategory; actions: string[] }[] 
     actions: ['environment.created', 'environment.updated', 'environment.deleted'],
   },
   { category: 'integration', actions: ['installation.linked', 'installation.unlinked'] },
-  { category: 'workspace', actions: ['workspace.created'] },
+  {
+    category: 'workspace',
+    actions: [
+      'workspace.created',
+      'workspace.updated',
+      'workspace.logo_updated',
+      'workspace.logo_removed',
+      'user.profile_updated',
+      'session.revoked',
+      'sessions.revoked_all',
+    ],
+  },
 ];
 
 /** Actions whose subject row no longer exists — no page to link to. */

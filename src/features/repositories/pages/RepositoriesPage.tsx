@@ -1,10 +1,11 @@
-import { RefreshCw } from 'lucide-react';
-import { useEffect, useRef } from 'react';
+import { RefreshCw, Search } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { PageHeader } from '../../../components/layout/PageHeader';
 import { Button } from '../../../components/ui/Button';
 import { Card } from '../../../components/ui/Card';
+import { Input } from '../../../components/ui/Input';
 import { Spinner } from '../../../components/ui/Spinner';
 import type { AvailableRepo } from '../../../types/repository';
 import { AvailableRepoRow } from '../components/AvailableRepoRow';
@@ -23,6 +24,7 @@ export function RepositoriesPage() {
   const hasInstallation = (installations.data?.installations.length ?? 0) > 0;
   const available = useAvailableRepositories(hasInstallation);
   const importRepo = useImportRepository();
+  const [filter, setFilter] = useState('');
 
   // Landing back from the GitHub App setup redirect.
   const [searchParams, setSearchParams] = useSearchParams();
@@ -48,9 +50,40 @@ export function RepositoriesPage() {
     });
   };
 
-  const importable = available.data?.filter((repo) => !repo.connected) ?? [];
-  const connected = repositories.data ?? [];
+  const needle = filter.trim().toLowerCase();
+  const connected = useMemo(() => {
+    const rows = repositories.data ?? [];
+    if (!needle) return rows;
+    return rows.filter(
+      (repository) =>
+        repository.fullName.toLowerCase().includes(needle) ||
+        (repository.language ?? '').toLowerCase().includes(needle) ||
+        (repository.description ?? '').toLowerCase().includes(needle),
+    );
+  }, [repositories.data, needle]);
+  const importable = useMemo(() => {
+    const rows = available.data?.filter((repo) => !repo.connected) ?? [];
+    if (!needle) return rows;
+    return rows.filter((repo) => repo.fullName.toLowerCase().includes(needle));
+  }, [available.data, needle]);
+
   const loading = installations.isLoading || repositories.isLoading;
+  const refreshing =
+    repositories.isFetching || available.isFetching || installations.isFetching;
+
+  const onRefresh = () => {
+    void Promise.all([
+      repositories.refetch(),
+      installations.refetch(),
+      ...(hasInstallation ? [available.refetch()] : []),
+    ]).then((results) => {
+      if (results.some((result) => result.isError)) {
+        toast.error('Could not refresh repositories.');
+      } else {
+        toast.success('Repositories refreshed.');
+      }
+    });
+  };
 
   return (
     <>
@@ -59,13 +92,28 @@ export function RepositoriesPage() {
         description="Connect GitHub repositories to the workspace and keep their branches, workflows, and webhooks in sync."
         actions={
           <>
+            {hasInstallation && (
+              <div className="relative w-full sm:w-auto">
+                <Search
+                  size={14}
+                  className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-steel"
+                  aria-hidden="true"
+                />
+                <Input
+                  value={filter}
+                  onChange={(event) => setFilter(event.target.value)}
+                  placeholder="Search repositories…"
+                  aria-label="Search repositories"
+                  className="h-9 w-full pl-8 text-sm sm:w-56"
+                />
+              </div>
+            )}
             <Button
               size="sm"
               variant="ghost"
-              onClick={() => {
-                void repositories.refetch();
-                void available.refetch();
-              }}
+              onClick={onRefresh}
+              isLoading={refreshing}
+              disabled={refreshing}
               aria-label="Refresh repositories"
             >
               <RefreshCw size={14} aria-hidden="true" />
@@ -99,7 +147,9 @@ export function RepositoriesPage() {
             </h2>
             {connected.length === 0 ? (
               <Card className="p-8 text-center text-sm text-steel">
-                No repositories connected yet — import one from the list below.
+                {needle
+                  ? 'No connected repositories match that search.'
+                  : 'No repositories connected yet — import one from the list below.'}
               </Card>
             ) : (
               <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
@@ -128,8 +178,9 @@ export function RepositoriesPage() {
               </Card>
             ) : importable.length === 0 ? (
               <Card className="p-8 text-center text-sm text-steel">
-                Every repository this installation can see is already connected. Grant the app
-                access to more repositories on GitHub to see them here.
+                {needle
+                  ? 'No importable repositories match that search.'
+                  : 'Every repository this installation can see is already connected. Grant the app access to more repositories on GitHub to see them here.'}
               </Card>
             ) : (
               <Card>

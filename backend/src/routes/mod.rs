@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::http::{HeaderName, HeaderValue, Method, header};
-use axum::routing::{delete, get, post, put};
+use axum::routing::{delete, get, patch, post, put};
 use axum::{Router, middleware as axum_middleware};
 use tower_governor::GovernorLayer;
 use tower_governor::governor::GovernorConfigBuilder;
@@ -14,7 +14,7 @@ use crate::error::AppError;
 use crate::handlers::{
     activity, artifacts, auth, browser_ws, dashboard, dashboard_ws, environments,
     github_installations, github_webhooks, health, jobs, me, pipelines, repositories, runner_ws,
-    runners, search, secrets, workflows, workspaces, ws_tickets,
+    runners, search, secrets, sessions, workflows, workspaces, ws_tickets,
 };
 use crate::middleware::{csrf, security_headers};
 use crate::state::AppState;
@@ -24,11 +24,21 @@ const MAX_BODY_BYTES: usize = 64 * 1024;
 /// Webhook payloads (push events especially) and editor validation content
 /// legitimately exceed the browser budget.
 const LARGE_BODY_BYTES: usize = 1024 * 1024;
+/// Workspace logo uploads: raw image bytes through the backend (magic-byte
+/// verification happens server-side). Slightly above the 2 MiB image cap so
+/// the handler — not the transport layer — produces the friendly error.
+const LOGO_BODY_BYTES: usize = 2 * 1024 * 1024 + 1024;
 const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 
 pub fn build_router(state: AppState) -> anyhow::Result<Router> {
     // Brute-force / abuse protection on the authentication surface,
-    // keyed by peer IP.
+    // keyed by peer IP. Every governor below deliberately keys on the SOCKET
+    // peer address, even behind a reverse proxy where that collapses all
+    // clients into one bucket: forwarded-header extractors trust the
+    // client-controlled leftmost X-Forwarded-For hop, which would let any
+    // client rotate spoofed IPs and bypass rate limiting entirely.
+    // Bypass-resistance beats per-client fairness here. (TRUST_PROXY only
+    // affects the display IP recorded on sessions — see services/session.)
     let governor_config = Arc::new(
         GovernorConfigBuilder::default()
             .per_second(2)
@@ -109,15 +119,61 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
             .finish()
             .expect("valid governor configuration"),
     );
+    // Account-sensitive mutations (profile edits, session revocation,
+    // account deletion) get the strict write budget.
+    let account_governor = Arc::new(
+        GovernorConfigBuilder::default()
+            .per_second(1)
+            .burst_size(5)
+            .finish()
+            .expect("valid governor configuration"),
+    );
+    // Workspace settings mutations (rename, logo) share the same shape.
+    let workspace_settings_governor = Arc::new(
+        GovernorConfigBuilder::default()
+            .per_second(1)
+            .burst_size(5)
+            .finish()
+            .expect("valid governor configuration"),
+    );
 
     // Standard API routes live under the browser body budget. Every handler
     // authenticates via CurrentUser and authorizes via workspace membership
     // permissions (services::authz).
     let api_standard = Router::new()
-        .route("/me", get(me::get_me))
+        .route(
+            "/me",
+            get(me::get_me).merge(
+                patch(me::update_me)
+                    .delete(me::delete_me)
+                    .layer(GovernorLayer::new(account_governor.clone())),
+            ),
+        )
+        .route("/me/sessions", get(sessions::list))
+        .route(
+            "/me/sessions/revoke-all",
+            post(sessions::revoke_all).layer(GovernorLayer::new(account_governor.clone())),
+        )
+        .route(
+            "/me/sessions/{session_id}",
+            delete(sessions::revoke).layer(GovernorLayer::new(account_governor)),
+        )
         .route(
             "/workspaces",
             post(workspaces::create_workspace).layer(GovernorLayer::new(workspace_governor)),
+        )
+        .route(
+            "/workspaces/{workspace_id}",
+            patch(workspaces::update_workspace)
+                .layer(GovernorLayer::new(workspace_settings_governor.clone())),
+        )
+        .route(
+            "/workspaces/{workspace_id}/members",
+            get(workspaces::list_members),
+        )
+        .route(
+            "/workspaces/{workspace_id}/logo-url",
+            get(workspaces::logo_url),
         )
         .route(
             "/workspaces/{workspace_id}/installations",
@@ -305,9 +361,21 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
         )
         .layer(RequestBodyLimitLayer::new(LARGE_BODY_BYTES));
 
+    // Workspace logo uploads carry raw image bytes, so they need their own
+    // body budget — a sibling sub-router, NOT inside api_standard, whose
+    // 64 KiB layer would cap them.
+    let api_logo = Router::new()
+        .route(
+            "/workspaces/{workspace_id}/logo",
+            put(workspaces::upload_logo).delete(workspaces::remove_logo),
+        )
+        .layer(GovernorLayer::new(workspace_settings_governor))
+        .layer(RequestBodyLimitLayer::new(LOGO_BODY_BYTES));
+
     let api_routes = Router::new()
         .merge(api_standard)
         .merge(api_validate)
+        .merge(api_logo)
         .layer(GovernorLayer::new(api_governor));
 
     // GitHub webhooks: server-to-server, authenticated by HMAC signature —

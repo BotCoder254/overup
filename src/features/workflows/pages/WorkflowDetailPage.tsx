@@ -1,15 +1,18 @@
-import { ExternalLink, Info } from 'lucide-react';
+import { ExternalLink, Info, Play } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { Group, Panel, Separator } from 'react-resizable-panels';
 import { PageHeader } from '../../../components/layout/PageHeader';
+import { Button } from '../../../components/ui/Button';
 import { Spinner } from '../../../components/ui/Spinner';
 import { Tabs } from '../../../components/ui/Tabs';
 import { workspacePath } from '../../../app/navigation';
 import type { ValidateResponse } from '../../../types/workflow';
 import { JobsPanel } from '../components/JobsPanel';
 import { MetadataPanel } from '../components/MetadataPanel';
+import { RunWorkflowDialog } from '../components/RunWorkflowDialog';
 import { ValidationBadge } from '../components/ValidationBadge';
+import { WorkflowMetaStrip } from '../components/WorkflowMetaStrip';
 import { ValidationPanel } from '../components/ValidationPanel';
 import { WorkflowEditor } from '../components/WorkflowEditor';
 import { WorkflowGraph, type GraphJob } from '../components/WorkflowGraph';
@@ -41,6 +44,7 @@ export function WorkflowDetailPage() {
   const [tab, setTab] = useState<TabId>('graph');
   const [selectedJob, setSelectedJob] = useState<string | null>(null);
   const [revealLine, setRevealLine] = useState<number | null>(null);
+  const [runOpen, setRunOpen] = useState(false);
 
   const workflow = detail.data;
 
@@ -125,12 +129,33 @@ export function WorkflowDetailPage() {
               <ExternalLink size={14} aria-hidden="true" />
               View on GitHub
             </a>
+            <Button
+              size="sm"
+              onClick={() => setRunOpen(true)}
+              disabled={workflow.validationStatus === 'errors'}
+              title={
+                workflow.validationStatus === 'errors'
+                  ? 'This workflow has validation errors and cannot run.'
+                  : undefined
+              }
+            >
+              <Play size={14} aria-hidden="true" />
+              Run workflow
+            </Button>
           </>
         }
+      />
+      <RunWorkflowDialog
+        open={runOpen}
+        onClose={() => setRunOpen(false)}
+        workflow={workflow}
+        workspaceSlug={slug}
       />
       <p className="-mt-4 mb-4 font-mono text-xs text-steel">
         {workflow.repoFullName} · {workflow.path}
       </p>
+
+      <WorkflowMetaStrip workflow={workflow} slug={slug} />
 
       <div className="mb-3 flex items-center gap-2 rounded border border-steel/20 bg-surface px-3 py-2 text-xs text-steel">
         <Info size={13} className="shrink-0" aria-hidden="true" />

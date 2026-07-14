@@ -20,6 +20,9 @@ pub const SECRETS_MANAGE: &str = "secrets.manage";
 pub const ENVIRONMENTS_MANAGE: &str = "environments.manage";
 /// Read the workspace activity feed (the audit_logs ledger). All roles.
 pub const AUDIT_READ: &str = "audit.read";
+/// Rename the workspace / manage its logo. Owner + admin roles (seeded
+/// since original provisioning — no backfill needed).
+pub const WORKSPACE_MANAGE: &str = "workspace.manage";
 
 pub async fn require_permission(
     pool: &PgPool,

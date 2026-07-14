@@ -87,14 +87,26 @@ export async function rerunPipeline(
   return body.pipeline;
 }
 
+export interface DispatchOptions {
+  branch?: string;
+  /** Optional explicit commit (7-40 hex chars); defaults to the branch head. */
+  commitSha?: string;
+  /** workflow_dispatch-style inputs; validated server-side. */
+  inputs?: Record<string, string | number | boolean>;
+}
+
 export async function dispatchWorkflow(
   workspaceId: string,
   workflowId: string,
-  branch?: string,
+  options: DispatchOptions = {},
 ): Promise<Pipeline> {
   const body = await api
     .post(`/api/workspaces/${workspaceId}/workflows/${workflowId}/dispatch`, {
-      json: { branch: branch ?? null },
+      json: {
+        branch: options.branch ?? null,
+        commitSha: options.commitSha ?? null,
+        inputs: options.inputs ?? null,
+      },
     })
     .json<{ pipeline: Pipeline }>();
   return body.pipeline;

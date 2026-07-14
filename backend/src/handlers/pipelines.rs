@@ -255,6 +255,8 @@ pub async fn rerun(
         commit_message: original.commit_message.as_deref(),
         commit_author: original.commit_author.as_deref(),
         git_ref: &original.git_ref,
+        // Reruns reproduce the original run, inputs included.
+        inputs: original.trigger_inputs.as_ref(),
         request_id,
     };
     let pipeline = pipeline_run::create_pipeline(
@@ -293,12 +295,135 @@ pub async fn rerun(
 pub struct DispatchRequest {
     #[serde(default)]
     branch: Option<String>,
+    /// Optional explicit commit (7-40 hex chars). Defaults to the branch head.
+    #[serde(default)]
+    commit_sha: Option<String>,
+    /// workflow_dispatch-style inputs, validated against the workflow's
+    /// parsed input definitions before anything is scheduled.
+    #[serde(default)]
+    inputs: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+/// Caps for submitted dispatch inputs (defense in depth on top of the
+/// parser's own definition caps).
+const MAX_INPUT_VALUE_BYTES: usize = 1024;
+const MAX_INPUTS_TOTAL_BYTES: usize = 16 * 1024;
+
+/// Validate submitted inputs against the workflow's parsed
+/// `on.workflow_dispatch.inputs` definitions and produce the effective map
+/// (defaults first, then submitted values). Everything the client sent is
+/// checked: unknown names, type mismatches, choice membership, missing
+/// required values, and size caps all reject with a 422. Returns `None`
+/// when the workflow defines no inputs and none were submitted.
+fn validate_dispatch_inputs(
+    definitions: &[serde_json::Value],
+    submitted: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> AppResult<Option<serde_json::Value>> {
+    let submitted_len = submitted.map(|m| m.len()).unwrap_or(0);
+    if definitions.is_empty() {
+        if submitted_len > 0 {
+            return Err(AppError::Validation(
+                "this workflow does not define workflow_dispatch inputs".into(),
+            ));
+        }
+        return Ok(None);
+    }
+
+    let mut effective = serde_json::Map::new();
+    let mut known: Vec<&str> = Vec::with_capacity(definitions.len());
+
+    for def in definitions {
+        let Some(name) = def["name"].as_str() else {
+            continue;
+        };
+        known.push(name);
+        let input_type = def["type"].as_str().unwrap_or("string");
+        let required = def["required"].as_bool().unwrap_or(false);
+        let default = def["default"].as_str();
+        let options: Vec<&str> = def["options"]
+            .as_array()
+            .map(|opts| opts.iter().filter_map(|o| o.as_str()).collect())
+            .unwrap_or_default();
+
+        let value = submitted.and_then(|m| m.get(name));
+        let resolved = match value {
+            Some(value) => {
+                // Type check against the declared input type; choice values
+                // must be members of the declared options.
+                let ok = match input_type {
+                    "boolean" => value.is_boolean(),
+                    "number" => value.is_number(),
+                    // A choice without declared options has no valid values —
+                    // reject rather than accept arbitrary strings.
+                    "choice" => value
+                        .as_str()
+                        .is_some_and(|s| !options.is_empty() && options.contains(&s)),
+                    // string | environment
+                    _ => value.is_string(),
+                };
+                if !ok {
+                    return Err(AppError::Validation(format!(
+                        "input `{name}` has an invalid value for type `{input_type}`"
+                    )));
+                }
+                if serde_json::to_string(value)
+                    .map(|s| s.len())
+                    .unwrap_or(usize::MAX)
+                    > MAX_INPUT_VALUE_BYTES
+                {
+                    return Err(AppError::Validation(format!("input `{name}` is too large")));
+                }
+                Some(value.clone())
+            }
+            None => match default {
+                // Defaults were stringified at parse time; coerce back to
+                // the declared type so env injection stays consistent.
+                Some(default) => Some(match input_type {
+                    "boolean" => serde_json::Value::Bool(default == "true"),
+                    "number" => default
+                        .parse::<f64>()
+                        .ok()
+                        .and_then(|n| serde_json::Number::from_f64(n).map(serde_json::Value::Number))
+                        .unwrap_or_else(|| serde_json::Value::String(default.to_string())),
+                    _ => serde_json::Value::String(default.to_string()),
+                }),
+                None if required => {
+                    return Err(AppError::Validation(format!(
+                        "required input `{name}` is missing"
+                    )));
+                }
+                None => None,
+            },
+        };
+        if let Some(resolved) = resolved {
+            effective.insert(name.to_string(), resolved);
+        }
+    }
+
+    if let Some(submitted) = submitted {
+        for name in submitted.keys() {
+            if !known.contains(&name.as_str()) {
+                return Err(AppError::Validation(format!("unknown input `{name}`")));
+            }
+        }
+    }
+
+    let effective = serde_json::Value::Object(effective);
+    if serde_json::to_string(&effective)
+        .map(|s| s.len())
+        .unwrap_or(usize::MAX)
+        > MAX_INPUTS_TOTAL_BYTES
+    {
+        return Err(AppError::Validation("inputs are too large".into()));
+    }
+    Ok(Some(effective))
 }
 
 /// POST /api/workspaces/{workspace_id}/workflows/{workflow_id}/dispatch
 ///
 /// Manual trigger: runs the workflow's stored revision against the head of
-/// the requested branch (default branch when omitted).
+/// the requested branch (default branch when omitted), optionally pinned to
+/// an explicit commit, with validated workflow_dispatch inputs.
 pub async fn dispatch(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
@@ -327,15 +452,41 @@ pub async fn dispatch(
         .find(|b| b.name == branch_name)
         .ok_or_else(|| AppError::Validation("unknown branch".into()))?;
 
+    // Optional explicit commit pin: hex-validated and lowercased; the ref
+    // still names the resolved branch.
+    let commit_sha = match body.commit_sha.as_deref().map(str::trim) {
+        None | Some("") => branch.commit_sha.clone(),
+        Some(sha)
+            if (7..=40).contains(&sha.len()) && sha.chars().all(|c| c.is_ascii_hexdigit()) =>
+        {
+            sha.to_ascii_lowercase()
+        }
+        Some(_) => {
+            return Err(AppError::Validation(
+                "commit sha must be 7-40 hexadecimal characters".into(),
+            ));
+        }
+    };
+
+    // Inputs validate against a fresh authoritative re-parse of the stored
+    // workflow content — never against client-supplied or stale metadata.
+    let parsed = crate::services::workflow_parse::parse_and_validate(&workflow.raw_content);
+    let empty = Vec::new();
+    let definitions = parsed.metadata["dispatchInputs"]
+        .as_array()
+        .unwrap_or(&empty);
+    let inputs = validate_dispatch_inputs(definitions, body.inputs.as_ref())?;
+
     let git_ref = format!("refs/heads/{}", branch.name);
     let request_id = headers.get("x-request-id").and_then(|v| v.to_str().ok());
     let ctx = pipeline_run::TriggerContext {
         trigger: "manual",
         triggered_by: Some(user.id),
-        commit_sha: &branch.commit_sha,
+        commit_sha: &commit_sha,
         commit_message: None,
         commit_author: Some(&user.username),
         git_ref: &git_ref,
+        inputs: inputs.as_ref(),
         request_id,
     };
     let pipeline = pipeline_run::create_pipeline(
@@ -663,5 +814,75 @@ mod tests {
         let mut query = empty_query();
         query.created_before = Some("not-a-date".into());
         assert!(build_list_filter(&query, None, 50).is_err());
+    }
+
+    fn defs() -> Vec<serde_json::Value> {
+        vec![
+            json!({ "name": "environment", "type": "choice", "required": true,
+                    "options": ["staging", "production"] }),
+            json!({ "name": "dry_run", "type": "boolean", "required": false,
+                    "default": "true" }),
+            json!({ "name": "note", "type": "string", "required": false }),
+        ]
+    }
+
+    fn map(pairs: &[(&str, serde_json::Value)]) -> serde_json::Map<String, serde_json::Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn dispatch_inputs_defaults_and_required() {
+        // Missing required input rejects.
+        assert!(validate_dispatch_inputs(&defs(), None).is_err());
+
+        // Required satisfied; default fills the boolean; optional absent.
+        let submitted = map(&[("environment", json!("staging"))]);
+        let effective = validate_dispatch_inputs(&defs(), Some(&submitted))
+            .unwrap()
+            .unwrap();
+        assert_eq!(effective["environment"], "staging");
+        assert_eq!(effective["dry_run"], json!(true));
+        assert!(effective.get("note").is_none());
+    }
+
+    #[test]
+    fn dispatch_inputs_reject_unknown_type_mismatch_and_bad_choice() {
+        let submitted = map(&[("environment", json!("staging")), ("ghost", json!("x"))]);
+        assert!(validate_dispatch_inputs(&defs(), Some(&submitted)).is_err());
+
+        let submitted = map(&[("environment", json!("staging")), ("dry_run", json!("yes"))]);
+        assert!(validate_dispatch_inputs(&defs(), Some(&submitted)).is_err());
+
+        let submitted = map(&[("environment", json!("nonexistent"))]);
+        assert!(validate_dispatch_inputs(&defs(), Some(&submitted)).is_err());
+    }
+
+    #[test]
+    fn choice_without_options_rejects_any_value() {
+        let defs = vec![json!({ "name": "target", "type": "choice", "required": false })];
+        let submitted = map(&[("target", json!("anything"))]);
+        assert!(validate_dispatch_inputs(&defs, Some(&submitted)).is_err());
+        // Omitting the optional option-less choice is still fine.
+        let effective = validate_dispatch_inputs(&defs, None).unwrap().unwrap();
+        assert!(effective.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn dispatch_inputs_none_defined() {
+        // No definitions + no submission → no inputs at all.
+        assert_eq!(validate_dispatch_inputs(&[], None).unwrap(), None);
+        // No definitions + submission → reject.
+        let submitted = map(&[("anything", json!("x"))]);
+        assert!(validate_dispatch_inputs(&[], Some(&submitted)).is_err());
+    }
+
+    #[test]
+    fn dispatch_inputs_enforce_size_caps() {
+        let defs = vec![json!({ "name": "note", "type": "string", "required": false })];
+        let submitted = map(&[("note", json!("x".repeat(MAX_INPUT_VALUE_BYTES + 1)))]);
+        assert!(validate_dispatch_inputs(&defs, Some(&submitted)).is_err());
     }
 }

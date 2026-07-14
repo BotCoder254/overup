@@ -14,6 +14,12 @@ use uuid::Uuid;
 /// before SQL.
 pub const ACTIONS: &[&str] = &[
     "workspace.created",
+    "workspace.updated",
+    "workspace.logo_updated",
+    "workspace.logo_removed",
+    "user.profile_updated",
+    "session.revoked",
+    "sessions.revoked_all",
     "installation.linked",
     "installation.unlinked",
     "repository.imported",
@@ -69,7 +75,9 @@ impl Severity {
 /// Feed category derived from the action prefix.
 pub fn category(action: &str) -> &'static str {
     match action.split('.').next().unwrap_or("") {
-        "workspace" => "workspace",
+        // Account-level events (profile, sessions) surface in the workspace
+        // feed under the workspace category.
+        "workspace" | "user" | "session" | "sessions" => "workspace",
         "installation" => "integration",
         "repository" => "repository",
         // Job-level entries roll up into the pipeline category.
@@ -93,6 +101,8 @@ pub fn classify(action: &str, metadata: &serde_json::Value) -> (Severity, &'stat
                 | "runner.revoked"
                 | "installation.linked"
                 | "installation.unlinked"
+                | "session.revoked"
+                | "sessions.revoked_all"
         );
 
     let severity = match action {
@@ -107,7 +117,7 @@ pub fn classify(action: &str, metadata: &serde_json::Value) -> (Severity, &'stat
             }
         }
         "pipeline.cancelled" | "job.cancelled" | "runner.drained" | "runner.disabled"
-        | "artifact.deleted" => Severity::Warning,
+        | "artifact.deleted" | "session.revoked" | "sessions.revoked_all" => Severity::Warning,
         "installation.unlinked" | "repository.removed" | "runner.revoked"
         | "runner.token_regenerated" | "runner.provision_failed" | "secret.deleted"
         | "environment.deleted" => Severity::Danger,
@@ -227,6 +237,8 @@ mod tests {
             "runner.revoked",
             "installation.linked",
             "installation.unlinked",
+            "session.revoked",
+            "sessions.revoked_all",
         ] {
             let (_, _, security) = classify(action, &json!({}));
             assert!(security, "{action} must carry the security flag");
@@ -249,5 +261,8 @@ mod tests {
         assert_eq!(classify("runner.drained", &json!({})).0, Severity::Warning);
         assert_eq!(classify("environment.deleted", &json!({})).0, Severity::Danger);
         assert_eq!(classify("artifact.downloaded", &json!({})).0, Severity::Info);
+        assert_eq!(classify("workspace.updated", &json!({})).0, Severity::Info);
+        assert_eq!(classify("user.profile_updated", &json!({})).0, Severity::Info);
+        assert_eq!(classify("session.revoked", &json!({})).0, Severity::Warning);
     }
 }

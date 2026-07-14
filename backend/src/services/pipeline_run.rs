@@ -26,7 +26,37 @@ pub struct TriggerContext<'a> {
     pub commit_message: Option<&'a str>,
     pub commit_author: Option<&'a str>,
     pub git_ref: &'a str,
+    /// Validated workflow_dispatch-style inputs (manual dispatch/rerun only).
+    /// Always an object; values are strings/numbers/booleans, already checked
+    /// against the workflow's parsed input definitions by the handler.
+    pub inputs: Option<&'a serde_json::Value>,
     pub request_id: Option<&'a str>,
+}
+
+/// `INPUT_<NAME>` env var name for a dispatch input, GitHub-actions style:
+/// uppercased, with every non-alphanumeric character mapped to `_`.
+fn input_env_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 6);
+    out.push_str("INPUT_");
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_uppercase());
+        } else {
+            out.push('_');
+        }
+    }
+    out
+}
+
+/// Stringify an input value for the job environment (booleans/numbers arrive
+/// typed from validation; env vars are strings).
+fn input_env_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        other => other.to_string(),
+    }
 }
 
 /// Plan and persist a new pipeline for one workflow, then wake the
@@ -70,6 +100,25 @@ pub async fn create_pipeline(
         }
     }
 
+    // Manual dispatch inputs ride into every job's snapshotted plan env as
+    // INPUT_<NAME>. Inputs are non-secret by definition (values were
+    // validated + capped by the handler); confidential-looking values still
+    // get masked by the existing plan-response and log-hub paths.
+    if let Some(inputs) = ctx.inputs.and_then(serde_json::Value::as_object)
+        && !inputs.is_empty()
+    {
+        for plan in &mut plans {
+            if let Some(env) = plan.plan["env"].as_object_mut() {
+                for (name, value) in inputs {
+                    env.insert(
+                        input_env_name(name),
+                        serde_json::Value::String(input_env_value(value)),
+                    );
+                }
+            }
+        }
+    }
+
     let new = db::pipelines::NewPipeline {
         workspace_id: repository.workspace_id,
         repository_id: repository.id,
@@ -82,6 +131,7 @@ pub async fn create_pipeline(
         commit_message: ctx.commit_message,
         commit_author: ctx.commit_author,
         git_ref: ctx.git_ref,
+        trigger_inputs: ctx.inputs,
         timeout_seconds: state.config.pipeline_timeout_seconds,
         job_timeout_seconds: state.config.job_timeout_seconds,
         request_id: ctx.request_id,

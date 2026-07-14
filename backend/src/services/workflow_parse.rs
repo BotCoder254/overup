@@ -213,6 +213,7 @@ pub fn parse_and_validate(content: &str) -> ParsedWorkflow {
             .map(|m| m.keys().filter_map(key_name).collect::<Vec<_>>())
             .unwrap_or_default(),
         "secretRefs": scan_secret_refs(content),
+        "dispatchInputs": extract_dispatch_inputs(root, &mut diagnostics),
     });
 
     ParsedWorkflow {
@@ -293,6 +294,146 @@ fn extract_triggers(root: &Mapping, diagnostics: &mut Vec<Diagnostic>) -> Vec<St
         ));
     }
     triggers
+}
+
+/// Caps for `on.workflow_dispatch.inputs` extraction. GitHub itself allows
+/// at most 25 top-level inputs; the string caps bound stored metadata.
+const MAX_DISPATCH_INPUTS: usize = 25;
+const MAX_INPUT_NAME_LEN: usize = 64;
+const MAX_INPUT_DESCRIPTION_LEN: usize = 500;
+const MAX_INPUT_DEFAULT_LEN: usize = 1024;
+const MAX_INPUT_OPTIONS: usize = 50;
+const MAX_INPUT_OPTION_LEN: usize = 200;
+
+/// Input types GitHub's manual-trigger schema defines. Unknown types
+/// degrade to `string` with a warning rather than failing the workflow.
+const DISPATCH_INPUT_TYPES: &[&str] = &["string", "number", "boolean", "choice", "environment"];
+
+fn is_valid_input_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && name.len() <= MAX_INPUT_NAME_LEN
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Structured `on.workflow_dispatch.inputs` — the definitions that drive the
+/// Run Workflow form and the server-side validation of submitted inputs.
+/// Everything is capped and allow-listed; malformed entries become warnings
+/// and are dropped, never hard failures (the workflow still runs without
+/// them). Returns an empty array when the trigger or its inputs are absent.
+fn extract_dispatch_inputs(root: &Mapping, diagnostics: &mut Vec<Diagnostic>) -> serde_json::Value {
+    // Same YAML 1.1 quirk as extract_triggers: `on` may be the bool key.
+    let on = root
+        .get(Value::String("on".into()))
+        .or_else(|| root.get(Value::Bool(true)));
+    let inputs = on
+        .and_then(Value::as_mapping)
+        .and_then(|events| get(events, "workflow_dispatch"))
+        .and_then(Value::as_mapping)
+        .and_then(|dispatch| get(dispatch, "inputs"))
+        .and_then(Value::as_mapping);
+    let Some(inputs) = inputs else {
+        return serde_json::json!([]);
+    };
+
+    if inputs.len() > MAX_DISPATCH_INPUTS {
+        diagnostics.push(Diagnostic::warning(
+            format!(
+                "workflow_dispatch defines more than {MAX_DISPATCH_INPUTS} inputs; \
+                 extras are ignored"
+            ),
+            Some("on.workflow_dispatch.inputs".into()),
+        ));
+    }
+
+    let mut out = Vec::new();
+    for (key, body) in inputs.iter().take(MAX_DISPATCH_INPUTS) {
+        let path = "on.workflow_dispatch.inputs".to_string();
+        let Some(name) = key_name(key).filter(|n| is_valid_input_name(n)) else {
+            diagnostics.push(Diagnostic::warning(
+                "workflow_dispatch input with an invalid name was ignored".to_string(),
+                Some(path),
+            ));
+            continue;
+        };
+        // GitHub allows a bare `input_name:` (null body) — all defaults.
+        let empty = Mapping::new();
+        let body = match body {
+            Value::Null => &empty,
+            other => match other.as_mapping() {
+                Some(map) => map,
+                None => {
+                    diagnostics.push(Diagnostic::warning(
+                        format!("workflow_dispatch input `{name}` must be a mapping"),
+                        Some(format!("{path}.{name}")),
+                    ));
+                    continue;
+                }
+            },
+        };
+
+        let declared_type = get(body, "type").and_then(Value::as_str).unwrap_or("string");
+        let input_type = if DISPATCH_INPUT_TYPES.contains(&declared_type) {
+            declared_type
+        } else {
+            diagnostics.push(Diagnostic::warning(
+                format!(
+                    "workflow_dispatch input `{name}` has unknown type `{}`; treated as string",
+                    declared_type.chars().take(50).collect::<String>()
+                ),
+                Some(format!("{path}.{name}.type")),
+            ));
+            "string"
+        };
+
+        let required = get(body, "required").and_then(Value::as_bool).unwrap_or(false);
+        let description = get(body, "description")
+            .and_then(Value::as_str)
+            .map(|s| s.chars().take(MAX_INPUT_DESCRIPTION_LEN).collect::<String>());
+        // Defaults are stringified: booleans/numbers arrive as scalars but
+        // the execution env is string-typed anyway.
+        let default = get(body, "default").and_then(|v| match v {
+            Value::String(s) => Some(s.chars().take(MAX_INPUT_DEFAULT_LEN).collect::<String>()),
+            Value::Bool(b) => Some(b.to_string()),
+            Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        });
+        let options: Vec<String> = get(body, "options")
+            .and_then(Value::as_sequence)
+            .map(|seq| {
+                seq.iter()
+                    .filter_map(Value::as_str)
+                    .filter(|s| !s.is_empty() && s.len() <= MAX_INPUT_OPTION_LEN)
+                    .map(str::to_string)
+                    .take(MAX_INPUT_OPTIONS)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if input_type == "choice" && options.is_empty() {
+            diagnostics.push(Diagnostic::warning(
+                format!("workflow_dispatch choice input `{name}` defines no options"),
+                Some(format!("{path}.{name}.options")),
+            ));
+        }
+
+        let mut entry = serde_json::json!({
+            "name": name,
+            "type": input_type,
+            "required": required,
+        });
+        if let Some(description) = description {
+            entry["description"] = serde_json::Value::String(description);
+        }
+        if let Some(default) = default {
+            entry["default"] = serde_json::Value::String(default);
+        }
+        if !options.is_empty() {
+            entry["options"] = serde_json::json!(options);
+        }
+        out.push(entry);
+    }
+    serde_json::Value::Array(out)
 }
 
 fn extract_jobs(root: &Mapping, diagnostics: &mut Vec<Diagnostic>) -> Vec<ParsedJob> {
@@ -739,6 +880,73 @@ e: [*d,*d,*d,*d,*d,*d,*d,*d,*d,*d]
             "on: push\ntypo_key: 1\njobs:\n  a:\n    steps: []\n    runs-on: x\n",
         );
         assert_eq!(parsed.status(), "warnings");
+    }
+
+    #[test]
+    fn extracts_workflow_dispatch_inputs() {
+        let parsed = parse_and_validate(
+            r#"
+on:
+  push:
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        description: Target environment
+        required: true
+        options: [staging, production]
+      dry_run:
+        type: boolean
+        default: true
+      note:
+jobs:
+  a:
+    runs-on: x
+    steps: []
+"#,
+        );
+        assert_eq!(parsed.status(), "valid");
+        let inputs = parsed.metadata["dispatchInputs"].as_array().unwrap();
+        assert_eq!(inputs.len(), 3);
+        assert_eq!(inputs[0]["name"], "environment");
+        assert_eq!(inputs[0]["type"], "choice");
+        assert_eq!(inputs[0]["required"], true);
+        assert_eq!(inputs[0]["options"][1], "production");
+        assert_eq!(inputs[1]["name"], "dry_run");
+        assert_eq!(inputs[1]["default"], "true");
+        assert_eq!(inputs[2]["name"], "note");
+        assert_eq!(inputs[2]["type"], "string");
+        assert_eq!(inputs[2]["required"], false);
+    }
+
+    #[test]
+    fn dispatch_inputs_absent_or_bool_on_yield_empty_array() {
+        let parsed = parse_and_validate("on: [push]\njobs:\n  a:\n    steps: []\n    runs-on: x\n");
+        assert_eq!(parsed.metadata["dispatchInputs"], serde_json::json!([]));
+        // Bare workflow_dispatch with no inputs.
+        let parsed = parse_and_validate(
+            "on:\n  workflow_dispatch:\njobs:\n  a:\n    steps: []\n    runs-on: x\n",
+        );
+        assert_eq!(parsed.metadata["dispatchInputs"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn dispatch_inputs_enforce_caps_and_type_allow_list() {
+        let mut yaml = String::from("on:\n  workflow_dispatch:\n    inputs:\n");
+        for i in 0..30 {
+            yaml.push_str(&format!("      input_{i}:\n        type: strange\n"));
+        }
+        yaml.push_str("jobs:\n  a:\n    steps: []\n    runs-on: x\n");
+        let parsed = parse_and_validate(&yaml);
+        let inputs = parsed.metadata["dispatchInputs"].as_array().unwrap();
+        assert_eq!(inputs.len(), MAX_DISPATCH_INPUTS);
+        assert!(inputs.iter().all(|i| i["type"] == "string"));
+        assert!(
+            parsed
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("more than"))
+        );
     }
 
     #[test]

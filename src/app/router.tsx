@@ -24,6 +24,7 @@ import { SecretDetailPage } from '../features/secrets/pages/SecretDetailPage';
 import { EnvironmentsPage } from '../features/environments/pages/EnvironmentsPage';
 import { EnvironmentDetailPage } from '../features/environments/pages/EnvironmentDetailPage';
 import { SearchPage } from '../features/search/pages/SearchPage';
+import { SettingsPage } from '../features/settings/pages/SettingsPage';
 import { NAV_ITEMS } from './navigation';
 import { ProtectedRoute } from './guards/ProtectedRoute';
 import { PublicOnlyRoute } from './guards/PublicOnlyRoute';
@@ -40,6 +41,7 @@ const IMPLEMENTED_SEGMENTS = new Set([
   'runners',
   'secrets',
   'environments',
+  'settings',
 ]);
 
 /** Legacy /dashboard entry point: forward to the slug-routed workspace. */
@@ -89,6 +91,7 @@ export const router = createBrowserRouter([
               { path: 'secrets/:secretId', element: <SecretDetailPage /> },
               { path: 'environments', element: <EnvironmentsPage /> },
               { path: 'environments/:environmentId', element: <EnvironmentDetailPage /> },
+              { path: 'settings', element: <SettingsPage /> },
               // Not a nav item — reached from the sidebar input, the
               // command palette's "See all results", or a shared URL.
               { path: 'search', element: <SearchPage /> },
