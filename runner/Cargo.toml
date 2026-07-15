@@ -8,6 +8,9 @@ anyhow = "1"
 # `ssl` (rustls + ring) enables remote TLS daemons: DOCKER_HOST=tcp://…:2376
 # with DOCKER_TLS_VERIFY=1 and DOCKER_CERT_PATH pointing at ca/cert/key.pem.
 bollard = { version = "0.21", features = ["ssl"] }
+# Source/artifacts move over the Docker archive API (docker cp), so we hand
+# bollard a `Bytes` tar body via `bollard::body_full`.
+bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 dotenvy = "0.15"
 flate2 = "1"
