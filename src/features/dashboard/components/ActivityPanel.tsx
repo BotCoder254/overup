@@ -8,7 +8,7 @@ import { Button } from '../../../components/ui/Button';
 import { EmptyState } from '../../../components/ui/EmptyState';
 import { Spinner } from '../../../components/ui/Spinner';
 import { describeEvent, eventLink, severityBadgeVariant } from '../../activity/lib/eventPresentation';
-import { useActivityFeed } from '../../activity/hooks/useActivity';
+import { useDashboardActivityFeed } from '../hooks/useDashboard';
 import type { ActivityEvent } from '../../../types/activity';
 
 interface ActivityPanelProps {
@@ -58,7 +58,7 @@ function ActivityRow({ event, slug }: { event: ActivityEvent; slug: string }) {
  * The full, filterable timeline lives on the Activity page.
  */
 export function ActivityPanel({ slug, connected }: ActivityPanelProps) {
-  const query = useActivityFeed({}, connected);
+  const query = useDashboardActivityFeed(connected);
   const events = (query.data?.pages ?? []).flatMap((page) => page.events);
 
   const sentinelRef = useRef<HTMLDivElement | null>(null);

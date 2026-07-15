@@ -6,7 +6,7 @@ import type { Runner } from '../../../types/runner';
 import type { WorkspaceStreamEvent } from '../../../types/dashboard';
 import { useWorkspaceId } from '../../repositories/hooks/useRepositories';
 import { runnerKey, runnersKey } from '../../runners/hooks/useRunners';
-import { dashboardRecentPipelinesKey } from './useDashboard';
+import { dashboardActivityFeedKey, dashboardRecentPipelinesKey } from './useDashboard';
 
 /**
  * After this many consecutive failures the stream goes dormant and retries
@@ -87,6 +87,11 @@ export function useWorkspaceStream() {
     const invalidateActivity = () => {
       void queryClient.invalidateQueries({
         queryKey: ['workspaces', workspaceId, 'activity'],
+      });
+      // The dashboard Activity rail keeps its own (5-per-page) cache key
+      // outside the 'activity' prefix, so refresh it explicitly.
+      void queryClient.invalidateQueries({
+        queryKey: dashboardActivityFeedKey(workspaceId),
       });
     };
 
