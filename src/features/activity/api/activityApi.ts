@@ -11,6 +11,8 @@ export interface ActivityFeedFilters {
   createdAfter?: string;
   createdBefore?: string;
   cursor?: string;
+  /** Page size; clamped 1–50 server-side. Omitted uses the server default. */
+  limit?: number;
 }
 
 export async function getActivityFeed(
@@ -19,7 +21,7 @@ export async function getActivityFeed(
 ): Promise<ActivityListResponse> {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(filters)) {
-    if (value) params.set(key, value);
+    if (value) params.set(key, String(value));
   }
   return api
     .get(`/api/workspaces/${workspaceId}/activity`, { searchParams: params })
