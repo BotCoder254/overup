@@ -11,6 +11,8 @@ import { Input } from '../../../components/ui/Input';
 import { Spinner } from '../../../components/ui/Spinner';
 import { TBody, Table, Td, Th, THead, Tr } from '../../../components/ui/Table';
 import type { Me } from '../../../types/user';
+import { AvailabilityIndicator } from '../../workspace/components/AvailabilityIndicator';
+import { useWorkspaceAvailability } from '../../workspace/hooks/useWorkspaceAvailability';
 import { useWorkspaceId } from '../../repositories/hooks/useRepositories';
 import {
   logoKey,
@@ -59,6 +61,12 @@ export function WorkspaceTab({ me }: { me: Me }) {
       void queryClient.invalidateQueries({ queryKey: logoKey(workspaceId) });
     }
   };
+
+  // Called before the early return so the hook runs unconditionally. The
+  // check only matters when the name actually changed — otherwise the user's
+  // own (existing) slug would report as "taken".
+  const nameChanged = Boolean(workspace) && name.trim() !== workspace?.name;
+  const availability = useWorkspaceAvailability(nameChanged ? name : '');
 
   if (!workspace) return null;
 
@@ -150,16 +158,19 @@ export function WorkspaceTab({ me }: { me: Me }) {
         </CardHeader>
         <CardBody>
           <div className="space-y-4">
-            <FormField id="workspace-name" label="Name" error={nameProblem}>
-              {(aria) => (
-                <Input
-                  {...aria}
-                  maxLength={120}
-                  value={name}
-                  onChange={(event) => setName(event.target.value)}
-                />
-              )}
-            </FormField>
+            <div className="space-y-1.5">
+              <FormField id="workspace-name" label="Name" error={nameProblem}>
+                {(aria) => (
+                  <Input
+                    {...aria}
+                    maxLength={120}
+                    value={name}
+                    onChange={(event) => setName(event.target.value)}
+                  />
+                )}
+              </FormField>
+              {!nameProblem && <AvailabilityIndicator state={availability} />}
+            </div>
             <FormField
               id="workspace-slug"
               label="Slug"

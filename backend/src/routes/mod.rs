@@ -209,6 +209,10 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
             post(workspaces::create_workspace).layer(GovernorLayer::new(workspace_governor)),
         )
         .route(
+            "/workspaces/availability",
+            get(workspaces::check_availability),
+        )
+        .route(
             "/workspaces/{workspace_id}",
             patch(workspaces::update_workspace)
                 .layer(GovernorLayer::new(workspace_settings_governor.clone())),

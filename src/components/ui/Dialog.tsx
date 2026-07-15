@@ -92,9 +92,11 @@ export function Dialog({ open, onClose, title, description, children, footer, cl
         )}
         {/* Body scrolls when the dialog would exceed the viewport, so the
             title and footer actions always stay reachable. */}
-        {/* -mx-1/px-1 gives ring-2 focus rings room to render inside the
-            scroll container instead of being clipped at its edge. */}
-        {children && <div className="-mx-1 min-h-0 overflow-y-auto overflow-x-hidden px-1">{children}</div>}
+        {/* -m-1/p-1 gives ring-2 focus rings room to render on ALL sides
+            inside the scroll container instead of being clipped at its edge
+            — without the vertical padding the bottom input's focus ring is
+            clipped and reads as overlapping the footer on short viewports. */}
+        {children && <div className="-m-1 min-h-0 overflow-y-auto overflow-x-hidden p-1">{children}</div>}
         {footer && <div className="mt-5 flex shrink-0 items-center justify-end gap-2">{footer}</div>}
       </div>
     </div>,
