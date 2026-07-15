@@ -125,11 +125,27 @@ export function ActivityPanel({ slug, connected }: ActivityPanelProps) {
 
   const canGoNext = page < pages.length - 1 || hasNextPage;
   const goNext = () => {
+    // A fetch is already in flight — ignore further clicks so the page can't
+    // race ahead of the data.
+    if (isFetchingNextPage) return;
     if (page < pages.length - 1) {
       setPage(page + 1);
-    } else if (hasNextPage && !isFetchingNextPage) {
-      void fetchNextPage().then(() => setPage((current) => current + 1));
+      return;
     }
+    if (!hasNextPage) return;
+    const target = page + 1;
+    // Advance only once the target page actually exists, and swallow a
+    // rejected fetch (react-query still tracks the error) so the click can't
+    // trigger an unhandled rejection or skip the user ahead.
+    void fetchNextPage()
+      .then((result) => {
+        if ((result.data?.pages.length ?? 0) > target) {
+          setPage(target);
+        }
+      })
+      .catch(() => {
+        /* stay on the current page; the next click retries */
+      });
   };
 
   return (
@@ -160,7 +176,11 @@ export function ActivityPanel({ slug, connected }: ActivityPanelProps) {
           {hasNextPage && <span className="px-1 text-xs text-steel">…</span>}
         </div>
 
-        <PageButton label="Next page" disabled={!canGoNext} onClick={goNext}>
+        <PageButton
+          label="Next page"
+          disabled={!canGoNext || isFetchingNextPage}
+          onClick={goNext}
+        >
           {isFetchingNextPage ? (
             <Spinner className="h-3.5 w-3.5" />
           ) : (
