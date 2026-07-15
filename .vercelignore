@@ -1,0 +1,13 @@
+# Only the React frontend (repo root: src/, public/, package.json) deploys to
+# Vercel. The Rust crates are the backend/runner/protocol — they run elsewhere
+# (Dokploy). Hiding them keeps Vercel a single-app Create React App deploy and
+# stops it auto-detecting them as extra "services".
+backend/
+runner/
+protocol/
+target/
+
+# Not needed in the frontend build context.
+docs/
+docker-compose.yml
+netlify.toml

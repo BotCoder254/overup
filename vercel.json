@@ -1,0 +1,18 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "services": {
+    "frontend": {
+      "root": ".",
+      "framework": "create-react-app",
+      "installCommand": "npm install --legacy-peer-deps",
+      "buildCommand": "npm run build",
+      "outputDirectory": "build"
+    }
+  },
+  "rewrites": [
+    { "source": "/api/:path*", "destination": "https://overup-api.duckdns.org/api/:path*" },
+    { "source": "/auth/github/:path*", "destination": "https://overup-api.duckdns.org/auth/github/:path*" },
+    { "source": "/auth/logout", "destination": "https://overup-api.duckdns.org/auth/logout" },
+    { "source": "/:path*", "destination": { "service": "frontend" } }
+  ]
+}
