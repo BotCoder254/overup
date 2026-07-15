@@ -69,23 +69,31 @@ root:
 vercel link --yes
 ```
 
-Build-time env lives in [`vercel.json`](../vercel.json) under `build.env`
-(`REACT_APP_API_ORIGIN` empty, `REACT_APP_WS_ORIGIN` = the API origin), committed with
-the repo — so a Git-connected project builds correctly without any dashboard env. If
-you prefer them as Project Environment Variables instead, set:
+[`vercel.json`](../vercel.json) uses Vercel's **services** model: the repo has sibling
+Rust crates (`backend/`, `runner/`, `protocol/`) that the CLI would otherwise auto-detect
+as extra "services", so a single explicit `frontend` service (`root: "."`,
+`framework: create-react-app`) pins the deploy to the React app and never builds the Rust
+code. `installCommand` is `npm install --legacy-peer-deps` (CRA's `react-scripts@5` peer-pins
+TypeScript ^4 while the repo is on TS 5 — a Vercel-only override that leaves the Netlify
+build untouched). Top-level `rewrites` are the public route table: the API/auth proxies plus
+a `/(.*)` catch-all to the `frontend` service (the SPA fallback).
+
+Build-time env is set as **Project Environment Variables** (services mode has no top-level
+`build.env`). Only the WebSocket origin needs setting; `REACT_APP_API_ORIGIN` is left unset
+because a production CRA build falls back to `''` (same-origin) on its own:
 
 ```bash
-vercel env add REACT_APP_API_ORIGIN production   # enter an empty value
-vercel env add REACT_APP_WS_ORIGIN production     # https://overup-api.duckdns.org
+# Direct WebSocket origin (ticket auth — see §1); set for prod and preview:
+printf 'https://overup-api.duckdns.org' | vercel env add REACT_APP_WS_ORIGIN production
+printf 'https://overup-api.duckdns.org' | vercel env add REACT_APP_WS_ORIGIN preview
 ```
 
-`vercel.json` is committed — build command, output dir, `build.env`, and the proxy
-rules all live there.
+`vercel.json` is committed — the service build settings and the proxy rules all live there.
 
 ## 3. Deploy
 
 ```bash
-vercel deploy --prod --yes    # builds on Vercel (reads build.env from vercel.json)
+vercel deploy --prod --yes    # builds on Vercel, publishes to the production alias
 ```
 
 The command prints the production URL. Redeploying after changes is the same command.

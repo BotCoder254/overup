@@ -225,6 +225,8 @@ async fn handle_client_msg(
                         "stream": chunk.stream,
                         "text": chunk.content,
                         "createdAt": chunk.created_at,
+                        "stepIndex": chunk.step_index,
+                        "phase": chunk.phase,
                     });
                     let payload = serde_json::to_string(&event).map_err(|_| ())?;
                     sink.send(Message::Text(payload.into()))

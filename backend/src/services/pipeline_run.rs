@@ -282,8 +282,14 @@ pub async fn on_job_started(state: &AppState, job: &PipelineJob) -> sqlx::Result
     Ok(())
 }
 
-/// Stage telemetry (pulling_image, running, ...).
-pub async fn on_job_stage(state: &AppState, job: &PipelineJob) -> sqlx::Result<()> {
+/// Stage telemetry (pulling_image, running, ...). `payload` is built
+/// server-side from validated shapes only (e.g. `{"containerId": …}` after
+/// the hex short-id check) — never runner free text.
+pub async fn on_job_stage(
+    state: &AppState,
+    job: &PipelineJob,
+    payload: serde_json::Value,
+) -> sqlx::Result<()> {
     record_event(
         state,
         job.pipeline_id,
@@ -293,11 +299,55 @@ pub async fn on_job_stage(state: &AppState, job: &PipelineJob) -> sqlx::Result<(
         Some(&job.stage),
         job.runner_id,
         None,
-        serde_json::json!({}),
+        payload,
     )
     .await?;
     publish_job(state, job);
     Ok(())
+}
+
+/// Structured per-step progress. The caller has already allow-listed
+/// `status` and bounds-checked `index` against the signed plan; the step
+/// name is resolved from that plan here — runner text never reaches the
+/// ledger.
+pub async fn on_job_step(
+    state: &AppState,
+    job: &PipelineJob,
+    index: usize,
+    status: &str,
+    exit_code: Option<i32>,
+) -> sqlx::Result<()> {
+    let step_name = job
+        .plan
+        .get("steps")
+        .and_then(|steps| steps.as_array())
+        .and_then(|steps| steps.get(index))
+        .and_then(|step| step.get("name"))
+        .and_then(|name| name.as_str())
+        .unwrap_or("");
+    let event_type = if status == "started" {
+        "job.step_started"
+    } else {
+        "job.step_finished"
+    };
+    record_event(
+        state,
+        job.pipeline_id,
+        Some(job.id),
+        event_type,
+        None,
+        Some(status),
+        job.runner_id,
+        None,
+        serde_json::json!({
+            "stepIndex": index,
+            "stepName": step_name,
+            "status": status,
+            "exitCode": exit_code,
+            "attempt": job.attempt,
+        }),
+    )
+    .await
 }
 
 /// Shared post-processing for every terminal job transition: free the

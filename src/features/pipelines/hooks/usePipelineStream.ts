@@ -3,6 +3,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { env } from '../../../lib/env';
 import { mintWsTicket } from '../../../lib/wsTicket';
 import type {
+  LogChunk,
   PipelineDetail,
   PipelineStreamEvent,
 } from '../../../types/pipeline';
@@ -85,6 +86,8 @@ export function usePipelineStream(pipelineId: string | undefined) {
               stream: (chunk.stream as 'stdout' | 'stderr' | 'system') ?? 'stdout',
               content: chunk.content,
               createdAt: chunk.createdAt,
+              stepIndex: chunk.stepIndex ?? null,
+              phase: (chunk.phase as LogChunk['phase']) ?? null,
             })),
           );
           if (body.chunks.length < LOG_PAGE) break;
@@ -158,6 +161,8 @@ export function usePipelineStream(pipelineId: string | undefined) {
               stream: event.stream,
               content: event.text,
               createdAt: event.createdAt,
+              stepIndex: event.stepIndex ?? null,
+              phase: event.phase ?? null,
             },
           ]);
           break;

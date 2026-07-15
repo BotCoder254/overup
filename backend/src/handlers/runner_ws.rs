@@ -341,10 +341,11 @@ async fn handle(state: AppState, runner: Runner, is_bootstrap: bool, socket: Web
     // Fresh capacity may unblock queued work.
     state.scheduler.poke();
 
-    // job_id -> pipeline_id for jobs this connection is executing; avoids a
-    // lookup per log chunk. Authoritative checks still hit the database for
-    // state transitions.
-    let mut active_jobs: HashMap<Uuid, Uuid> = HashMap::new();
+    // job_id -> (pipeline_id, plan step count) for jobs this connection is
+    // executing; avoids a lookup per log chunk and lets section attribution
+    // be bounds-checked against the signed plan. Authoritative checks still
+    // hit the database for state transitions.
+    let mut active_jobs: HashMap<Uuid, (Uuid, usize)> = HashMap::new();
     let mut ping = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -418,7 +419,7 @@ async fn on_runner_msg(
     workspace_id: Uuid,
     runner_id: Uuid,
     msg: RunnerMsg,
-    active_jobs: &mut HashMap<Uuid, Uuid>,
+    active_jobs: &mut HashMap<Uuid, (Uuid, usize)>,
 ) -> anyhow::Result<()> {
     match &msg {
         RunnerMsg::Heartbeat { health: Some(health), .. } => {
@@ -447,11 +448,11 @@ async fn on_runner_msg(
         RunnerMsg::Hello { .. } | RunnerMsg::Heartbeat { .. } => {}
         RunnerMsg::JobAck { job_id } => {
             if let Some(job) = db::pipeline_jobs::ack(&state.pool, job_id, runner_id).await? {
-                active_jobs.insert(job.id, job.pipeline_id);
+                active_jobs.insert(job.id, (job.pipeline_id, plan_step_count(&job.plan)));
                 pipeline_run::on_job_started(state, &job).await?;
             }
         }
-        RunnerMsg::JobStage { job_id, stage, .. } => {
+        RunnerMsg::JobStage { job_id, stage, detail, step } => {
             // Stages come from a fixed vocabulary; anything else is dropped.
             if !protocol::STAGES.contains(&stage.as_str())
                 || matches!(stage.as_str(), "queued" | "done")
@@ -461,12 +462,46 @@ async fn on_runner_msg(
             if let Some(job) =
                 db::pipeline_jobs::set_stage(&state.pool, job_id, runner_id, &stage).await?
             {
-                pipeline_run::on_job_stage(state, &job).await?;
+                if let Some(progress) = step {
+                    // Structured step progress: allow-list the status and
+                    // cross-check index/total against the signed plan. An
+                    // invalid report is dropped whole — the text markers in
+                    // the log stream still tell the story.
+                    let plan_len = plan_step_count(&job.plan);
+                    let valid_status =
+                        matches!(progress.status.as_str(), "started" | "succeeded" | "failed");
+                    if valid_status
+                        && (progress.index as usize) < plan_len
+                        && progress.total as usize == plan_len
+                    {
+                        pipeline_run::on_job_step(
+                            state,
+                            &job,
+                            progress.index as usize,
+                            &progress.status,
+                            progress.exit_code,
+                        )
+                        .await?;
+                    }
+                } else {
+                    // Container ids are the only stage detail accepted, and
+                    // only in the exact short-id shape — never free text.
+                    let payload = match (stage.as_str(), detail.as_deref()) {
+                        ("starting_container", Some(id))
+                            if id.len() == 12
+                                && id.bytes().all(|b| b.is_ascii_hexdigit()) =>
+                        {
+                            serde_json::json!({ "containerId": id })
+                        }
+                        _ => serde_json::json!({}),
+                    };
+                    pipeline_run::on_job_stage(state, &job, payload).await?;
+                }
             }
         }
-        RunnerMsg::Log { job_id, seq, stream, text } => {
-            let pipeline_id = match active_jobs.get(&job_id) {
-                Some(pipeline_id) => *pipeline_id,
+        RunnerMsg::Log { job_id, seq, stream, text, step, phase } => {
+            let (pipeline_id, plan_len) = match active_jobs.get(&job_id) {
+                Some(entry) => *entry,
                 None => {
                     // Cold path (e.g. logs before ack round-trip finished):
                     // verify the assignment authoritatively.
@@ -475,10 +510,19 @@ async fn on_runner_msg(
                     else {
                         return Ok(());
                     };
-                    active_jobs.insert(job.id, job.pipeline_id);
-                    job.pipeline_id
+                    let entry = (job.pipeline_id, plan_step_count(&job.plan));
+                    active_jobs.insert(job.id, entry);
+                    entry
                 }
             };
+            // Section attribution is presentation metadata: out-of-bounds or
+            // unknown values drop the FIELD, never the chunk.
+            let step_index = step.and_then(|s| {
+                ((s as usize) < plan_len && s <= i16::MAX as u32).then_some(s as i16)
+            });
+            let phase = phase
+                .as_deref()
+                .and_then(|p| protocol::LOG_PHASES.iter().find(|known| **known == p).copied());
             state
                 .log_hub
                 .ingest_log(
@@ -488,6 +532,8 @@ async fn on_runner_msg(
                     seq.min(i64::MAX as u64) as i64,
                     stream,
                     &text,
+                    step_index,
+                    phase,
                     state.config.max_log_bytes_per_job,
                 )
                 .await?;
@@ -557,6 +603,15 @@ async fn on_runner_msg(
         }
     }
     Ok(())
+}
+
+/// Number of steps in a job's snapshotted plan — the bound every
+/// runner-reported step index is checked against.
+fn plan_step_count(plan: &serde_json::Value) -> usize {
+    plan.get("steps")
+        .and_then(|steps| steps.as_array())
+        .map(|steps| steps.len())
+        .unwrap_or(0)
 }
 
 async fn handle_artifact_request(

@@ -5,6 +5,14 @@ export type PipelineConclusion = 'success' | 'failure' | 'cancelled' | 'timed_ou
 export type JobConclusion = 'success' | 'failure' | 'cancelled' | 'timed_out' | 'skipped';
 export type PipelineTrigger = 'push' | 'manual';
 export type LogStreamName = 'stdout' | 'stderr' | 'system';
+/** Execution phase a log chunk is attributed to (protocol::LOG_PHASES). */
+export type LogPhase =
+  | 'checkout'
+  | 'image_pull'
+  | 'container'
+  | 'steps'
+  | 'artifacts'
+  | 'cleanup';
 
 export interface Pipeline {
   id: string;
@@ -101,6 +109,10 @@ export interface LogChunk {
   content: string;
   /** Server receive time; present on REST and stream paths alike. */
   createdAt?: string;
+  /** 0-based plan step this chunk belongs to; null/absent = unsectioned. */
+  stepIndex?: number | null;
+  /** Execution phase section; null/absent = unsectioned (old runners). */
+  phase?: LogPhase | null;
 }
 
 export type ArtifactKind =
@@ -160,6 +172,8 @@ export type PipelineStreamEvent =
       stream: LogStreamName;
       text: string;
       createdAt?: string;
+      stepIndex?: number | null;
+      phase?: LogPhase | null;
     }
   | { type: 'log_gap'; jobId: string | null }
   | { type: 'artifact'; artifact: Artifact }

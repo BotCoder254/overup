@@ -339,6 +339,10 @@ pub struct LogChunk {
     pub stream: String,
     pub content: String,
     pub created_at: DateTime<Utc>,
+    /// 0-based plan step this chunk belongs to (NULL = unsectioned output).
+    pub step_index: Option<i16>,
+    /// One of protocol::LOG_PHASES (CHECK-constrained in SQL).
+    pub phase: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -348,6 +352,8 @@ pub struct LogChunkResponse {
     pub stream: String,
     pub content: String,
     pub created_at: DateTime<Utc>,
+    pub step_index: Option<i16>,
+    pub phase: Option<String>,
 }
 
 impl From<LogChunk> for LogChunkResponse {
@@ -357,6 +363,8 @@ impl From<LogChunk> for LogChunkResponse {
             stream: row.stream,
             content: row.content,
             created_at: row.created_at,
+            step_index: row.step_index,
+            phase: row.phase,
         }
     }
 }
