@@ -13,6 +13,6 @@
     { "source": "/api/:path*", "destination": "https://overup-api.duckdns.org/api/:path*" },
     { "source": "/auth/github/:path*", "destination": "https://overup-api.duckdns.org/auth/github/:path*" },
     { "source": "/auth/logout", "destination": "https://overup-api.duckdns.org/auth/logout" },
-    { "source": "/:path*", "destination": { "service": "frontend" } }
+    { "source": "/(.*)", "destination": { "service": "frontend" } }
   ]
 }
