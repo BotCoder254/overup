@@ -38,14 +38,25 @@ const MAX_TARBALL_BYTES: u64 = 1024 * 1024 * 1024;
 /// Log chunks are split to stay comfortably under the server frame cap.
 const LOG_CHUNK_BYTES: usize = 32 * 1024;
 
-/// Sequenced log emitter for one job.
+/// Sequenced log emitter for one job. Carries the current section
+/// attribution (execution phase + plan step index) so every chunk tells the
+/// server which collapsible section it belongs to.
 struct JobLog {
     out: mpsc::Sender<RunnerMsg>,
     job_id: Uuid,
     seq: u64,
+    phase: Option<&'static str>,
+    step: Option<u32>,
 }
 
 impl JobLog {
+    /// Set the section every following chunk is attributed to. Phases come
+    /// from protocol::LOG_PHASES; the server re-validates regardless.
+    fn section(&mut self, phase: Option<&'static str>, step: Option<u32>) {
+        self.phase = phase;
+        self.step = step;
+    }
+
     async fn emit(&mut self, stream: LogStream, text: &str) {
         let mut rest = text;
         while !rest.is_empty() {
@@ -65,6 +76,8 @@ impl JobLog {
                     seq: self.seq,
                     stream,
                     text: piece.to_string(),
+                    step: self.step,
+                    phase: self.phase.map(str::to_string),
                 })
                 .await;
         }
@@ -76,13 +89,50 @@ impl JobLog {
 }
 
 async fn stage(out: &mpsc::Sender<RunnerMsg>, job_id: Uuid, stage: &str) {
+    stage_with(out, job_id, stage, None, None).await;
+}
+
+async fn stage_with(
+    out: &mpsc::Sender<RunnerMsg>,
+    job_id: Uuid,
+    stage: &str,
+    detail: Option<String>,
+    step: Option<protocol::StepProgress>,
+) {
     let _ = out
         .send(RunnerMsg::JobStage {
             job_id,
             stage: stage.to_string(),
-            detail: None,
+            detail,
+            step,
         })
         .await;
+}
+
+/// Structured step progress: rides the job_stage channel with the fixed
+/// "running" stage so pre-step-progress servers treat it as a harmless
+/// idempotent stage repeat.
+async fn step_progress(
+    out: &mpsc::Sender<RunnerMsg>,
+    job_id: Uuid,
+    index: u32,
+    total: u32,
+    status: &str,
+    exit_code: Option<i32>,
+) {
+    stage_with(
+        out,
+        job_id,
+        "running",
+        None,
+        Some(protocol::StepProgress {
+            index,
+            total,
+            status: status.to_string(),
+            exit_code,
+        }),
+    )
+    .await;
 }
 
 enum StepOutcome {
@@ -106,6 +156,8 @@ pub async fn run_job(
         out: out.clone(),
         job_id,
         seq: 0,
+        phase: None,
+        step: None,
     };
     let mut metrics = JobMetrics::default();
     let started = Instant::now();
@@ -185,6 +237,7 @@ async fn execute(
         tokio::time::Instant::now() + Duration::from_secs(payload.timeout_seconds.max(60));
 
     // --- checkout -----------------------------------------------------------
+    log.section(Some("checkout"), None);
     if let Some(checkout) = &payload.checkout {
         log.system("downloading repository archive").await;
         if let Err(error) = fetch_and_extract(&http, checkout, workspace.path()).await {
@@ -199,6 +252,7 @@ async fn execute(
     }
 
     // --- image pull ---------------------------------------------------------
+    log.section(Some("image_pull"), None);
     stage(out, job_id, "pulling_image").await;
     log.system(&format!("pulling image {}", payload.image)).await;
     let pull_started = Instant::now();
@@ -261,6 +315,7 @@ async fn execute(
     .await;
 
     // --- container ----------------------------------------------------------
+    log.section(Some("container"), None);
     stage(out, job_id, "starting_container").await;
     let env: Vec<String> = payload
         .env
@@ -349,6 +404,16 @@ async fn execute(
         return fail("container_error");
     }
     log.system(&format!("container started ({})", short_id(&container))).await;
+    // Follow-up with the (short) container id so the UI can show it; still
+    // the fixed-vocabulary stage, so old servers see an idempotent repeat.
+    stage_with(
+        out,
+        job_id,
+        "starting_container",
+        Some(short_id(&container).to_string()),
+        None,
+    )
+    .await;
 
     // Resource telemetry for the Performance tab; failures only cost the
     // metrics, never the job.
@@ -361,18 +426,24 @@ async fn execute(
 
     // --- steps ---------------------------------------------------------------
     stage(out, job_id, "running").await;
+    let total_steps = payload.steps.len() as u32;
     let mut result = (JobConclusion::Success, Some(0), None);
     for (index, step) in payload.steps.iter().enumerate() {
+        log.section(Some("steps"), Some(index as u32));
         log.system(&format!("▶ step {}/{}: {}", index + 1, payload.steps.len(), step.name))
             .await;
+        step_progress(out, job_id, index as u32, total_steps, "started", None).await;
         match run_step(&docker, &container, step, &env, log, cancel, deadline).await {
-            StepOutcome::Done => {}
+            StepOutcome::Done => {
+                step_progress(out, job_id, index as u32, total_steps, "succeeded", None).await;
+            }
             StepOutcome::Failed(code) => {
                 log.system(&format!(
                     "step failed{}",
                     code.map(|c| format!(" (exit code {c})")).unwrap_or_default()
                 ))
                 .await;
+                step_progress(out, job_id, index as u32, total_steps, "failed", code).await;
                 result = (JobConclusion::Failure, code, Some("step_failed".to_string()));
                 break;
             }
@@ -406,6 +477,7 @@ async fn execute(
     }
 
     // --- artifacts (successful jobs only) ------------------------------------
+    log.section(Some("artifacts"), None);
     if matches!(result.0, JobConclusion::Success) {
         let dir = workspace.path().join(".overup").join("artifacts");
         if dir.is_dir() {
@@ -420,6 +492,7 @@ async fn execute(
     }
 
     // --- cleanup --------------------------------------------------------------
+    log.section(Some("cleanup"), None);
     stage(out, job_id, "cleaning_workspace").await;
     cleanup(&docker, Some(&container), network.as_deref()).await;
     // The temp workspace (and everything the job wrote) is deleted on drop.

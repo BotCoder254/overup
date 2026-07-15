@@ -31,6 +31,18 @@ pub const STAGES: &[&str] = &[
     "done",
 ];
 
+/// Execution phases a log chunk can be attributed to, in lifecycle order.
+/// Presentation-only section metadata — the server allow-lists inbound
+/// values against this set and drops anything else (field, not chunk).
+pub const LOG_PHASES: &[&str] = &[
+    "checkout",
+    "image_pull",
+    "container",
+    "steps",
+    "artifacts",
+    "cleanup",
+];
+
 // ---------------------------------------------------------------------------
 // Runner -> server
 // ---------------------------------------------------------------------------
@@ -61,6 +73,11 @@ pub enum RunnerMsg {
         job_id: Uuid,
         stage: String,
         detail: Option<String>,
+        /// Structured per-step progress riding the stage channel. Older
+        /// runners omit it and newer servers default it to `None`, so this
+        /// addition never bumps [`PROTOCOL_VERSION`].
+        #[serde(default)]
+        step: Option<StepProgress>,
     },
     /// One chunk of output. `seq` is runner-monotonic per job so the server
     /// can dedupe and browsers can detect gaps.
@@ -69,6 +86,14 @@ pub enum RunnerMsg {
         seq: u64,
         stream: LogStream,
         text: String,
+        /// 0-based index into the signed plan's steps this chunk belongs to.
+        /// Optional section attribution — same forward-compat convention as
+        /// `Heartbeat.health`; never bumps [`PROTOCOL_VERSION`].
+        #[serde(default)]
+        step: Option<u32>,
+        /// One of [`LOG_PHASES`]; the server re-validates before persisting.
+        #[serde(default)]
+        phase: Option<String>,
     },
     /// Ask for a presigned upload URL for one artifact.
     ArtifactRequest {
@@ -135,6 +160,22 @@ pub struct RunnerHealth {
     pub os: Option<String>,
     #[serde(default)]
     pub uptime_secs: Option<u64>,
+}
+
+/// Structured progress for one plan step, reported with `job_stage`. The
+/// server validates `index`/`total` against the signed plan and allow-lists
+/// `status` before recording anything.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct StepProgress {
+    /// 0-based index into the signed plan's steps.
+    pub index: u32,
+    /// Total step count from the signed plan (cross-checked server-side).
+    pub total: u32,
+    /// "started" | "succeeded" | "failed" — the server allow-lists.
+    pub status: String,
+    #[serde(default)]
+    pub exit_code: Option<i32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -620,10 +661,100 @@ mod tests {
             job_id: Uuid::nil(),
             stage: "pulling_image".into(),
             detail: None,
+            step: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"job_stage\""));
         let parsed: RunnerMsg = serde_json::from_str(&json).unwrap();
         assert!(matches!(parsed, RunnerMsg::JobStage { .. }));
+    }
+
+    #[test]
+    fn old_shape_log_still_parses() {
+        // A log emitted by a pre-section runner: no `step`/`phase` fields.
+        // Both must default to None, not fail to parse.
+        let json = format!(
+            r#"{{"type":"log","job_id":"{}","seq":7,"stream":"stdout","text":"hello"}}"#,
+            Uuid::nil()
+        );
+        let parsed: RunnerMsg = serde_json::from_str(&json).unwrap();
+        let RunnerMsg::Log { seq, step, phase, .. } = parsed else {
+            panic!("expected Log");
+        };
+        assert_eq!(seq, 7);
+        assert_eq!(step, None);
+        assert_eq!(phase, None);
+    }
+
+    #[test]
+    fn log_round_trips_section_attribution() {
+        let msg = RunnerMsg::Log {
+            job_id: Uuid::nil(),
+            seq: 3,
+            stream: LogStream::Stderr,
+            text: "npm ERR!".into(),
+            step: Some(2),
+            phase: Some("steps".into()),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: RunnerMsg = serde_json::from_str(&json).unwrap();
+        let RunnerMsg::Log { step, phase, .. } = parsed else {
+            panic!("expected Log");
+        };
+        assert_eq!(step, Some(2));
+        assert_eq!(phase.as_deref(), Some("steps"));
+    }
+
+    #[test]
+    fn old_shape_job_stage_still_parses() {
+        // A job_stage emitted by a pre-step-progress runner: no `step`
+        // object. It must default to None, not fail to parse.
+        let json = format!(
+            r#"{{"type":"job_stage","job_id":"{}","stage":"running","detail":null}}"#,
+            Uuid::nil()
+        );
+        let parsed: RunnerMsg = serde_json::from_str(&json).unwrap();
+        let RunnerMsg::JobStage { stage, step, .. } = parsed else {
+            panic!("expected JobStage");
+        };
+        assert_eq!(stage, "running");
+        assert_eq!(step, None);
+    }
+
+    #[test]
+    fn job_stage_round_trips_step_progress() {
+        let msg = RunnerMsg::JobStage {
+            job_id: Uuid::nil(),
+            stage: "running".into(),
+            detail: None,
+            step: Some(StepProgress {
+                index: 1,
+                total: 4,
+                status: "failed".into(),
+                exit_code: Some(2),
+            }),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: RunnerMsg = serde_json::from_str(&json).unwrap();
+        let RunnerMsg::JobStage { step, .. } = parsed else {
+            panic!("expected JobStage");
+        };
+        assert_eq!(
+            step,
+            Some(StepProgress {
+                index: 1,
+                total: 4,
+                status: "failed".into(),
+                exit_code: Some(2),
+            })
+        );
+    }
+
+    #[test]
+    fn step_progress_without_exit_code_still_parses() {
+        let json = r#"{"index":0,"total":3,"status":"started"}"#;
+        let parsed: StepProgress = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.exit_code, None);
+        assert_eq!(parsed.status, "started");
     }
 }

@@ -1,16 +1,34 @@
 import { Badge } from '../../../../components/ui/Badge';
-import type { PipelineJob } from '../../../../types/pipeline';
+import type { PipelineEvent, PipelineJob } from '../../../../types/pipeline';
 import { Field, FieldList, PanelSection } from './fields';
 
 /** Container-level execution facts — no host details beyond what debugging
- * needs. The container id appears in the job's system log lines. */
-export function ContainerPanel({ job }: { job: PipelineJob }) {
+ * needs. The container short id arrives as a validated job.stage event
+ * payload (and also appears in the job's system log lines). */
+export function ContainerPanel({
+  job,
+  events,
+}: {
+  job: PipelineJob;
+  events?: PipelineEvent[];
+}) {
+  // Latest stage event carrying the hex-validated container short id.
+  let containerId: string | null = null;
+  for (const event of events ?? []) {
+    const value = event.payload?.containerId;
+    if (event.eventType === 'job.stage' && typeof value === 'string') {
+      containerId = value;
+    }
+  }
   return (
     <div>
       <PanelSection title="Container">
         <FieldList>
           <Field label="Image">
             <span className="font-mono text-xs">{job.plan.image}</span>
+          </Field>
+          <Field label="Container id">
+            {containerId ? <span className="font-mono text-xs">{containerId}</span> : '—'}
           </Field>
           <Field label="Working directory">
             <span className="font-mono text-xs">/workspace</span>

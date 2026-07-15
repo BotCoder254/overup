@@ -121,7 +121,14 @@ export async function getJobLogs(
   jobId: string,
   fromSeq = 0,
 ): Promise<{
-  chunks: { seq: number; stream: string; content: string; createdAt?: string }[];
+  chunks: {
+    seq: number;
+    stream: string;
+    content: string;
+    createdAt?: string;
+    stepIndex?: number | null;
+    phase?: string | null;
+  }[];
   jobStatus: string;
 }> {
   return api

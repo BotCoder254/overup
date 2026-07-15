@@ -7,6 +7,13 @@ import { HealthPanel } from '../../../runners/components/HealthPanel';
 import { RunnerStatusBadge } from '../../../runners/components/RunnerStatusBadge';
 import { Field, FieldList, PanelSection } from './fields';
 
+/** Known architecture label values runners advertise. */
+const ARCH_LABELS = new Set(['x64', 'x86_64', 'amd64', 'arm64', 'aarch64', 'arm']);
+
+function archFromLabels(labels: string[]): string | null {
+  return labels.find((label) => ARCH_LABELS.has(label.toLowerCase())) ?? null;
+}
+
 /**
  * The assigned runner's identity and live host telemetry (heartbeat-fed;
  * the job detail poll keeps it fresh while the job runs). Only sanitized
@@ -56,6 +63,7 @@ export function RunnerPanel({ slug, runner }: { slug: string; runner: Runner | n
           </Field>
           <Field label="Version">{runner.version ?? '—'}</Field>
           <Field label="OS">{runner.lastHealth?.os ?? '—'}</Field>
+          <Field label="Arch">{archFromLabels(runner.labels) ?? '—'}</Field>
           <Field label="Docker">{runner.lastHealth?.dockerVersion ?? '—'}</Field>
           <Field label="Last heartbeat">
             {runner.lastSeenAt

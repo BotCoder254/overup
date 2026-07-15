@@ -178,6 +178,7 @@ export function PipelineDetailPage() {
             pipelineId={pipelineId}
             job={selectedJob}
             onWatch={stream.watchJobLogs}
+            events={events.filter((event) => event.jobId === selectedJob.id)}
           />
         ) : (
           <p className="p-3 text-sm text-steel">Select a job to view its logs.</p>

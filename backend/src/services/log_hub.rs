@@ -62,6 +62,11 @@ pub enum BrowserEvent {
         stream: &'static str,
         text: String,
         created_at: DateTime<Utc>,
+        /// 0-based plan step this chunk belongs to; validated against the
+        /// signed plan before ingest. None = unsectioned output.
+        step_index: Option<i16>,
+        /// One of protocol::LOG_PHASES, validated before ingest.
+        phase: Option<&'static str>,
     },
     /// The subscriber lagged behind the broadcast; it should refetch state
     /// and backfill logs over REST. job_id is None when the whole stream
@@ -84,6 +89,10 @@ struct MaskState {
     max_len: usize,
     carry: String,
     carry_stream: &'static str,
+    /// Section attribution of the held-back carry, so a tail flushed with a
+    /// later chunk (or at completion) stays attributed to its origin step.
+    carry_step: Option<i16>,
+    carry_phase: Option<&'static str>,
     last_seq: i64,
     /// Bumped on every registration; delayed clears only remove the entry
     /// when the generation still matches, so a requeued job that was
@@ -98,6 +107,8 @@ impl Default for MaskState {
             max_len: 0,
             carry: String::new(),
             carry_stream: "stdout",
+            carry_step: None,
+            carry_phase: None,
             last_seq: -1,
             generation: 0,
         }
@@ -157,21 +168,31 @@ impl LogHub {
     /// Mask one chunk, carrying a tail shorter than the longest secret over
     /// to the next chunk so boundary-spanning secrets are caught. Returns
     /// None for a replayed seq (the DB would drop it anyway; skipping keeps
-    /// the carry from being corrupted by duplicates).
-    fn mask_chunk(&self, job_id: Uuid, seq: i64, stream: &'static str, text: &str) -> Option<(String, &'static str)> {
+    /// the carry from being corrupted by duplicates). The emitted text keeps
+    /// the stream/section attribution of the carry it starts with.
+    #[allow(clippy::type_complexity)]
+    fn mask_chunk(
+        &self,
+        job_id: Uuid,
+        seq: i64,
+        stream: &'static str,
+        text: &str,
+        step: Option<i16>,
+        phase: Option<&'static str>,
+    ) -> Option<(String, &'static str, Option<i16>, Option<&'static str>)> {
         let Some(mut state) = self.masks.get_mut(&job_id) else {
             // No masks registered: pass through untouched (zero-copy path).
-            return Some((text.to_string(), stream));
+            return Some((text.to_string(), stream, step, phase));
         };
         if seq <= state.last_seq {
             return None;
         }
         state.last_seq = seq;
 
-        let out_stream = if state.carry.is_empty() {
-            stream
+        let (out_stream, out_step, out_phase) = if state.carry.is_empty() {
+            (stream, step, phase)
         } else {
-            state.carry_stream
+            (state.carry_stream, state.carry_step, state.carry_phase)
         };
         let mut combined = std::mem::take(&mut state.carry);
         combined.push_str(text);
@@ -187,7 +208,9 @@ impl LogHub {
         }
         state.carry = masked.split_off(cut);
         state.carry_stream = stream;
-        Some((masked, out_stream))
+        state.carry_step = step;
+        state.carry_phase = phase;
+        Some((masked, out_stream, out_step, out_phase))
     }
 
     /// The single write path for job output: mask (with cross-chunk carry)
@@ -203,13 +226,16 @@ impl LogHub {
         seq: i64,
         stream: protocol::LogStream,
         text: &str,
+        step: Option<i16>,
+        phase: Option<&'static str>,
         max_log_bytes: i64,
     ) -> sqlx::Result<()> {
         if seq < 0 || seq == OVERFLOW_MARKER_SEQ {
             return Ok(());
         }
 
-        let Some((masked, out_stream)) = self.mask_chunk(job_id, seq, stream.as_str(), text)
+        let Some((masked, out_stream, out_step, out_phase)) =
+            self.mask_chunk(job_id, seq, stream.as_str(), text, step, phase)
         else {
             return Ok(());
         };
@@ -219,8 +245,18 @@ impl LogHub {
             // next chunk or at job completion.
             return Ok(());
         }
-        self.write_chunk(pool, pipeline_id, job_id, seq, out_stream, masked, max_log_bytes)
-            .await
+        self.write_chunk(
+            pool,
+            pipeline_id,
+            job_id,
+            seq,
+            out_stream,
+            masked,
+            out_step,
+            out_phase,
+            max_log_bytes,
+        )
+        .await
     }
 
     /// Flush any held-back carry as a final chunk, then drop the mask state
@@ -239,14 +275,31 @@ impl LogHub {
             }
             let text = std::mem::take(&mut state.carry);
             state.last_seq += 1;
-            Some((state.last_seq, state.carry_stream, text, state.generation))
+            Some((
+                state.last_seq,
+                state.carry_stream,
+                text,
+                state.carry_step,
+                state.carry_phase,
+                state.generation,
+            ))
         });
 
-        let generation = if let Some((seq, stream, text, generation)) = flush {
+        let generation = if let Some((seq, stream, text, step, phase, generation)) = flush {
             let text = cap_chunk(&text);
             if !text.is_empty() {
-                self.write_chunk(pool, pipeline_id, job_id, seq, stream, text, max_log_bytes)
-                    .await?;
+                self.write_chunk(
+                    pool,
+                    pipeline_id,
+                    job_id,
+                    seq,
+                    stream,
+                    text,
+                    step,
+                    phase,
+                    max_log_bytes,
+                )
+                .await?;
             }
             Some(generation)
         } else {
@@ -275,6 +328,8 @@ impl LogHub {
         seq: i64,
         stream_name: &'static str,
         masked: String,
+        step_index: Option<i16>,
+        phase: Option<&'static str>,
         max_log_bytes: i64,
     ) -> sqlx::Result<()> {
         let byte_len = masked.len().min(i32::MAX as usize) as i32;
@@ -296,6 +351,8 @@ impl LogHub {
                 stream: stream_name,
                 content: masked.clone(),
                 byte_len,
+                step_index,
+                phase,
             }],
         )
         .await?;
@@ -308,10 +365,14 @@ impl LogHub {
                 stream: stream_name,
                 text: masked,
                 created_at: Utc::now(),
+                step_index,
+                phase,
             },
         );
 
         if total_after >= max_log_bytes {
+            // The marker stays unsectioned (NULL step/phase) so it renders
+            // outside — and survives — any collapsed section.
             let marker = "[log output truncated: per-job log limit reached]".to_string();
             db::pipeline_logs::insert_chunks(
                 pool,
@@ -321,6 +382,8 @@ impl LogHub {
                     stream: "system",
                     content: marker.clone(),
                     byte_len: marker.len() as i32,
+                    step_index: None,
+                    phase: None,
                 }],
             )
             .await?;
@@ -332,6 +395,8 @@ impl LogHub {
                     stream: "system",
                     text: marker,
                     created_at: Utc::now(),
+                    step_index: None,
+                    phase: None,
                 },
             );
         }
@@ -388,7 +453,8 @@ mod tests {
     /// Run a chunk through mask_chunk and return the emitted text (the
     /// held-back carry stays inside the hub).
     fn masked(hub: &LogHub, job: Uuid, seq: i64, text: &str) -> Option<String> {
-        hub.mask_chunk(job, seq, "stdout", text).map(|(t, _)| t)
+        hub.mask_chunk(job, seq, "stdout", text, None, None)
+            .map(|(t, ..)| t)
     }
 
     #[test]
@@ -435,6 +501,31 @@ mod tests {
         assert!(masked(&hub, job, 1, "prefix ghs_super").is_none());
         let second = masked(&hub, job, 2, "secrettoken\n").unwrap();
         assert!(!second.contains("secrettoken"));
+    }
+
+    #[test]
+    fn carry_keeps_origin_section_across_boundary() {
+        let hub = LogHub::default();
+        let job = Uuid::new_v4();
+        hub.register_masks(job, vec!["ghs_supersecrettoken".into()]);
+        // Step 0 output ends without a newline: a tail is held back.
+        let (_, _, step, phase) = hub
+            .mask_chunk(job, 1, "stdout", "tail of step zero", Some(0), Some("steps"))
+            .unwrap();
+        assert_eq!((step, phase), (Some(0), Some("steps")));
+        // The next chunk belongs to step 1; the flushed carry (which starts
+        // the emitted text) must keep step 0's attribution.
+        let (text, _, step, phase) = hub
+            .mask_chunk(job, 2, "stdout", " continues\n", Some(1), Some("steps"))
+            .unwrap();
+        assert!(text.starts_with("tail of step zero"));
+        assert_eq!((step, phase), (Some(0), Some("steps")));
+        // With the carry fully flushed by the newline, a third chunk is
+        // attributed to its own section again.
+        let (_, _, step, _) = hub
+            .mask_chunk(job, 3, "stdout", "step one output\n", Some(1), Some("steps"))
+            .unwrap();
+        assert_eq!(step, Some(1));
     }
 
     #[test]
