@@ -1,14 +1,16 @@
 import { AlertTriangle, GitBranch, Squirrel } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { PageHeader } from '../../../components/layout/PageHeader';
 import { Button } from '../../../components/ui/Button';
 import { Card, CardBody, CardHeader } from '../../../components/ui/Card';
 import { EmptyState } from '../../../components/ui/EmptyState';
+import { Spinner } from '../../../components/ui/Spinner';
 import type { DashboardRange } from '../../../types/dashboard';
 import { PipelinesTable } from '../../pipelines/components/PipelinesTable';
 import { useRunners } from '../../runners/hooks/useRunners';
 import { ActivityChart } from '../components/ActivityChart';
+import { ActivityPanel } from '../components/ActivityPanel';
 import { KpiStrip } from '../components/KpiStrip';
 import { RunnerHealthPanel } from '../components/RunnerHealthPanel';
 import { SuccessRateChart } from '../components/SuccessRateChart';
@@ -47,6 +49,31 @@ export function DashboardPage() {
     !runners.isLoading &&
     (summary.data?.pipelinesTotal ?? 0) === 0 &&
     (runners.data?.length ?? 0) === 0;
+
+  // Flatten the keyset pages for the full-width recent-pipelines table.
+  const pipelines = (recentPipelines.data?.pages ?? []).flatMap((page) => page.pipelines);
+
+  // Infinite scroll: pull the next page when the sentinel scrolls into view.
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const {
+    hasNextPage: pipelinesHasNext,
+    isFetchingNextPage: pipelinesFetchingNext,
+    fetchNextPage: fetchNextPipelines,
+  } = recentPipelines;
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    if (!sentinel || !pipelinesHasNext) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting) && !pipelinesFetchingNext) {
+          void fetchNextPipelines();
+        }
+      },
+      { rootMargin: '200px' },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [pipelinesHasNext, pipelinesFetchingNext, fetchNextPipelines]);
 
   return (
     <>
@@ -99,38 +126,56 @@ export function DashboardPage() {
         <>
           <KpiStrip summary={summary.data} loading={summary.isLoading} error={summaryFailed} />
 
-          <div className="mb-6 grid gap-6 lg:grid-cols-2">
-            <section>
-              <h2 className="mb-3 text-sm font-semibold text-charcoal">Recent pipelines</h2>
-              {recentPipelines.isLoading ? (
-                <div className="h-40 animate-pulse rounded border border-steel/20 bg-canvas" />
-              ) : recentPipelinesFailed ? (
-                <EmptyState
-                  icon={AlertTriangle}
-                  title="Couldn't load pipelines"
-                  description="Something went wrong fetching recent pipeline runs."
-                  className="min-h-0 border-0 bg-transparent py-10"
-                  action={
-                    <Button size="sm" variant="secondary" onClick={() => void recentPipelines.refetch()}>
-                      Try again
-                    </Button>
-                  }
-                />
-              ) : (recentPipelines.data?.pipelines.length ?? 0) === 0 ? (
-                <EmptyState
-                  icon={GitBranch}
-                  title="No pipeline runs yet"
-                  description="Dispatch a workflow to see its execution here."
-                  className="min-h-0 border-0 bg-transparent py-10"
-                />
-              ) : (
-                <PipelinesTable slug={slug} pipelines={recentPipelines.data!.pipelines} />
-              )}
-            </section>
+          <section className="mb-6">
+            <h2 className="mb-3 text-sm font-semibold text-charcoal">Recent pipelines</h2>
+            {recentPipelines.isLoading ? (
+              <div className="h-40 animate-pulse rounded border border-steel/20 bg-canvas" />
+            ) : recentPipelinesFailed ? (
+              <EmptyState
+                icon={AlertTriangle}
+                title="Couldn't load pipelines"
+                description="Something went wrong fetching recent pipeline runs."
+                className="min-h-0 border-0 bg-transparent py-10"
+                action={
+                  <Button size="sm" variant="secondary" onClick={() => void recentPipelines.refetch()}>
+                    Try again
+                  </Button>
+                }
+              />
+            ) : pipelines.length === 0 ? (
+              <EmptyState
+                icon={GitBranch}
+                title="No pipeline runs yet"
+                description="Dispatch a workflow to see its execution here."
+                className="min-h-0 border-0 bg-transparent py-10"
+              />
+            ) : (
+              <>
+                <PipelinesTable slug={slug} pipelines={pipelines} />
+                {pipelinesHasNext && (
+                  <div ref={sentinelRef} className="mt-4 flex justify-center">
+                    {pipelinesFetchingNext ? (
+                      <Spinner className="h-5 w-5 text-steel" />
+                    ) : (
+                      <Button size="sm" variant="secondary" onClick={() => void fetchNextPipelines()}>
+                        Load more
+                      </Button>
+                    )}
+                  </div>
+                )}
+              </>
+            )}
+          </section>
 
-            <section>
+          <div className="mb-6 grid gap-6 lg:grid-cols-2">
+            <section className="min-w-0">
               <h2 className="mb-3 text-sm font-semibold text-charcoal">Runner health</h2>
               <RunnerHealthPanel slug={slug} runners={runners.data ?? []} loading={runners.isLoading} />
+            </section>
+
+            <section className="min-w-0">
+              <h2 className="mb-3 text-sm font-semibold text-charcoal">Activity</h2>
+              <ActivityPanel slug={slug} connected={connected} />
             </section>
           </div>
 

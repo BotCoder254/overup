@@ -1,6 +1,6 @@
 use axum::Json;
 use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
@@ -88,6 +88,51 @@ pub async fn create_workspace(
     Err(AppError::Internal(anyhow::anyhow!(
         "slug candidate space exhausted for base '{base}'"
     )))
+}
+
+/// Query for the create-form pre-flight availability check.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AvailabilityQuery {
+    name: String,
+}
+
+/// GET /api/workspaces/availability?name= — advisory pre-flight for the
+/// create-workspace form. Authenticated (any signed-in user) but NOT
+/// workspace-scoped: during onboarding no workspace exists yet, and slugs
+/// are global identifiers already exposed in URLs, so this leaks no
+/// cross-workspace state. The unique index inside `provision` remains the
+/// authoritative guard; this only powers the live "Available / will be
+/// saved as …" hint. Invalid names get the same sanitized 422 as creation.
+pub async fn check_availability(
+    State(state): State<AppState>,
+    CurrentUser(_user): CurrentUser,
+    Query(query): Query<AvailabilityQuery>,
+) -> AppResult<Json<serde_json::Value>> {
+    // Reuse the creation validators so the hint matches what would actually
+    // be persisted (NFC-normalize, length + character allow-list).
+    let name = workspace_service::normalize_and_validate_name(&query.name)?;
+    let base = workspace_service::slugify(&name);
+
+    // Walk the same deterministic collision ladder creation uses and settle
+    // on the first free candidate. `available` means the clean base slug is
+    // both unreserved and unclaimed (attempt 0 yields the bare base).
+    let mut assigned = base.clone();
+    for attempt in 0..workspace_service::MAX_SLUG_ATTEMPTS {
+        let candidate = workspace_service::slug_candidate(&base, attempt);
+        if !db::workspaces::slug_exists(&state.pool, &candidate).await? {
+            assigned = candidate;
+            break;
+        }
+    }
+    let available = assigned == base;
+
+    Ok(Json(json!({
+        "name": name,
+        "slug": base,
+        "available": available,
+        "adjustedSlug": if available { serde_json::Value::Null } else { json!(assigned) },
+    })))
 }
 
 /// Same allow-list stance as creation: only the name is accepted, and the

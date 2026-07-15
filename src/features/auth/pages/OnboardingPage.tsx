@@ -7,7 +7,9 @@ import { FormField } from '../../../components/ui/FormField';
 import { Input } from '../../../components/ui/Input';
 import { Textarea } from '../../../components/ui/Textarea';
 import { slugPreview } from '../../../lib/slug';
+import { AvailabilityIndicator } from '../../workspace/components/AvailabilityIndicator';
 import { SlugPreview } from '../../workspace/components/SlugPreview';
+import { useWorkspaceAvailability } from '../../workspace/hooks/useWorkspaceAvailability';
 import { useCreateWorkspace } from '../../workspace/hooks/useCreateWorkspace';
 import { createWorkspaceSchema, type CreateWorkspaceInput } from '../../workspace/schema';
 import { AuthSplitLayout } from '../components/AuthSplitLayout';
@@ -32,10 +34,13 @@ export function OnboardingPage() {
     defaultValues: { name: '', description: '' },
   });
 
+  // Watched before any early return so the hooks below run unconditionally.
+  const nameValue = watch('name') ?? '';
+  const slug = slugPreview(nameValue);
+  const availability = useWorkspaceAvailability(nameValue);
+
   // Already provisioned (e.g. deep link back to /onboarding) — skip ahead.
   if (me?.workspace) return <Navigate to={`/w/${me.workspace.slug}`} replace />;
-
-  const slug = slugPreview(watch('name') ?? '');
 
   const onSubmit = (values: CreateWorkspaceInput) =>
     create.mutate({ name: values.name, description: values.description || undefined });
@@ -67,6 +72,7 @@ export function OnboardingPage() {
               )}
             </FormField>
             <SlugPreview slug={slug} />
+            <AvailabilityIndicator state={availability} />
           </div>
 
           <FormField

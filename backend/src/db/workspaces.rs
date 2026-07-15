@@ -206,6 +206,16 @@ pub async fn find_by_id(pool: &PgPool, workspace_id: Uuid) -> sqlx::Result<Optio
         .await
 }
 
+/// True when a workspace already owns this exact slug. Backs the pre-flight
+/// availability check on the create form — the unique index inside
+/// [`provision`] stays the authoritative guard under races.
+pub async fn slug_exists(pool: &PgPool, slug: &str) -> sqlx::Result<bool> {
+    sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM workspaces WHERE slug = $1)")
+        .bind(slug)
+        .fetch_one(pool)
+        .await
+}
+
 /// Rename the workspace. The slug is deliberately immutable — it anchors
 /// routing, bookmarks, and the reserved-slug policy.
 pub async fn update_name(
