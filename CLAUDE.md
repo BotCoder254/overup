@@ -84,11 +84,16 @@ source. Runners (`runner/` crate) hold one outbound WS (`/runner/ws`, Bearer tok
 SHA-256-hashed registration token shown once; heartbeat cadence comes from `hello_ack`),
 connect to Docker via `connect_with_defaults` (local socket/pipe OR remote daemon via
 `DOCKER_HOST` + `DOCKER_TLS_VERIFY` + `DOCKER_CERT_PATH`, rustls), execute each job in a
-hardened container via bollard (temp workspace bind-mounted at /workspace, tarball checkout
-with traversal-safe extraction that also drops symlink/hardlink entries, one keep-alive
+hardened container via bollard (daemon-managed anonymous volume at /workspace — NOT a host
+bind mount, so a runner that itself runs in a container sharing the host docker.sock still
+gets a populated /workspace; source is streamed IN via the Docker archive API/`docker cp`
+after the container starts, tarball repackaged into a traversal-safe tar that strips
+GitHub's top-level dir and drops symlink/hardlink entries; artifacts are streamed back OUT
+of `.overup/artifacts/` via the same archive API, one keep-alive
 container with `no-new-privileges` always plus cap-drop ALL by default, memory/CPU/pids
 limits, bridge|none|isolated per-job network, optional non-root user + read-only rootfs,
-steps as `exec` with `<shell> -c`, SIGKILL on cancel/timeout, 5 s Docker stats sampling for
+steps as `exec` with `<shell> -c`, SIGKILL on cancel/timeout, container removed with its
+anonymous volume, 5 s Docker stats sampling for
 CPU/memory/net/blkio metrics reported with `job_result`), and stream seq-numbered log
 chunks. `services/log_hub.rs` is the single log write path: mask FIRST (checkout tokens +
 confidential-looking env values; a per-job carry buffer catches secrets split across chunk
@@ -403,7 +408,8 @@ upgrades), `dashmap` (RunnerHub connection registry + LogHub broadcast/mask maps
 endpoint, region `auto`, presigned URLs; isolated in `services/r2.rs`), and the local
 `protocol` crate (shared WS message types + HMAC helpers). The `runner/` crate adds
 `bollard` 0.21 (Docker Engine API: image pull, container lifecycle, exec streams),
-`tokio-tungstenite` (rustls), `tar` + `flate2` (traversal-safe tarball extraction),
+`tokio-tungstenite` (rustls), `tar` + `flate2` + `bytes` (repackaging the source tarball
+into a traversal-safe tar streamed into the container via the Docker archive API),
 `tempfile` (per-job workspaces). Deliberately NOT used: `octocrab` (the reqwest helper in
 `services/github_app.rs` suffices), `git2` (tarball checkout via the API instead of cloning
 — heavy native dep on Windows).
@@ -500,9 +506,13 @@ endpoint, region `auto`, presigned URLs; isolated in `services/r2.rs`), and the 
 - List filters are validated before SQL: status/conclusion/trigger allow-lists, length caps
   on branch/search/timestamps, and free-text search runs through a server-built ILIKE
   pattern with `\`, `%`, `_` escaped — user text only ever matches literally
-- Execution isolation (reference runner): per-job temp workspaces (deleted after), tarball
-  extraction drops non-`Normal` path components AND symlink/hardlink entries (traversal
-  defense — a link target can't be validated by path checks), 1 GiB tarball cap, jobs run
+- Execution isolation (reference runner): /workspace is a daemon-managed anonymous volume
+  (removed with the container), NOT a host bind — source is repackaged into a
+  traversal-safe tar (top-level dir stripped, non-`Normal` path components AND
+  symlink/hardlink entries dropped — a link target can't be validated by path checks) and
+  streamed IN over the Docker archive API after the container starts (so a containerized
+  runner sharing the host docker.sock still sees a populated /workspace); artifacts are
+  streamed back OUT of `.overup/artifacts/` the same way, 1 GiB tarball cap, jobs run
   in Docker containers with `no-new-privileges` always set, **capabilities dropped by
   default** (`RUNNER_CAP_DROP=false` to opt out), memory/CPU/pids limits
   (`RUNNER_JOB_MEMORY_BYTES`/`RUNNER_JOB_NANO_CPUS`/`RUNNER_JOB_PIDS_LIMIT`, 0 disables),

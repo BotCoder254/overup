@@ -105,12 +105,20 @@ pub fn build_plans(raw_content: &str, default_image: &str) -> Result<Vec<Planned
             for (index, step) in list.iter().enumerate() {
                 if let Some(uses) = step.get("uses").and_then(Value::as_str) {
                     let uses = sanitize_for_notice(uses);
-                    match setup_action_hint(&uses) {
-                        Some(hint) => notices.push(format!(
+                    if is_checkout_action(&uses) {
+                        // Checkout is NOT skipped — the runner fetches the
+                        // repository automatically before the job runs. Saying
+                        // "not supported; skipped" wrongly implies no source.
+                        notices.push(format!(
+                            "step `uses: {uses}` is a no-op here — your repository is checked out automatically before the job runs"
+                        ));
+                    } else if let Some(hint) = setup_action_hint(&uses) {
+                        notices.push(format!(
                             "step `uses: {uses}` is not executed; the default job image ships common toolchains — pin this one by adding `{hint}` to the job"
-                        )),
-                        None => notices
-                            .push(format!("step `uses: {uses}` is not supported yet; skipped")),
+                        ));
+                    } else {
+                        notices
+                            .push(format!("step `uses: {uses}` is not supported yet; skipped"));
                     }
                     continue;
                 }
@@ -241,6 +249,14 @@ fn is_valid_image_reference(value: &str) -> bool {
 /// cap the echoed fragment so a hostile workflow can't bloat or garble them.
 fn sanitize_for_notice(value: &str) -> String {
     value.chars().filter(|c| !c.is_control()).take(100).collect()
+}
+
+/// Whether a `uses:` step is a repository checkout. These are a no-op on
+/// overup because the runner checks the repository out automatically before
+/// the job runs — so the notice must not imply the source is missing.
+fn is_checkout_action(uses: &str) -> bool {
+    let action = uses.split('@').next().unwrap_or(uses);
+    matches!(action, "actions/checkout")
 }
 
 /// Well-known `setup-*` actions mapped to the per-job `container:` image
@@ -465,5 +481,23 @@ jobs:
         );
         assert_eq!(setup_action_hint("dtolnay/rust-toolchain@stable"), Some("container: rust:1"));
         assert_eq!(setup_action_hint("actions/checkout@v4"), None);
+    }
+
+    #[test]
+    fn checkout_notice_is_reassuring_not_a_skip_warning() {
+        // The SIMPLE workflow uses `actions/checkout@v4`; its notice must say
+        // the repo is checked out automatically, NOT "not supported; skipped".
+        let plans = build_plans(SIMPLE, "ubuntu:24.04").ok().unwrap();
+        let notices = plans[0].plan["notices"].as_array().unwrap();
+        let checkout = notices
+            .iter()
+            .filter_map(|n| n.as_str())
+            .find(|n| n.contains("actions/checkout@v4"))
+            .expect("a checkout notice");
+        assert!(checkout.contains("checked out automatically"), "{checkout}");
+        assert!(!checkout.contains("not supported"), "{checkout}");
+
+        assert!(is_checkout_action("actions/checkout@v4"));
+        assert!(!is_checkout_action("actions/setup-node@v4"));
     }
 }

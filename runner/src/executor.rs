@@ -1,19 +1,27 @@
 //! Job execution via the Docker Engine API.
 //!
-//! One job at a time: prepare an isolated temporary workspace, download and
-//! extract the repository tarball (path-traversal-safe, symlink entries
-//! dropped), pull the container image, start one hardened keep-alive
+//! One job at a time: download and repackage the repository tarball into a
+//! path-traversal-safe tar (GitHub's top-level dir stripped, symlink/hardlink
+//! entries dropped), pull the container image, start one hardened keep-alive
 //! container (no-new-privileges always; capabilities dropped, memory/CPU/
 //! pids limits, network mode, optional non-root user and read-only rootfs
-//! per config) with the workspace bind-mounted at /workspace, run each step
-//! as a `docker exec` (`<shell> -c <script>`), stream stdout/stderr chunks
-//! back with monotonic sequence numbers, sample container resource stats
-//! for the Performance tab, upload artifacts from `.overup/artifacts/`,
-//! then remove the container (and per-job network) and delete the
-//! workspace. Cancellation and the job timeout kill the container
-//! immediately.
+//! per config) with a daemon-managed anonymous volume at /workspace, stream
+//! the source INTO that volume via the Docker archive API (`docker cp`), run
+//! each step as a `docker exec` (`<shell> -c <script>`), stream stdout/stderr
+//! chunks back with monotonic sequence numbers, sample container resource
+//! stats for the Performance tab, pull artifacts back OUT of
+//! `.overup/artifacts/` via the archive API and upload them, then remove the
+//! container (with its anonymous volume) and per-job network. Cancellation
+//! and the job timeout kill the container immediately.
+//!
+//! Source and artifacts deliberately travel over the daemon's archive API
+//! rather than a host bind mount: when the runner itself runs in a container
+//! sharing the host's Docker socket (hosted runners), a bind mount of a
+//! runner-local path resolves against the HOST filesystem in the sibling job
+//! container and comes up empty. The archive API is daemon-agnostic and works
+//! identically for on-host, containerized, and remote-`DOCKER_HOST` runners.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -21,8 +29,9 @@ use anyhow::Context;
 use bollard::Docker;
 use bollard::models::{ContainerCreateBody, ExecConfig, HostConfig, NetworkCreateRequest};
 use bollard::query_parameters::{
-    CreateContainerOptions, CreateImageOptionsBuilder, KillContainerOptionsBuilder,
-    RemoveContainerOptionsBuilder, StartContainerOptions, StatsOptionsBuilder,
+    CreateContainerOptions, CreateImageOptionsBuilder, DownloadFromContainerOptionsBuilder,
+    KillContainerOptionsBuilder, RemoveContainerOptionsBuilder, StartContainerOptions,
+    StatsOptionsBuilder, UploadToContainerOptionsBuilder,
 };
 use futures_util::StreamExt;
 use protocol::{JobConclusion, JobMetrics, JobPayload, JobStep, LogStream, RunnerMsg};
@@ -35,6 +44,14 @@ use crate::{CurrentJob, JobIsolation, JobNetwork};
 
 /// Repository tarballs beyond this are refused.
 const MAX_TARBALL_BYTES: u64 = 1024 * 1024 * 1024;
+/// The artifacts tar streamed back out of the container is buffered to a temp
+/// file; beyond this it is abandoned (best-effort, never fails the job).
+const MAX_ARTIFACT_ARCHIVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// Absolute container path the repository source is unpacked into and steps
+/// run from.
+const WORKSPACE_DIR: &str = "/workspace";
+/// Where a job leaves artifacts, relative to the workspace.
+const ARTIFACTS_SUBDIR: &str = ".overup/artifacts";
 /// Log chunks are split to stay comfortably under the server frame cap.
 const LOG_CHUNK_BYTES: usize = 32 * 1024;
 
@@ -216,14 +233,6 @@ async fn execute(
         return fail("container_error");
     };
 
-    let workspace = match tempfile::tempdir() {
-        Ok(dir) => dir,
-        Err(error) => {
-            tracing::warn!(error = ?error, "failed to create workspace");
-            return fail("internal");
-        }
-    };
-
     let http = match reqwest::Client::builder()
         .user_agent("overup-runner")
         .timeout(Duration::from_secs(600))
@@ -236,20 +245,27 @@ async fn execute(
     let deadline =
         tokio::time::Instant::now() + Duration::from_secs(payload.timeout_seconds.max(60));
 
-    // --- checkout -----------------------------------------------------------
+    // --- checkout (download + repackage) ------------------------------------
+    // The source is uploaded INTO the container after it starts (see below) —
+    // it can't be bind-mounted, because a sibling job container resolves a
+    // runner-local path against the host filesystem. Download and repackage
+    // now so a fetch failure fails fast before we pull an image.
     log.section(Some("checkout"), None);
-    if let Some(checkout) = &payload.checkout {
+    let source_tar = if let Some(checkout) = &payload.checkout {
         log.system("downloading repository archive").await;
-        if let Err(error) = fetch_and_extract(&http, checkout, workspace.path()).await {
-            // Error text never contains the token (it travels in a header).
-            log.system(&format!("checkout failed: {error:#}")).await;
-            return fail("checkout_failed");
+        match fetch_and_repackage(&http, checkout).await {
+            Ok(tar) => Some(tar),
+            Err(error) => {
+                // Error text never contains the token (it travels in a header).
+                log.system(&format!("checkout failed: {error:#}")).await;
+                return fail("checkout_failed");
+            }
         }
-        log.system("checkout complete").await;
     } else {
         log.system("no checkout credentials; starting with an empty workspace")
             .await;
-    }
+        None
+    };
 
     // --- image pull ---------------------------------------------------------
     log.section(Some("image_pull"), None);
@@ -352,7 +368,11 @@ async fn execute(
     };
 
     let host_config = HostConfig {
-        binds: Some(vec![format!("{}:/workspace", workspace.path().display())]),
+        // No host bind for /workspace: the source is streamed in over the
+        // archive API after start, so this works even when a sibling job
+        // container can't see a runner-local path. /workspace is a
+        // daemon-managed anonymous volume (declared on the body below), which
+        // stays writable even under a read-only rootfs.
         cap_drop: isolation.cap_drop.then(|| vec!["ALL".to_string()]),
         // Always: children can never gain privileges (setuid binaries etc.).
         security_opt: Some(vec!["no-new-privileges:true".to_string()]),
@@ -379,7 +399,11 @@ async fn execute(
             "sleep 2147483647".to_string(),
         ]),
         env: Some(env.clone()),
-        working_dir: Some("/workspace".to_string()),
+        working_dir: Some(WORKSPACE_DIR.to_string()),
+        // Anonymous volume at /workspace (serialized as `{"/workspace":{}}`):
+        // daemon-managed and writable regardless of readonly_rootfs, removed
+        // with the container via `v: true` on cleanup.
+        volumes: Some(vec![WORKSPACE_DIR.to_string()]),
         user: isolation.user.clone(),
         host_config: Some(host_config),
         ..Default::default()
@@ -414,6 +438,19 @@ async fn execute(
         None,
     )
     .await;
+
+    // --- checkout (upload source into the container) ------------------------
+    // Now that /workspace exists inside the container, stream the repackaged
+    // source into it over the archive API.
+    if let Some(tar) = source_tar {
+        log.section(Some("checkout"), None);
+        if let Err(error) = upload_source(&docker, &container, tar).await {
+            log.system(&format!("checkout failed: {error:#}")).await;
+            cleanup(&docker, Some(&container), network.as_deref()).await;
+            return fail("checkout_failed");
+        }
+        log.system("checkout complete").await;
+    }
 
     // Resource telemetry for the Performance tab; failures only cost the
     // metrics, never the job.
@@ -477,9 +514,16 @@ async fn execute(
     }
 
     // --- artifacts (successful jobs only) ------------------------------------
+    // Pull `.overup/artifacts/` back OUT of the container over the archive API
+    // (symmetric with the source upload — no host bind), extract it to a temp
+    // dir, then hand that dir to the existing uploader.
     log.section(Some("artifacts"), None);
-    if matches!(result.0, JobConclusion::Success) {
-        let dir = workspace.path().join(".overup").join("artifacts");
+    if matches!(result.0, JobConclusion::Success)
+        && let Some(extracted) = download_artifacts_dir(&docker, &container).await
+    {
+        // The archive endpoint tars the requested directory itself, so its
+        // contents land under `<tmp>/artifacts/`.
+        let dir = extracted.path().join("artifacts");
         if dir.is_dir() {
             stage(out, job_id, "uploading_artifacts").await;
             let (uploaded, failed) =
@@ -494,8 +538,9 @@ async fn execute(
     // --- cleanup --------------------------------------------------------------
     log.section(Some("cleanup"), None);
     stage(out, job_id, "cleaning_workspace").await;
+    // Removing the container drops its anonymous /workspace volume (v: true),
+    // so everything the job wrote is gone with it.
     cleanup(&docker, Some(&container), network.as_deref()).await;
-    // The temp workspace (and everything the job wrote) is deleted on drop.
     result
 }
 
@@ -702,7 +747,13 @@ async fn remove_container(docker: &Docker, container: &str) {
     let _ = docker
         .remove_container(
             container,
-            Some(RemoveContainerOptionsBuilder::default().force(true).build()),
+            // `v(true)` also removes the anonymous /workspace volume.
+            Some(
+                RemoveContainerOptionsBuilder::default()
+                    .force(true)
+                    .v(true)
+                    .build(),
+            ),
         )
         .await;
 }
@@ -715,15 +766,16 @@ fn format_mib(bytes: i64) -> String {
     format!("{:.0} MiB", bytes.max(0) as f64 / (1024.0 * 1024.0))
 }
 
-/// Download the repository tarball (size-capped) and extract it with the
-/// GitHub top-level directory stripped. Only plain relative path segments
-/// are unpacked — entries with `..`, absolute paths, or prefixes are
-/// silently dropped (directory-traversal defense).
-async fn fetch_and_extract(
+/// Download the repository tarball (size-capped) and repackage it into a
+/// plain tar with the GitHub top-level directory stripped, ready to stream
+/// into the container's /workspace. Only plain relative path segments survive
+/// — entries with `..`, absolute paths, or prefixes are dropped, as are
+/// symlink/hardlink entries (directory-traversal defense; the path check
+/// can't validate a link TARGET). Returns the uncompressed tar bytes.
+async fn fetch_and_repackage(
     http: &reqwest::Client,
     checkout: &protocol::Checkout,
-    dest: &Path,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<u8>> {
     let response = http
         .get(&checkout.tarball_url)
         .bearer_auth(&checkout.token)
@@ -753,24 +805,27 @@ async fn fetch_and_extract(
     drop(file);
 
     let tar_path = tarball.path().to_path_buf();
-    let dest = dest.to_path_buf();
-    tokio::task::spawn_blocking(move || extract_stripped(&tar_path, &dest))
+    tokio::task::spawn_blocking(move || repackage_stripped(&tar_path))
         .await
-        .context("extraction task panicked")??;
-    Ok(())
+        .context("repackage task panicked")?
 }
 
-fn extract_stripped(tar_path: &Path, dest: &Path) -> anyhow::Result<()> {
+/// Read the downloaded gzip tarball and re-emit an uncompressed tar with the
+/// top-level `{owner}-{repo}-{sha}/` component stripped and unsafe entries
+/// dropped. Entry paths are rebuilt with `/` separators so the archive is
+/// valid for a Linux container regardless of the runner's own platform.
+fn repackage_stripped(tar_path: &Path) -> anyhow::Result<Vec<u8>> {
     let file = std::fs::File::open(tar_path)?;
     let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
+    let mut builder = tar::Builder::new(Vec::new());
     let mut skipped_links: u64 = 0;
     for entry in archive.entries()? {
         let mut entry = entry?;
 
-        // Symlink/hardlink entries are dropped outright: the entry path
-        // check below cannot validate a link TARGET, and a link pointing
-        // outside the workspace would let later entries (or the job itself)
-        // escape it. Source archives from the Contents API don't need them.
+        // Symlink/hardlink entries are dropped outright: a link TARGET can't
+        // be validated by the path check below, and one pointing outside the
+        // workspace would let later entries (or the job) escape it. Source
+        // archives from the Contents API don't need them.
         match entry.header().entry_type() {
             tar::EntryType::Symlink | tar::EntryType::Link => {
                 skipped_links += 1;
@@ -780,25 +835,177 @@ fn extract_stripped(tar_path: &Path, dest: &Path) -> anyhow::Result<()> {
         }
 
         let path = entry.path()?.into_owned();
-        // GitHub tarballs wrap everything in `{owner}-{repo}-{sha}/`.
-        let stripped: PathBuf = path.components().skip(1).collect();
-        if stripped.as_os_str().is_empty() {
+        // Strip GitHub's top-level wrapper, keep only plain segments, and
+        // rebuild the path with `/` so it is portable into the container.
+        let mut components = path.components();
+        components.next();
+        let mut rel = String::new();
+        let mut safe = true;
+        for component in components {
+            match component {
+                Component::Normal(segment) => {
+                    if !rel.is_empty() {
+                        rel.push('/');
+                    }
+                    rel.push_str(&segment.to_string_lossy());
+                }
+                _ => {
+                    safe = false;
+                    break;
+                }
+            }
+        }
+        if !safe || rel.is_empty() {
             continue;
         }
-        if stripped
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-        {
-            continue;
-        }
-        let target = dest.join(&stripped);
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        entry.unpack(&target)?;
+
+        // The cloned header carries the correct size/mode/mtime; append_data
+        // sets the (stripped) path and copies exactly `size` bytes.
+        let mut header = entry.header().clone();
+        builder.append_data(&mut header, &rel, &mut entry)?;
     }
     if skipped_links > 0 {
         tracing::warn!(count = skipped_links, "skipped link entries in repository tarball");
     }
+    builder.into_inner().context("finalizing source tar failed")
+}
+
+/// Stream a repackaged source tar into the container's /workspace over the
+/// Docker archive API (`PUT /containers/{id}/archive`).
+async fn upload_source(docker: &Docker, container: &str, tar: Vec<u8>) -> anyhow::Result<()> {
+    docker
+        .upload_to_container(
+            container,
+            Some(
+                UploadToContainerOptionsBuilder::default()
+                    .path(WORKSPACE_DIR)
+                    .build(),
+            ),
+            bollard::body_full(bytes::Bytes::from(tar)),
+        )
+        .await
+        .context("uploading source into the container failed")?;
     Ok(())
+}
+
+/// Pull `/workspace/.overup/artifacts` back out of the container over the
+/// archive API and extract it to a fresh temp dir. Best-effort: a missing
+/// directory (404) or any transport/extraction error yields `None` (no
+/// artifacts), never a job failure.
+async fn download_artifacts_dir(docker: &Docker, container: &str) -> Option<tempfile::TempDir> {
+    let mut stream = docker.download_from_container(
+        container,
+        Some(
+            DownloadFromContainerOptionsBuilder::default()
+                .path(&format!("{WORKSPACE_DIR}/{ARTIFACTS_SUBDIR}"))
+                .build(),
+        ),
+    );
+
+    let tarball = tempfile::NamedTempFile::new().ok()?;
+    let mut file = tokio::fs::File::create(tarball.path()).await.ok()?;
+    let mut total: u64 = 0;
+    while let Some(chunk) = stream.next().await {
+        // The daemon returns 404 as a stream error when the path is absent —
+        // that just means the job produced no artifacts.
+        let chunk = chunk.ok()?;
+        total += chunk.len() as u64;
+        if total > MAX_ARTIFACT_ARCHIVE_BYTES {
+            tracing::warn!("artifacts archive exceeds the size limit; skipping upload");
+            return None;
+        }
+        file.write_all(&chunk).await.ok()?;
+    }
+    file.flush().await.ok()?;
+    drop(file);
+    if total == 0 {
+        return None;
+    }
+
+    let dir = tempfile::tempdir().ok()?;
+    let tar_path = tarball.path().to_path_buf();
+    let dest = dir.path().to_path_buf();
+    // The archive endpoint returns an uncompressed tar; `unpack` guards
+    // against path-traversal entries.
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::File::open(&tar_path)?;
+        tar::Archive::new(file).unpack(&dest)
+    })
+    .await
+    .ok()?
+    .ok()?;
+    Some(dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a gzip tarball wrapped in a `repo-sha/` top-level dir with a mix
+    /// of a root file, a nested file, and a symlink — the shape of a GitHub
+    /// source archive plus a link we must drop.
+    fn sample_source_tarball() -> tempfile::NamedTempFile {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let gz = flate2::write::GzEncoder::new(
+            std::fs::File::create(tmp.path()).unwrap(),
+            flate2::Compression::default(),
+        );
+        let mut builder = tar::Builder::new(gz);
+        for (name, contents) in [
+            ("repo-sha/package.json", &b"{}"[..]),
+            ("repo-sha/src/main.rs", b"fn main() {}"),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o644);
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_cksum();
+            builder.append_data(&mut header, name, contents).unwrap();
+        }
+        // A symlink entry that must be dropped.
+        let mut link = tar::Header::new_gnu();
+        link.set_entry_type(tar::EntryType::Symlink);
+        link.set_size(0);
+        link.set_cksum();
+        builder
+            .append_link(&mut link, "repo-sha/evil", "/etc/passwd")
+            .unwrap();
+        builder.into_inner().unwrap().finish().unwrap();
+        tmp
+    }
+
+    #[test]
+    fn repackage_strips_top_level_and_drops_links() {
+        let src = sample_source_tarball();
+        let bytes = repackage_stripped(src.path()).unwrap();
+
+        let mut archive = tar::Archive::new(&bytes[..]);
+        let mut paths: Vec<String> = archive
+            .entries()
+            .unwrap()
+            .map(|e| e.unwrap().path().unwrap().to_string_lossy().into_owned())
+            .collect();
+        paths.sort();
+
+        // Top-level `repo-sha/` stripped; the symlink is gone.
+        assert_eq!(paths, vec!["package.json".to_string(), "src/main.rs".to_string()]);
+    }
+
+    #[test]
+    fn repackaged_source_unpacks_to_workspace_root() {
+        let src = sample_source_tarball();
+        let bytes = repackage_stripped(src.path()).unwrap();
+
+        let dest = tempfile::tempdir().unwrap();
+        tar::Archive::new(&bytes[..]).unpack(dest.path()).unwrap();
+
+        // Exactly where a step running in /workspace expects them.
+        assert_eq!(
+            std::fs::read(dest.path().join("package.json")).unwrap(),
+            b"{}"
+        );
+        assert!(dest.path().join("src/main.rs").is_file());
+        assert!(!dest.path().join("evil").exists());
+    }
+
 }
