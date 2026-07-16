@@ -21,7 +21,7 @@
 //! container and comes up empty. The archive API is daemon-agnostic and works
 //! identically for on-host, containerized, and remote-`DOCKER_HOST` runners.
 
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -860,22 +860,52 @@ fn repackage_stripped(tar_path: &Path) -> anyhow::Result<RepackagedSource> {
     let mut builder = tar::Builder::new(Vec::new());
     let mut skipped_links: u64 = 0;
     let mut files: u64 = 0;
+    // git's tar writer stores any path longer than the 100-byte ustar name
+    // field in a pax extended header (a type-`x` pseudo-entry that applies
+    // to the NEXT entry) — it never uses the ustar prefix field. Carry that
+    // path across so long-path files keep their real names, and never copy
+    // the pseudo-entries into the output: their record data still holds the
+    // ORIGINAL unstripped path, which Docker's extractor would re-apply,
+    // nesting those files under the wrapper dir inside /workspace.
+    let mut pax_path: Option<PathBuf> = None;
     for entry in archive.entries()? {
         let mut entry = entry?;
 
-        // Symlink/hardlink entries are dropped outright: a link TARGET can't
-        // be validated by the path check below, and one pointing outside the
-        // workspace would let later entries (or the job) escape it. Source
-        // archives from the Contents API don't need them.
         match entry.header().entry_type() {
+            tar::EntryType::XHeader => {
+                if let Some(extensions) = entry.pax_extensions()? {
+                    for extension in extensions.flatten() {
+                        if extension.key().ok() == Some("path")
+                            && let Ok(value) = extension.value()
+                        {
+                            pax_path = Some(PathBuf::from(value));
+                        }
+                    }
+                }
+                continue;
+            }
+            // Global pax headers and GNU long-name pseudo-entries are
+            // metadata, not files — never part of the output.
+            tar::EntryType::XGlobalHeader
+            | tar::EntryType::GNULongName
+            | tar::EntryType::GNULongLink => continue,
+            // Symlink/hardlink entries are dropped outright: a link TARGET
+            // can't be validated by the path check below, and one pointing
+            // outside the workspace would let later entries (or the job)
+            // escape it. Source archives from the Contents API don't need
+            // them.
             tar::EntryType::Symlink | tar::EntryType::Link => {
                 skipped_links += 1;
+                pax_path = None;
                 continue;
             }
             _ => {}
         }
 
-        let path = entry.path()?.into_owned();
+        let path = match pax_path.take() {
+            Some(path) => path,
+            None => entry.path()?.into_owned(),
+        };
         // Strip GitHub's top-level wrapper, keep only plain segments, and
         // rebuild the path with `/` so it is portable into the container.
         // A leading `./` (some tar producers emit it) is consumed first so
@@ -1090,6 +1120,104 @@ mod tests {
         tar::Archive::new(&source.tar[..]).unpack(dest.path()).unwrap();
         assert!(dest.path().join("package.json").is_file());
         assert!(dest.path().join("src/main.rs").is_file());
+        assert!(!dest.path().join("repo-sha").exists());
+    }
+
+    /// One pax record in the `%len key=value\n` wire format.
+    fn pax_record(key: &str, value: &str) -> Vec<u8> {
+        // len counts its own digits plus ` key=value\n`.
+        let base = key.len() + value.len() + 3;
+        let mut len = base;
+        loop {
+            let candidate = base + len.to_string().len();
+            if candidate == len {
+                break;
+            }
+            len = candidate;
+        }
+        format!("{len} {key}={value}\n").into_bytes()
+    }
+
+    /// git's tar writer never uses the ustar prefix field: a path longer
+    /// than the 100-byte name field arrives as a pax extended header
+    /// (type `x`) followed by a regular entry with a truncated name. The
+    /// repackager must restore the real path and drop the pseudo-entry —
+    /// copying it through made Docker re-apply the ORIGINAL unstripped
+    /// path, nesting 176 of this repo's own files under the wrapper dir
+    /// (the empty-looking /workspace CI failure of 2026-07-16).
+    #[test]
+    fn repackage_applies_pax_long_paths_and_drops_pseudo_entries() {
+        let long_rel = format!("src/{}/useRepositories.ts", "d".repeat(110));
+        let long_path = format!("repo-sha/{long_rel}");
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let gz = flate2::write::GzEncoder::new(
+            std::fs::File::create(tmp.path()).unwrap(),
+            flate2::Compression::default(),
+        );
+        let mut builder = tar::Builder::new(gz);
+
+        // Global pax header, the way git leads every archive.
+        let comment = pax_record("comment", "abc123");
+        let mut global = tar::Header::new_ustar();
+        global.set_entry_type(tar::EntryType::XGlobalHeader);
+        global.set_size(comment.len() as u64);
+        global.set_cksum();
+        builder
+            .append_data(&mut global, "pax_global_header", &comment[..])
+            .unwrap();
+
+        // Extended header carrying the real path, then the truncated entry.
+        let record = pax_record("path", &long_path);
+        let mut xheader = tar::Header::new_ustar();
+        xheader.set_entry_type(tar::EntryType::XHeader);
+        xheader.set_size(record.len() as u64);
+        xheader.set_cksum();
+        builder
+            .append_data(&mut xheader, "repo-sha/paxheader", &record[..])
+            .unwrap();
+        let contents = b"export {};";
+        let mut file = tar::Header::new_ustar();
+        file.set_entry_type(tar::EntryType::Regular);
+        file.set_size(contents.len() as u64);
+        file.set_mode(0o644);
+        file.set_cksum();
+        builder
+            .append_data(&mut file, "repo-sha/truncated", &contents[..])
+            .unwrap();
+
+        // A short-path sibling must be unaffected by the carried pax path.
+        let mut plain = tar::Header::new_ustar();
+        plain.set_entry_type(tar::EntryType::Regular);
+        plain.set_size(2);
+        plain.set_mode(0o644);
+        plain.set_cksum();
+        builder
+            .append_data(&mut plain, "repo-sha/package.json", &b"{}"[..])
+            .unwrap();
+        builder.into_inner().unwrap().finish().unwrap();
+
+        let source = repackage_stripped(tmp.path()).unwrap();
+        assert_eq!(source.files, 2);
+
+        // No pseudo-entries survive into the output archive.
+        let mut archive = tar::Archive::new(&source.tar[..]);
+        for entry in archive.entries().unwrap() {
+            let entry = entry.unwrap();
+            assert!(matches!(
+                entry.header().entry_type(),
+                tar::EntryType::Regular
+            ));
+        }
+
+        let dest = tempfile::tempdir().unwrap();
+        tar::Archive::new(&source.tar[..]).unpack(dest.path()).unwrap();
+        assert_eq!(
+            std::fs::read(dest.path().join(&long_rel)).unwrap(),
+            contents
+        );
+        assert!(dest.path().join("package.json").is_file());
+        assert!(!dest.path().join("truncated").exists());
         assert!(!dest.path().join("repo-sha").exists());
     }
 
