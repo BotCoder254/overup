@@ -243,7 +243,8 @@ pub struct PushRunnableWorkflow {
 }
 
 /// One workflow-YAML reference to a secret/var/environment name, with the
-/// repository and workflow it came from. Names only — never values.
+/// repository and workflow it came from and — when something satisfies it —
+/// the id of the configured row. Names and ids only, never values.
 #[derive(Debug, sqlx::FromRow)]
 pub struct RequirementRefRow {
     pub name: String,
@@ -251,6 +252,7 @@ pub struct RequirementRefRow {
     pub repository_name: String,
     pub workflow_id: Uuid,
     pub workflow_path: String,
+    pub configured_id: Option<Uuid>,
 }
 
 /// CTE expanding one metadata ref array across a workspace's workflows.
@@ -279,22 +281,25 @@ fn refs_cte(key: &str) -> String {
     )
 }
 
-/// Secret names referenced by workflow YAML with no configured secret that
-/// could satisfy them: a name counts as configured when a workspace-scoped
-/// secret, a repository-scoped secret on the referencing repo, or an
-/// environment-scoped secret in any environment carries it (which environment
-/// applies is a dispatch-time question — "any environment" keeps the rule
-/// simple and matches how precedence is explained in the UI).
-pub async fn missing_secret_refs(
+/// Every secret name referenced by workflow YAML, with the id of the secret
+/// that would satisfy it when one exists: a name counts as configured for a
+/// referencing repo when a workspace-scoped secret, a repository-scoped
+/// secret on that repo, or an environment-scoped secret in any environment
+/// carries it (which environment applies is a dispatch-time question). The
+/// LATERAL picks the highest-precedence match so the UI can link straight
+/// to it.
+pub async fn secret_ref_states(
     pool: &PgPool,
     workspace_id: Uuid,
 ) -> sqlx::Result<Vec<RequirementRefRow>> {
     let sql = refs_cte("secretRefs")
         + r#"
-        SELECT name, repository_id, repository_name, workflow_id, workflow_path
+        SELECT refs.name, refs.repository_id, refs.repository_name,
+               refs.workflow_id, refs.workflow_path, s.id AS configured_id
         FROM refs
-        WHERE NOT EXISTS (
-            SELECT 1 FROM secrets s
+        LEFT JOIN LATERAL (
+            SELECT s.id
+            FROM secrets s
             WHERE s.workspace_id = $1
               AND s.name = refs.name
               AND (
@@ -302,8 +307,11 @@ pub async fn missing_secret_refs(
                 OR s.repository_id = refs.repository_id
                 OR s.environment_id IS NOT NULL
               )
-        )
-        ORDER BY name, repository_name, workflow_path
+            ORDER BY (s.environment_id IS NOT NULL) DESC,
+                     (s.repository_id IS NOT NULL) DESC
+            LIMIT 1
+        ) s ON TRUE
+        ORDER BY refs.name, refs.repository_name, refs.workflow_path
         LIMIT 1000
         "#;
     sqlx::query_as::<_, RequirementRefRow>(&sql)
@@ -313,14 +321,15 @@ pub async fn missing_secret_refs(
 }
 
 /// Every `${{ vars.NAME }}` reference across the workspace — informational
-/// only (the platform doesn't manage plain variables), so no anti-join.
+/// only (the platform doesn't manage plain variables), never configured.
 pub async fn workspace_var_refs(
     pool: &PgPool,
     workspace_id: Uuid,
 ) -> sqlx::Result<Vec<RequirementRefRow>> {
     let sql = refs_cte("varRefs")
         + r#"
-        SELECT name, repository_id, repository_name, workflow_id, workflow_path
+        SELECT name, repository_id, repository_name, workflow_id, workflow_path,
+               NULL::uuid AS configured_id
         FROM refs
         ORDER BY name, repository_name, workflow_path
         LIMIT 1000
@@ -331,21 +340,21 @@ pub async fn workspace_var_refs(
         .await
 }
 
-/// Environment names bound by workflow YAML with no matching environment row
-/// (case-insensitive, like dispatch resolution).
-pub async fn missing_environment_refs(
+/// Every environment name bound by workflow YAML, with the id of the
+/// matching environment row when it exists (case-insensitive, like dispatch
+/// resolution).
+pub async fn environment_ref_states(
     pool: &PgPool,
     workspace_id: Uuid,
 ) -> sqlx::Result<Vec<RequirementRefRow>> {
     let sql = refs_cte("environments")
         + r#"
-        SELECT name, repository_id, repository_name, workflow_id, workflow_path
+        SELECT refs.name, refs.repository_id, refs.repository_name,
+               refs.workflow_id, refs.workflow_path, e.id AS configured_id
         FROM refs
-        WHERE NOT EXISTS (
-            SELECT 1 FROM environments e
-            WHERE e.workspace_id = $1 AND lower(e.name) = lower(refs.name)
-        )
-        ORDER BY name, repository_name, workflow_path
+        LEFT JOIN environments e
+          ON e.workspace_id = $1 AND lower(e.name) = lower(refs.name)
+        ORDER BY refs.name, refs.repository_name, refs.workflow_path
         LIMIT 1000
         "#;
     sqlx::query_as::<_, RequirementRefRow>(&sql)
@@ -363,7 +372,8 @@ pub async fn list_binding_environment(
 ) -> sqlx::Result<Vec<RequirementRefRow>> {
     let sql = refs_cte("environments")
         + r#"
-        SELECT name, repository_id, repository_name, workflow_id, workflow_path
+        SELECT name, repository_id, repository_name, workflow_id, workflow_path,
+               NULL::uuid AS configured_id
         FROM refs
         WHERE lower(refs.name) = lower($2)
         ORDER BY repository_name, workflow_path

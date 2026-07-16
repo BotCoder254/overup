@@ -8,41 +8,10 @@ import { useRepositories } from '../../repositories/hooks/useRepositories';
 import { useEnvironmentsCatalog } from '../../environments/hooks/useEnvironments';
 import type { Secret } from '../../../types/secret';
 import { useCreateSecret, useReplaceSecretValue } from '../hooks/useSecrets';
+import { secretNameProblem as nameError } from '../lib/secretNameRules';
 
-/**
- * Client-side mirror of the server's validation (the server remains the
- * authority). Names are UPPER_SNAKE_CASE; platform prefixes and well-known
- * environment variables are reserved.
- */
-const NAME_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
-const RESERVED_PREFIXES = ['OVERUP_', 'GITHUB_', 'RUNNER_', 'DOCKER_'];
-const RESERVED_NAMES = [
-  'CI',
-  'PATH',
-  'HOME',
-  'SHELL',
-  'HOSTNAME',
-  'LANG',
-  'PWD',
-  'USER',
-  'TMPDIR',
-  'LD_PRELOAD',
-  'LD_LIBRARY_PATH',
-];
 const VALUE_MIN = 8;
 const VALUE_MAX = 32 * 1024;
-
-function nameError(name: string): string | undefined {
-  if (!name) return undefined;
-  if (name.length > 200) return 'At most 200 characters.';
-  if (!NAME_PATTERN.test(name)) {
-    return 'UPPER_SNAKE_CASE only: letters A-Z, digits, underscores; not starting with a digit.';
-  }
-  const prefix = RESERVED_PREFIXES.find((p) => name.startsWith(p));
-  if (prefix) return `The ${prefix} prefix is reserved for the platform.`;
-  if (RESERVED_NAMES.includes(name)) return `${name} is a reserved environment variable name.`;
-  return undefined;
-}
 
 function valueError(value: string): string | undefined {
   if (!value) return undefined;

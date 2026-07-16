@@ -720,9 +720,17 @@ fn scan_context_refs(content: &str, context: &str, exclude: &[&str]) -> Vec<Stri
     refs
 }
 
+/// A well-formed reference identifier: `[A-Za-z_][A-Za-z0-9_]*`, ≤200 bytes.
+fn is_ref_ident(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && name.len() <= 200
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 /// The identifier after a context word: `.NAME`, or `['NAME']` / `["NAME"]`.
-/// Anything not matching `[A-Za-z_][A-Za-z0-9_]*` (≤200 bytes) is dropped —
-/// dynamic or malformed references never become metadata.
+/// Anything not matching `is_ref_ident` is dropped — dynamic or malformed
+/// references never become metadata.
 fn extract_ref_name(after: &str) -> Option<String> {
     let name: String = if let Some(rest) = after.strip_prefix('.') {
         rest.chars()
@@ -741,15 +749,71 @@ fn extract_ref_name(after: &str) -> Option<String> {
     } else {
         return None;
     };
-    let mut chars = name.chars();
-    let first = chars.next()?;
-    if !(first.is_ascii_alphabetic() || first == '_')
-        || name.len() > 200
-        || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-    {
-        return None;
+    is_ref_ident(&name).then_some(name)
+}
+
+/// A trimmed expression that is EXACTLY one `secrets.NAME` / `vars.NAME`
+/// reference (dot or bracket form, nothing before or after) — the only
+/// shape `substitute_context_refs` will resolve. Compound expressions are
+/// deliberately not evaluated.
+fn parse_single_ref(expr: &str) -> Option<(&'static str, String)> {
+    for context in ["secrets", "vars"] {
+        let Some(rest) = expr.strip_prefix(context) else {
+            continue;
+        };
+        if let Some(ident) = rest.strip_prefix('.') {
+            if is_ref_ident(ident) {
+                return Some((context, ident.to_string()));
+            }
+        } else if let Some(bracket) = rest.strip_prefix('[') {
+            let bracket = bracket.trim_start();
+            let Some(quote) = bracket.chars().next().filter(|c| matches!(c, '\'' | '"')) else {
+                continue;
+            };
+            let inner = &bracket[1..];
+            let Some(end) = inner.find(quote) else {
+                continue;
+            };
+            let name = &inner[..end];
+            if inner[end + 1..].trim() == "]" && is_ref_ident(name) {
+                return Some((context, name.to_string()));
+            }
+        }
     }
-    Some(name)
+    None
+}
+
+/// Replace `${{ secrets.NAME }}` / `${{ vars.NAME }}` blocks with
+/// `lookup(context, name)` — GitHub-style expression resolution restricted
+/// to those two contexts. A block whose (trimmed) inner expression is
+/// anything else — another context, a compound expression, a dynamic name —
+/// passes through untouched: this is a substitutor, not an evaluator.
+/// `lookup` returning `None` also leaves the block untouched; to match
+/// GitHub's unset-secret semantics the caller returns an empty string for
+/// unknown names instead.
+pub fn substitute_context_refs(
+    input: &str,
+    lookup: &dyn Fn(&str, &str) -> Option<String>,
+) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(start) = rest.find("${{") {
+        let Some(end_rel) = rest[start + 3..].find("}}") else {
+            break;
+        };
+        let expr = &rest[start + 3..start + 3 + end_rel];
+        let block_end = start + 3 + end_rel + 2;
+        match parse_single_ref(expr.trim()).and_then(|(context, name)| lookup(context, &name)) {
+            Some(value) => {
+                out.push_str(&rest[..start]);
+                out.push_str(&value);
+            }
+            None => out.push_str(&rest[..block_end]),
+        }
+        rest = &rest[block_end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Distinct `environment:` names across jobs, deduped case-insensitively
@@ -1115,6 +1179,57 @@ jobs:
         assert_eq!(parsed.metadata["secretRefs"], serde_json::json!([]));
         assert_eq!(parsed.metadata["varRefs"], serde_json::json!([]));
         assert_eq!(parsed.metadata["environments"], serde_json::json!([]));
+    }
+
+    fn test_lookup(context: &str, name: &str) -> Option<String> {
+        match (context, name) {
+            ("secrets", "API_KEY") => Some("s3cr3t-value".into()),
+            ("secrets", _) => Some(String::new()),
+            ("vars", _) => Some(String::new()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn substitutes_secret_and_var_refs() {
+        assert_eq!(
+            substitute_context_refs("x=${{ secrets.API_KEY }};", &test_lookup),
+            "x=s3cr3t-value;"
+        );
+        assert_eq!(
+            substitute_context_refs("${{secrets['API_KEY']}} ${{ vars.REGION }}", &test_lookup),
+            "s3cr3t-value "
+        );
+        // Unknown secret resolves to empty (GitHub semantics via the lookup).
+        assert_eq!(
+            substitute_context_refs("v=${{ secrets.UNKNOWN }}!", &test_lookup),
+            "v=!"
+        );
+    }
+
+    #[test]
+    fn substitution_leaves_other_expressions_untouched() {
+        for input in [
+            "sha=${{ github.sha }}",
+            "m=${{ matrix.os }}",
+            "c=${{ secrets.A || secrets.B }}",
+            "f=${{ format('{0}', secrets.A) }}",
+            "d=${{ secrets[github.ref] }}",
+            "open=${{ secrets.NEVER_CLOSED",
+        ] {
+            assert_eq!(substitute_context_refs(input, &test_lookup), input);
+        }
+    }
+
+    #[test]
+    fn substitution_handles_multiple_blocks() {
+        assert_eq!(
+            substitute_context_refs(
+                "a=${{ secrets.API_KEY }} b=${{ github.ref }} c=${{ vars.X }}",
+                &test_lookup
+            ),
+            "a=s3cr3t-value b=${{ github.ref }} c="
+        );
     }
 
     #[test]

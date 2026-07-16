@@ -30,6 +30,13 @@ export function EnvironmentPanel({ job }: { job: PipelineJob }) {
               <span className="text-steel">any runner</span>
             )}
           </Field>
+          <Field label="Deployment environment">
+            {job.plan.environment ? (
+              <span className="font-mono text-xs">{job.plan.environment}</span>
+            ) : (
+              <span className="text-steel">none</span>
+            )}
+          </Field>
           <Field label="Workspace">
             <span className="font-mono text-xs">/workspace (isolated, deleted after run)</span>
           </Field>

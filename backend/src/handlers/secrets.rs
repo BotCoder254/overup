@@ -228,31 +228,48 @@ pub(crate) fn valid_ref_ident(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// Fold requirement rows into per-name entries: names sorted (BTreeMap),
-/// capped at 200 names and 20 references each — `referenceCount` carries the
-/// true total. `keep` is the read-time allow-list filter.
+/// Fold requirement rows into per-(repository, name) entries — the shape the
+/// repo-grouped detection cards render directly. Sorted by repository then
+/// name (BTreeMap key), capped at 200 entries and 20 workflow references
+/// each with `referenceCount` carrying the true total. `keep` is the
+/// read-time charset allow-list. `configuredId` is the covering secret's or
+/// matching environment's id (null when missing). Names and ids only, never
+/// values.
 pub(crate) fn group_requirements(
     rows: Vec<db::workflows::RequirementRefRow>,
     keep: impl Fn(&str) -> bool,
 ) -> Vec<serde_json::Value> {
-    const MAX_NAMES: usize = 200;
-    const MAX_REFS_PER_NAME: usize = 20;
+    const MAX_ENTRIES: usize = 200;
+    const MAX_REFS_PER_ENTRY: usize = 20;
 
-    let mut grouped: std::collections::BTreeMap<String, (i64, Vec<serde_json::Value>)> =
+    struct Entry {
+        repository_id: Uuid,
+        configured_id: Option<Uuid>,
+        count: i64,
+        references: Vec<serde_json::Value>,
+    }
+    let mut grouped: std::collections::BTreeMap<(String, String), Entry> =
         std::collections::BTreeMap::new();
     for row in rows {
         if !keep(&row.name) {
             continue;
         }
-        if !grouped.contains_key(&row.name) && grouped.len() >= MAX_NAMES {
+        let key = (row.repository_name.clone(), row.name.clone());
+        if !grouped.contains_key(&key) && grouped.len() >= MAX_ENTRIES {
             continue;
         }
-        let entry = grouped.entry(row.name).or_default();
-        entry.0 += 1;
-        if entry.1.len() < MAX_REFS_PER_NAME {
-            entry.1.push(json!({
-                "repositoryId": row.repository_id,
-                "repositoryName": row.repository_name,
+        let entry = grouped.entry(key).or_insert_with(|| Entry {
+            repository_id: row.repository_id,
+            configured_id: None,
+            count: 0,
+            references: Vec::new(),
+        });
+        entry.count += 1;
+        if entry.configured_id.is_none() {
+            entry.configured_id = row.configured_id;
+        }
+        if entry.references.len() < MAX_REFS_PER_ENTRY {
+            entry.references.push(json!({
                 "workflowId": row.workflow_id,
                 "workflowPath": row.workflow_path,
             }));
@@ -260,18 +277,30 @@ pub(crate) fn group_requirements(
     }
     grouped
         .into_iter()
-        .map(|(name, (count, references))| {
-            json!({ "name": name, "referenceCount": count, "references": references })
+        .map(|((repository_name, name), entry)| {
+            json!({
+                "name": name,
+                "repositoryId": entry.repository_id,
+                "repositoryName": repository_name,
+                "configured": entry.configured_id.is_some(),
+                "configuredId": entry.configured_id,
+                "referenceCount": entry.count,
+                "references": entry.references,
+            })
         })
         .collect()
 }
 
 /// GET /api/workspaces/{workspace_id}/secrets/requirements
 ///
-/// Workflow-declared requirements detected at sync time: secret names the
-/// YAML references (`${{ secrets.X }}`) with no configured secret that could
-/// satisfy them, plus `${{ vars.X }}` references (informational — the
-/// platform doesn't manage plain variables). Names only, never values.
+/// Workflow-declared requirements detected at sync time: every secret name
+/// the YAML references (`${{ secrets.X }}`) with its configured state and,
+/// when satisfied, the id of the covering secret; plus `${{ vars.X }}`
+/// references (informational — the platform doesn't manage plain
+/// variables). The charset filter is deliberately loose (`valid_ref_ident`,
+/// not the configurable-name rule) so reserved-prefix refs like
+/// DOCKER_TOKEN stay VISIBLE — the client marks them unconfigurable instead
+/// of silently hiding them. Names and ids only, never values.
 pub async fn requirements(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
@@ -279,14 +308,11 @@ pub async fn requirements(
 ) -> AppResult<Json<serde_json::Value>> {
     authz::require_permission(&state.pool, user.id, workspace_id, authz::SECRETS_READ).await?;
 
-    let missing = db::workflows::missing_secret_refs(&state.pool, workspace_id).await?;
+    let refs = db::workflows::secret_ref_states(&state.pool, workspace_id).await?;
     let vars = db::workflows::workspace_var_refs(&state.pool, workspace_id).await?;
 
     Ok(Json(json!({
-        // Only names that could actually become overup secrets surface as
-        // missing — a lowercase or GITHUB_*-reserved ref is unconfigurable
-        // here (GitHub folds case; we don't) and would be a dead-end button.
-        "secrets": group_requirements(missing, |name| validate_name(name).is_ok()),
+        "secrets": group_requirements(refs, valid_ref_ident),
         "vars": group_requirements(vars, valid_ref_ident),
     })))
 }

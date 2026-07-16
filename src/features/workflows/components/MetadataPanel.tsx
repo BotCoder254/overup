@@ -1,5 +1,5 @@
 import { format } from 'date-fns';
-import { GitCommitHorizontal, KeyRound, Lock } from 'lucide-react';
+import { Boxes, GitCommitHorizontal, KeyRound, Lock, Variable } from 'lucide-react';
 import { Badge } from '../../../components/ui/Badge';
 import type { WorkflowDetail } from '../../../types/workflow';
 
@@ -16,7 +16,12 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 export function MetadataPanel({ workflow }: { workflow: WorkflowDetail }) {
   const { metadata } = workflow;
   const secretRefs = metadata.secretRefs ?? [];
+  const varRefs = metadata.varRefs ?? [];
+  const environments = metadata.environments ?? [];
   const envKeys = metadata.envKeys ?? [];
+  // Reference detection shipped after this workflow's last parse — the
+  // arrays are absent (not empty) until the repository re-syncs.
+  const staleDetection = metadata.secretRefs === undefined || metadata.varRefs === undefined;
 
   return (
     <div className="divide-y divide-steel/10 text-sm">
@@ -102,8 +107,43 @@ export function MetadataPanel({ workflow }: { workflow: WorkflowDetail }) {
           </div>
         )}
         <p className="mt-2 text-[11px] leading-relaxed text-steel">
-          Names only — secret values never leave GitHub.
+          Names only — configure the values on the Secrets page; they resolve at dispatch.
         </p>
+      </Section>
+
+      <Section title="Variables referenced">
+        {varRefs.length === 0 ? (
+          <p className="text-xs text-steel">No variables referenced.</p>
+        ) : (
+          <div className="flex flex-wrap gap-1">
+            {varRefs.map((name) => (
+              <Badge key={name} variant="outline">
+                <Variable size={10} aria-hidden="true" />
+                {name}
+              </Badge>
+            ))}
+          </div>
+        )}
+      </Section>
+
+      <Section title="Environments">
+        {environments.length === 0 ? (
+          <p className="text-xs text-steel">No environment bindings.</p>
+        ) : (
+          <div className="flex flex-wrap gap-1">
+            {environments.map((name) => (
+              <Badge key={name} variant="primary">
+                <Boxes size={10} aria-hidden="true" />
+                {name}
+              </Badge>
+            ))}
+          </div>
+        )}
+        {staleDetection && (
+          <p className="mt-2 text-[11px] leading-relaxed text-steel">
+            Detection data comes from the last sync — re-sync the repository to refresh it.
+          </p>
+        )}
       </Section>
     </div>
   );

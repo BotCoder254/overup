@@ -144,11 +144,12 @@ pub async fn summary(
 
 /// GET /api/workspaces/{workspace_id}/environments/requirements
 ///
-/// Environment names bound by workflow YAML (`environment:`) with no
-/// matching environment row — detected at sync time, computed as a set
-/// difference at query time. Deliberately never auto-created: YAML must not
-/// mint workspace resources past RBAC; the UI offers a one-click create
-/// through the ordinary RBAC'd endpoint instead.
+/// Every environment name bound by workflow YAML (`environment:`), detected
+/// at sync time, with its configured state — `configuredId` is the matching
+/// environment row's id when one exists. Missing names are deliberately
+/// never auto-created: YAML must not mint workspace resources past RBAC;
+/// the UI offers a one-click create through the ordinary RBAC'd endpoint
+/// instead.
 pub async fn requirements(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
@@ -156,11 +157,11 @@ pub async fn requirements(
 ) -> AppResult<Json<serde_json::Value>> {
     authz::require_permission(&state.pool, user.id, workspace_id, authz::CONTENT_READ).await?;
 
-    let missing = db::workflows::missing_environment_refs(&state.pool, workspace_id).await?;
+    let refs = db::workflows::environment_ref_states(&state.pool, workspace_id).await?;
     Ok(Json(json!({
         // Read-time re-filter (the secrets requirements pattern): only names
-        // an environment row could actually take surface as creatable.
-        "environments": super::secrets::group_requirements(missing, |name| {
+        // an environment row could actually take surface.
+        "environments": super::secrets::group_requirements(refs, |name| {
             validate_name(name).is_ok()
         }),
     })))
