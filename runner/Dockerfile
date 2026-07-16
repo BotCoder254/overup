@@ -8,17 +8,17 @@
 #   docker build -f runner/Dockerfile -t overup-runner .
 #
 # Running this image requires access to a Docker daemon, because jobs
-# execute in sibling containers. Two required mounts when using the
-# host's daemon (see docs/deploy-runner.md for the full setup):
+# execute in sibling containers. When using the host's daemon, mount the
+# socket and grant its group (see docs/deploy-runner.md for the full setup):
 #
 #   -v /var/run/docker.sock:/var/run/docker.sock \
-#   --group-add "$(stat -c %g /var/run/docker.sock)" \
-#   -v /opt/overup/work:/opt/overup/work
+#   --group-add "$(stat -c %g /var/run/docker.sock)"
 #
-# The second mount MUST map the same path on both sides: job workspaces
-# are created under TMPDIR (/opt/overup/work) and bind-mounted into job
-# containers by the HOST daemon — the path must exist identically on the
-# host, or jobs see an empty /workspace.
+# No workspace mount is needed: /workspace is a daemon-managed anonymous
+# volume on each job container — the source is streamed IN over the Docker
+# archive API after the container starts, and artifacts stream back OUT the
+# same way — so a containerized runner sharing the host daemon never
+# depends on a shared host path.
 
 # ---------------------------------------------------------------- builder ---
 FROM rust:1-slim-bookworm AS builder
@@ -60,8 +60,8 @@ RUN apt-get update \
 WORKDIR /app
 COPY --from=builder /build/runner/target/release/runner /app/runner
 
-# Job workspaces (tempfile::tempdir) land here; when the host daemon is
-# used, mount the SAME host path here so bind mounts resolve correctly.
+# Runner-local scratch space (tempfile): downloaded source tarballs and
+# artifact staging land here. Purely internal — no host mount required.
 ENV TMPDIR=/opt/overup/work
 
 USER runner
