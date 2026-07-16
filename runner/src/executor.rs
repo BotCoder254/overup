@@ -287,16 +287,28 @@ async fn execute(
     let mut layer_progress: std::collections::HashMap<String, (i64, i64)> =
         std::collections::HashMap::new();
     let mut last_progress_log = Instant::now();
+    let mut pull_error: Option<String> = None;
     while let Some(progress) = pull.next().await {
         if *cancel.borrow() {
             return (JobConclusion::Cancelled, None, None);
         }
         match progress {
             Err(error) => {
-                log.system(&format!("image pull failed: {error}")).await;
-                return fail("image_pull_failed");
+                pull_error = Some(error.to_string());
+                break;
             }
             Ok(info) => {
+                // bollard maps `errorDetail` frames with a message to stream
+                // errors; a message-less one would otherwise slip through.
+                if let Some(detail) = &info.error_detail {
+                    pull_error = Some(
+                        detail
+                            .message
+                            .clone()
+                            .unwrap_or_else(|| "unknown pull error".to_string()),
+                    );
+                    break;
+                }
                 if let (Some(id), Some(detail)) = (&info.id, &info.progress_detail)
                     && let (Some(current), Some(total)) = (detail.current, detail.total)
                     && total > 0
@@ -321,6 +333,20 @@ async fn execute(
                     }
                 }
             }
+        }
+    }
+    if let Some(error) = pull_error {
+        // Pulls fail transiently (registry hiccups, daemon layer-extraction
+        // errors) even when a usable copy of the image is already on the
+        // daemon — fall back to it rather than failing the job.
+        if docker.inspect_image(&payload.image).await.is_ok() {
+            log.system(&format!(
+                "image pull failed ({error}); using locally cached image"
+            ))
+            .await;
+        } else {
+            log.system(&format!("image pull failed: {error}")).await;
+            return fail("image_pull_failed");
         }
     }
     metrics.image_pull_ms = Some(pull_started.elapsed().as_millis() as u64);
@@ -442,14 +468,15 @@ async fn execute(
     // --- checkout (upload source into the container) ------------------------
     // Now that /workspace exists inside the container, stream the repackaged
     // source into it over the archive API.
-    if let Some(tar) = source_tar {
+    if let Some(source) = source_tar {
         log.section(Some("checkout"), None);
-        if let Err(error) = upload_source(&docker, &container, tar).await {
+        let files = source.files;
+        if let Err(error) = upload_source(&docker, &container, source.tar).await {
             log.system(&format!("checkout failed: {error:#}")).await;
             cleanup(&docker, Some(&container), network.as_deref()).await;
             return fail("checkout_failed");
         }
-        log.system("checkout complete").await;
+        log.system(&format!("checkout complete ({files} files)")).await;
     }
 
     // Resource telemetry for the Performance tab; failures only cost the
@@ -766,16 +793,25 @@ fn format_mib(bytes: i64) -> String {
     format!("{:.0} MiB", bytes.max(0) as f64 / (1024.0 * 1024.0))
 }
 
+/// A repackaged source archive: the uncompressed tar bytes plus how many
+/// regular files survived filtering. Zero files means the tarball had an
+/// unexpected layout — uploading it would leave /workspace empty while the
+/// log claims a successful checkout, so callers treat it as a failure.
+struct RepackagedSource {
+    tar: Vec<u8>,
+    files: u64,
+}
+
 /// Download the repository tarball (size-capped) and repackage it into a
 /// plain tar with the GitHub top-level directory stripped, ready to stream
 /// into the container's /workspace. Only plain relative path segments survive
 /// — entries with `..`, absolute paths, or prefixes are dropped, as are
 /// symlink/hardlink entries (directory-traversal defense; the path check
-/// can't validate a link TARGET). Returns the uncompressed tar bytes.
+/// can't validate a link TARGET). Fails if no files survive.
 async fn fetch_and_repackage(
     http: &reqwest::Client,
     checkout: &protocol::Checkout,
-) -> anyhow::Result<Vec<u8>> {
+) -> anyhow::Result<RepackagedSource> {
     let response = http
         .get(&checkout.tarball_url)
         .bearer_auth(&checkout.token)
@@ -805,20 +841,25 @@ async fn fetch_and_repackage(
     drop(file);
 
     let tar_path = tarball.path().to_path_buf();
-    tokio::task::spawn_blocking(move || repackage_stripped(&tar_path))
+    let source = tokio::task::spawn_blocking(move || repackage_stripped(&tar_path))
         .await
-        .context("repackage task panicked")?
+        .context("repackage task panicked")??;
+    if source.files == 0 {
+        anyhow::bail!("repository archive contained no usable files (unexpected tarball layout)");
+    }
+    Ok(source)
 }
 
 /// Read the downloaded gzip tarball and re-emit an uncompressed tar with the
 /// top-level `{owner}-{repo}-{sha}/` component stripped and unsafe entries
 /// dropped. Entry paths are rebuilt with `/` separators so the archive is
 /// valid for a Linux container regardless of the runner's own platform.
-fn repackage_stripped(tar_path: &Path) -> anyhow::Result<Vec<u8>> {
+fn repackage_stripped(tar_path: &Path) -> anyhow::Result<RepackagedSource> {
     let file = std::fs::File::open(tar_path)?;
     let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
     let mut builder = tar::Builder::new(Vec::new());
     let mut skipped_links: u64 = 0;
+    let mut files: u64 = 0;
     for entry in archive.entries()? {
         let mut entry = entry?;
 
@@ -837,7 +878,12 @@ fn repackage_stripped(tar_path: &Path) -> anyhow::Result<Vec<u8>> {
         let path = entry.path()?.into_owned();
         // Strip GitHub's top-level wrapper, keep only plain segments, and
         // rebuild the path with `/` so it is portable into the container.
-        let mut components = path.components();
+        // A leading `./` (some tar producers emit it) is consumed first so
+        // the strip removes the wrapper dir, not the no-op dot.
+        let mut components = path.components().peekable();
+        if matches!(components.peek(), Some(Component::CurDir)) {
+            components.next();
+        }
         components.next();
         let mut rel = String::new();
         let mut safe = true;
@@ -862,12 +908,16 @@ fn repackage_stripped(tar_path: &Path) -> anyhow::Result<Vec<u8>> {
         // The cloned header carries the correct size/mode/mtime; append_data
         // sets the (stripped) path and copies exactly `size` bytes.
         let mut header = entry.header().clone();
+        if header.entry_type().is_file() {
+            files += 1;
+        }
         builder.append_data(&mut header, &rel, &mut entry)?;
     }
     if skipped_links > 0 {
         tracing::warn!(count = skipped_links, "skipped link entries in repository tarball");
     }
-    builder.into_inner().context("finalizing source tar failed")
+    let tar = builder.into_inner().context("finalizing source tar failed")?;
+    Ok(RepackagedSource { tar, files })
 }
 
 /// Stream a repackaged source tar into the container's /workspace over the
@@ -977,9 +1027,9 @@ mod tests {
     #[test]
     fn repackage_strips_top_level_and_drops_links() {
         let src = sample_source_tarball();
-        let bytes = repackage_stripped(src.path()).unwrap();
+        let source = repackage_stripped(src.path()).unwrap();
 
-        let mut archive = tar::Archive::new(&bytes[..]);
+        let mut archive = tar::Archive::new(&source.tar[..]);
         let mut paths: Vec<String> = archive
             .entries()
             .unwrap()
@@ -989,15 +1039,16 @@ mod tests {
 
         // Top-level `repo-sha/` stripped; the symlink is gone.
         assert_eq!(paths, vec!["package.json".to_string(), "src/main.rs".to_string()]);
+        assert_eq!(source.files, 2);
     }
 
     #[test]
     fn repackaged_source_unpacks_to_workspace_root() {
         let src = sample_source_tarball();
-        let bytes = repackage_stripped(src.path()).unwrap();
+        let source = repackage_stripped(src.path()).unwrap();
 
         let dest = tempfile::tempdir().unwrap();
-        tar::Archive::new(&bytes[..]).unpack(dest.path()).unwrap();
+        tar::Archive::new(&source.tar[..]).unpack(dest.path()).unwrap();
 
         // Exactly where a step running in /workspace expects them.
         assert_eq!(
@@ -1008,4 +1059,61 @@ mod tests {
         assert!(!dest.path().join("evil").exists());
     }
 
+    /// `./`-prefixed entries (`./repo-sha/…`) must strip the wrapper dir, not
+    /// the no-op dot — otherwise files land at /workspace/repo-sha/… and
+    /// steps see an empty workspace root.
+    #[test]
+    fn repackage_handles_dot_prefixed_entries() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let gz = flate2::write::GzEncoder::new(
+            std::fs::File::create(tmp.path()).unwrap(),
+            flate2::Compression::default(),
+        );
+        let mut builder = tar::Builder::new(gz);
+        for (name, contents) in [
+            ("./repo-sha/package.json", &b"{}"[..]),
+            ("./repo-sha/src/main.rs", b"fn main() {}"),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o644);
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_cksum();
+            builder.append_data(&mut header, name, contents).unwrap();
+        }
+        builder.into_inner().unwrap().finish().unwrap();
+
+        let source = repackage_stripped(tmp.path()).unwrap();
+        assert_eq!(source.files, 2);
+
+        let dest = tempfile::tempdir().unwrap();
+        tar::Archive::new(&source.tar[..]).unpack(dest.path()).unwrap();
+        assert!(dest.path().join("package.json").is_file());
+        assert!(dest.path().join("src/main.rs").is_file());
+        assert!(!dest.path().join("repo-sha").exists());
+    }
+
+    /// A tarball whose entries all get filtered out (here: links only) must
+    /// report zero files so the caller fails the checkout instead of
+    /// uploading an empty archive and logging success.
+    #[test]
+    fn repackage_reports_zero_files_when_everything_is_filtered() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let gz = flate2::write::GzEncoder::new(
+            std::fs::File::create(tmp.path()).unwrap(),
+            flate2::Compression::default(),
+        );
+        let mut builder = tar::Builder::new(gz);
+        let mut link = tar::Header::new_gnu();
+        link.set_entry_type(tar::EntryType::Symlink);
+        link.set_size(0);
+        link.set_cksum();
+        builder
+            .append_link(&mut link, "repo-sha/evil", "/etc/passwd")
+            .unwrap();
+        builder.into_inner().unwrap().finish().unwrap();
+
+        let source = repackage_stripped(tmp.path()).unwrap();
+        assert_eq!(source.files, 0);
+    }
 }
