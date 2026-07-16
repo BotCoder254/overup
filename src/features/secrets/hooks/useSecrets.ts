@@ -13,6 +13,7 @@ import {
   getSecretDetail,
   getSecretsAudit,
   getSecretsCatalog,
+  getSecretsRequirements,
   getSecretsSummary,
   replaceSecretValue,
   updateSecretDescription,
@@ -38,6 +39,8 @@ export const secretsSummaryKey = (workspaceId: string) =>
   ['workspaces', workspaceId, 'secrets', 'summary'] as const;
 export const secretsAuditKey = (workspaceId: string) =>
   ['workspaces', workspaceId, 'secrets', 'audit'] as const;
+export const secretsRequirementsKey = (workspaceId: string) =>
+  ['workspaces', workspaceId, 'secrets', 'requirements'] as const;
 export const secretDetailKey = (workspaceId: string, secretId: string) =>
   ['workspaces', workspaceId, 'secrets', 'detail', secretId] as const;
 
@@ -84,6 +87,20 @@ export function useSecretsSummary() {
   return useQuery({
     queryKey: secretsSummaryKey(workspaceId ?? ''),
     queryFn: () => getSecretsSummary(workspaceId!),
+    enabled: Boolean(workspaceId),
+  });
+}
+
+/**
+ * Workflow-declared requirements detected at sync time. Lives under the
+ * secrets prefix, so `invalidateSecrets` clears it after every mutation —
+ * a satisfied warning disappears as soon as its secret is created.
+ */
+export function useSecretsRequirements() {
+  const workspaceId = useWorkspaceId();
+  return useQuery({
+    queryKey: secretsRequirementsKey(workspaceId ?? ''),
+    queryFn: () => getSecretsRequirements(workspaceId!),
     enabled: Boolean(workspaceId),
   });
 }

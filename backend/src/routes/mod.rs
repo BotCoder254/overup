@@ -325,6 +325,10 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
             get(secrets::summary),
         )
         .route(
+            "/workspaces/{workspace_id}/secrets/requirements",
+            get(secrets::requirements),
+        )
+        .route(
             "/workspaces/{workspace_id}/secrets/audit",
             get(secrets::audit),
         )
@@ -343,6 +347,10 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
         .route(
             "/workspaces/{workspace_id}/environments/summary",
             get(environments::summary),
+        )
+        .route(
+            "/workspaces/{workspace_id}/environments/requirements",
+            get(environments::requirements),
         )
         .route(
             "/workspaces/{workspace_id}/environments/audit",

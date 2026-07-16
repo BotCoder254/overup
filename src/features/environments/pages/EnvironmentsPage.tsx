@@ -8,6 +8,7 @@ import { Card, CardBody, CardHeader } from '../../../components/ui/Card';
 import { EmptyState } from '../../../components/ui/EmptyState';
 import { Spinner } from '../../../components/ui/Spinner';
 import type { EnvironmentsCatalogFilters as ApiFilters } from '../api/environmentsApi';
+import { DetectedEnvironmentsCard } from '../components/DetectedEnvironmentsCard';
 import { EnvironmentAuditList } from '../components/EnvironmentAuditList';
 import { EnvironmentFormDialog } from '../components/EnvironmentFormDialog';
 import { EnvironmentsSummaryStrip } from '../components/EnvironmentsSummaryStrip';
@@ -15,6 +16,7 @@ import { EnvironmentsTable } from '../components/EnvironmentsTable';
 import {
   useEnvironmentsAudit,
   useEnvironmentsCatalog,
+  useEnvironmentsRequirements,
   useEnvironmentsSummary,
 } from '../hooks/useEnvironments';
 
@@ -58,6 +60,8 @@ export function EnvironmentsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [q, setQ] = useState(() => searchParams.get('q') ?? '');
   const [createOpen, setCreateOpen] = useState(false);
+  // Seeded by a detected-environment "Create" click; cleared on close.
+  const [presetName, setPresetName] = useState<string | null>(null);
 
   // Mirror the filter into the URL (replace — no history spam).
   useEffect(() => {
@@ -74,6 +78,7 @@ export function EnvironmentsPage() {
 
   const summary = useEnvironmentsSummary();
   const audit = useEnvironmentsAudit();
+  const requirements = useEnvironmentsRequirements();
   const query = useEnvironmentsCatalog(apiFilters);
   const environments = (query.data?.pages ?? []).flatMap((page) => page.environments);
 
@@ -108,7 +113,14 @@ export function EnvironmentsPage() {
         }
       />
 
-      <EnvironmentFormDialog open={createOpen} onClose={() => setCreateOpen(false)} />
+      <EnvironmentFormDialog
+        open={createOpen}
+        onClose={() => {
+          setCreateOpen(false);
+          setPresetName(null);
+        }}
+        presetName={presetName}
+      />
 
       <EnvironmentsSummaryStrip
         summary={summary.data}
@@ -194,6 +206,13 @@ export function EnvironmentsPage() {
         </div>
 
         <div className="min-w-0 space-y-4">
+          <DetectedEnvironmentsCard
+            requirements={requirements.data}
+            onCreate={(name) => {
+              setPresetName(name);
+              setCreateOpen(true);
+            }}
+          />
           <Card>
             <CardHeader>
               <h2 className="text-sm font-semibold text-charcoal">How environments work</h2>

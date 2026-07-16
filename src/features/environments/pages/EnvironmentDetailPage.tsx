@@ -1,7 +1,7 @@
 import { format, formatDistanceToNow } from 'date-fns';
-import { AlertTriangle, Lock, Pencil, Plus, Trash2 } from 'lucide-react';
+import { AlertTriangle, FileCode2, Lock, Pencil, Plus, Trash2 } from 'lucide-react';
 import { useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { workspacePath } from '../../../app/navigation';
 import { PageHeader } from '../../../components/layout/PageHeader';
 import { Button } from '../../../components/ui/Button';
@@ -176,6 +176,48 @@ export function EnvironmentDetailPage() {
             />
           ) : (
             <SecretsTable slug={slug} secrets={scopedSecrets} />
+          )}
+        </CardBody>
+      </Card>
+
+      <Card className="mt-4">
+        <CardHeader>
+          <h2 className="text-sm font-semibold text-charcoal">Bound workflows</h2>
+        </CardHeader>
+        <CardBody>
+          {(detail.data?.boundWorkflows ?? []).length === 0 ? (
+            <p className="text-sm text-steel">
+              No synced workflow references this environment yet. Bind one with{' '}
+              <code className="rounded bg-surface px-1.5 py-0.5 font-mono text-xs">
+                environment: {environment.name}
+              </code>
+              .
+            </p>
+          ) : (
+            <ul className="divide-y divide-steel/10">
+              {(detail.data?.boundWorkflows ?? []).map((workflow) => (
+                <li key={workflow.workflowId} className="py-2">
+                  <Link
+                    to={workspacePath(slug, `workflows/${workflow.workflowId}`)}
+                    className="group flex min-w-0 items-start gap-2.5"
+                  >
+                    <FileCode2
+                      size={16}
+                      aria-hidden="true"
+                      className="mt-0.5 shrink-0 text-primary"
+                    />
+                    <span className="min-w-0">
+                      <span className="block truncate font-mono text-sm text-charcoal group-hover:text-primary">
+                        {workflow.workflowPath}
+                      </span>
+                      <span className="block truncate text-xs text-steel">
+                        {workflow.repositoryName}
+                      </span>
+                    </span>
+                  </Link>
+                </li>
+              ))}
+            </ul>
           )}
         </CardBody>
       </Card>

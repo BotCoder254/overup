@@ -6,6 +6,8 @@
  * replacement and can never be read back.
  */
 
+import type { DetectedRequirement } from './requirements';
+
 export type SecretScope = 'workspace' | 'repository' | 'environment';
 
 export interface Secret {
@@ -48,6 +50,13 @@ export interface SecretsSummary {
   staleAfterDays: number;
   /** Whether SECRETS_MASTER_KEY is configured on the deployment. */
   encryptionConfigured: boolean;
+}
+
+export interface SecretsRequirements {
+  /** Workflow-referenced secret names with no configured secret. */
+  secrets: DetectedRequirement[];
+  /** `${{ vars.NAME }}` references — informational, not managed by overup. */
+  vars: DetectedRequirement[];
 }
 
 export interface SecretAuditEvent {

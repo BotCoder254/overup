@@ -4,6 +4,7 @@ import type {
   EnvironmentAuditEvent,
   EnvironmentDetailResponse,
   EnvironmentsListResponse,
+  EnvironmentsRequirements,
   EnvironmentsSummary,
 } from '../../../types/environment';
 
@@ -29,6 +30,14 @@ export async function getEnvironmentsSummary(workspaceId: string): Promise<Envir
   return api
     .get(`/api/workspaces/${workspaceId}/environments/summary`)
     .json<EnvironmentsSummary>();
+}
+
+export async function getEnvironmentsRequirements(
+  workspaceId: string,
+): Promise<EnvironmentsRequirements> {
+  return api
+    .get(`/api/workspaces/${workspaceId}/environments/requirements`)
+    .json<EnvironmentsRequirements>();
 }
 
 export async function getEnvironmentsAudit(

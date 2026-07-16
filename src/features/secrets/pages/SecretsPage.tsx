@@ -7,6 +7,7 @@ import { Card, CardBody, CardHeader } from '../../../components/ui/Card';
 import { EmptyState } from '../../../components/ui/EmptyState';
 import { Spinner } from '../../../components/ui/Spinner';
 import type { SecretsCatalogFilters as ApiFilters } from '../api/secretsApi';
+import { DetectedRequirementsCard } from '../components/DetectedRequirementsCard';
 import { SecretAuditList } from '../components/SecretAuditList';
 import {
   EMPTY_SECRET_FILTERS,
@@ -17,7 +18,12 @@ import { SecretFormDialog } from '../components/SecretFormDialog';
 import { SecretsSecurityCard } from '../components/SecretsSecurityCard';
 import { SecretsSummaryStrip } from '../components/SecretsSummaryStrip';
 import { SecretsTable } from '../components/SecretsTable';
-import { useSecretsAudit, useSecretsCatalog, useSecretsSummary } from '../hooks/useSecrets';
+import {
+  useSecretsAudit,
+  useSecretsCatalog,
+  useSecretsRequirements,
+  useSecretsSummary,
+} from '../hooks/useSecrets';
 
 /** Trailing-edge debounce for the free-text input. */
 function useDebouncedValue<T>(value: T, delayMs: number): T {
@@ -52,6 +58,11 @@ export function SecretsPage() {
     filtersFromParams(searchParams),
   );
   const [createOpen, setCreateOpen] = useState(false);
+  // Seeded by a detected-requirement "Add" click; cleared on dialog close.
+  const [preset, setPreset] = useState<{
+    name: string;
+    repository?: { id: string; name: string };
+  } | null>(null);
 
   // Mirror the filters into the URL (replace — no history spam).
   useEffect(() => {
@@ -76,6 +87,7 @@ export function SecretsPage() {
 
   const summary = useSecretsSummary();
   const audit = useSecretsAudit();
+  const requirements = useSecretsRequirements();
   const query = useSecretsCatalog(apiFilters);
   const secrets = (query.data?.pages ?? []).flatMap((page) => page.secrets);
   const hasFilters = Object.values(filters).some(Boolean);
@@ -111,7 +123,15 @@ export function SecretsPage() {
         }
       />
 
-      <SecretFormDialog open={createOpen} onClose={() => setCreateOpen(false)} />
+      <SecretFormDialog
+        open={createOpen}
+        onClose={() => {
+          setCreateOpen(false);
+          setPreset(null);
+        }}
+        presetName={preset?.name}
+        presetRepository={preset?.repository}
+      />
 
       <SecretsSummaryStrip
         summary={summary.data}
@@ -184,6 +204,13 @@ export function SecretsPage() {
         </div>
 
         <div className="min-w-0 space-y-4">
+          <DetectedRequirementsCard
+            requirements={requirements.data}
+            onAdd={(name, repository) => {
+              setPreset({ name, repository });
+              setCreateOpen(true);
+            }}
+          />
           <SecretsSecurityCard
             encryptionConfigured={summary.data?.encryptionConfigured}
             stale={summary.data?.stale}

@@ -217,6 +217,80 @@ pub async fn summary(
     })))
 }
 
+/// A well-formed `${{ … }}` reference identifier (`[A-Za-z_][A-Za-z0-9_]*`,
+/// ≤200 bytes). The parser only writes such names, but requirements are
+/// re-filtered at read time so legacy or hand-edited metadata can never
+/// smuggle arbitrary strings into a response.
+pub(crate) fn valid_ref_ident(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && name.len() <= 200
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Fold requirement rows into per-name entries: names sorted (BTreeMap),
+/// capped at 200 names and 20 references each — `referenceCount` carries the
+/// true total. `keep` is the read-time allow-list filter.
+pub(crate) fn group_requirements(
+    rows: Vec<db::workflows::RequirementRefRow>,
+    keep: impl Fn(&str) -> bool,
+) -> Vec<serde_json::Value> {
+    const MAX_NAMES: usize = 200;
+    const MAX_REFS_PER_NAME: usize = 20;
+
+    let mut grouped: std::collections::BTreeMap<String, (i64, Vec<serde_json::Value>)> =
+        std::collections::BTreeMap::new();
+    for row in rows {
+        if !keep(&row.name) {
+            continue;
+        }
+        if !grouped.contains_key(&row.name) && grouped.len() >= MAX_NAMES {
+            continue;
+        }
+        let entry = grouped.entry(row.name).or_default();
+        entry.0 += 1;
+        if entry.1.len() < MAX_REFS_PER_NAME {
+            entry.1.push(json!({
+                "repositoryId": row.repository_id,
+                "repositoryName": row.repository_name,
+                "workflowId": row.workflow_id,
+                "workflowPath": row.workflow_path,
+            }));
+        }
+    }
+    grouped
+        .into_iter()
+        .map(|(name, (count, references))| {
+            json!({ "name": name, "referenceCount": count, "references": references })
+        })
+        .collect()
+}
+
+/// GET /api/workspaces/{workspace_id}/secrets/requirements
+///
+/// Workflow-declared requirements detected at sync time: secret names the
+/// YAML references (`${{ secrets.X }}`) with no configured secret that could
+/// satisfy them, plus `${{ vars.X }}` references (informational — the
+/// platform doesn't manage plain variables). Names only, never values.
+pub async fn requirements(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    Path(workspace_id): Path<Uuid>,
+) -> AppResult<Json<serde_json::Value>> {
+    authz::require_permission(&state.pool, user.id, workspace_id, authz::SECRETS_READ).await?;
+
+    let missing = db::workflows::missing_secret_refs(&state.pool, workspace_id).await?;
+    let vars = db::workflows::workspace_var_refs(&state.pool, workspace_id).await?;
+
+    Ok(Json(json!({
+        // Only names that could actually become overup secrets surface as
+        // missing — a lowercase or GITHUB_*-reserved ref is unconfigurable
+        // here (GitHub folds case; we don't) and would be a dead-end button.
+        "secrets": group_requirements(missing, |name| validate_name(name).is_ok()),
+        "vars": group_requirements(vars, valid_ref_ident),
+    })))
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuditQuery {
