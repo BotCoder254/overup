@@ -50,10 +50,15 @@ export interface WorkflowDetail extends WorkflowSummary {
   fileSize: number;
   rawContent: string;
   metadata: {
+    /** Absent on workflows synced before version stamping shipped. */
+    parserVersion?: number;
     permissions?: unknown;
     concurrency?: unknown;
     envKeys?: string[];
     secretRefs?: string[];
+    /** Absent on workflows synced before vars/environment detection shipped. */
+    varRefs?: string[];
+    environments?: string[];
     /** Absent on workflows synced before dispatch-input parsing shipped. */
     dispatchInputs?: WorkflowDispatchInput[];
   };

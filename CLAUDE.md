@@ -186,24 +186,47 @@ variables), and `environments` (distinct job `environment:` names, case-insensit
 deduped, slug-filtered so dynamic `${{ … }}` names are never stored). All scanners share
 `workflow_parse::scan_context_refs` (identifier `[A-Za-z_][A-Za-z0-9_]*` ≤200 B, dedupe,
 cap 100, sort). Two read endpoints compute "referenced but not configured" as a set
-difference at QUERY time (`db/workflows.rs::missing_secret_refs/workspace_var_refs/
-missing_environment_refs` — `jsonb_array_elements_text` LATERAL with a `jsonb_typeof`
-guard so pre-feature/failed-parse metadata reads as empty; anti-join semantics: a secret
-name counts as configured via workspace scope, same-repo repository scope, or any
-environment scope): `GET …/secrets/requirements` (`secrets.read`) and
-`GET …/environments/requirements` (`content.read`). Handlers re-filter names at read
-time against the configurable-name allow-lists (defense-in-depth against hand-edited
-metadata) and cap output (200 names, 20 refs/name, true `referenceCount`). YAML never
-mints rows — the UI offers one-click create through the ordinary RBAC'd endpoints:
-`DetectedRequirementsCard` (secrets page right rail; "Add" pre-fills `SecretFormDialog`
-via `presetName`/`presetRepository`, repo scope only when every reference shares one
-repo) and `DetectedEnvironmentsCard` (environments page; "Create" pre-fills
-`EnvironmentFormDialog` via `presetName`). Both requirements queries live under their
-feature's react-query prefix, so every mutation's existing invalidation clears satisfied
-warnings automatically. The environment detail page lists `boundWorkflows` (from
-`list_binding_environment`, case-insensitive) linking to the workflow detail pages.
-Detection refreshes on every repo sync; workflows synced before this feature light up
-after their next push/manual re-sync.
+difference at QUERY time (`db/workflows.rs::secret_ref_states/workspace_var_refs/
+environment_ref_states` — `jsonb_array_elements_text` LATERAL with a `jsonb_typeof`
+guard so pre-feature/failed-parse metadata reads as empty; configured semantics: a
+secret name counts as configured via workspace scope, same-repo repository scope, or
+any environment scope, and the LATERAL picks the highest-precedence match's id):
+`GET …/secrets/requirements` (`secrets.read`) and `GET …/environments/requirements`
+(`content.read`) return EVERY detected (name, repository) pair with
+`configured`/`configuredId`, not just missing ones. Handlers re-filter names at read
+time against charset allow-lists (defense-in-depth against hand-edited metadata;
+deliberately looser than the configurable-name rule so reserved-prefix refs like
+DOCKER_TOKEN stay visible — the client marks them unconfigurable via the shared
+`features/secrets/lib/secretNameRules.ts`) and cap output (200 entries, 20 refs each,
+true `referenceCount`). YAML never mints rows — the repo-grouped "Detected in
+workflows" cards (`DetectedRequirementsCard` on the secrets page,
+`DetectedEnvironmentsCard` on the environments page) show Configured entries as
+success badges linking to the detail pages and missing ones with one-click Add/Create
+through the ordinary RBAC'd endpoints (dialog `presetName`/`presetRepository`). Both
+requirements queries live under their feature's react-query prefix, so every
+mutation's existing invalidation updates the cards automatically. The workflow detail
+Metadata tab surfaces `secretRefs`/`varRefs`/`environments` (with a re-sync hint when
+the stored parse predates detection), the environment detail page lists
+`boundWorkflows` (from `list_binding_environment`, case-insensitive), and the pipeline
+Environment tab shows the job's `plan.environment` binding. Detection refreshes on
+every repo sync; `workflow_parse::PARSER_VERSION` is stamped into metadata and the
+sync skip-condition re-parses stored workflows once after any parser bump (bump it
+whenever parse output changes, or new metadata never reaches already-synced
+workflows).
+
+**Dispatch-time expression resolution.** `workflow_parse::substitute_context_refs`
+resolves GitHub-style `${{ secrets.NAME }}` / `${{ vars.NAME }}` blocks (dot or
+bracket form; the trimmed inner expression must be exactly one such ref — compound
+expressions and other contexts pass through untouched, it is a substitutor, not an
+evaluator). `scheduler::dispatch` applies it to plan env VALUES and step `run`
+strings after decrypting the job's secrets: known secrets resolve to their value,
+unknown secrets and all vars resolve to "" (GitHub's unset semantics; no variables
+store yet). Substitution happens in dispatch memory only — stored plans keep the
+literals, so API responses never carry resolved values and reruns re-substitute with
+current secrets. Mask registration runs after substitution, and secret plaintexts are
+always masks, so a substituted-into-run secret still masks in logs. Secrets also
+continue to inject as env vars under their own names (precedence: plan env <
+workspace < repository < environment).
 
 **Notification Center (operational inbox).** Notifications are a per-user, actionable
 PROJECTION of the immutable `audit_logs` ledger — the Activity Feed keeps the complete

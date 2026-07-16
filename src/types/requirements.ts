@@ -10,9 +10,23 @@ export interface RequirementReference {
   workflowPath: string;
 }
 
+/** A workflow reference within the entry's repository. */
+export interface RequirementWorkflowRef {
+  workflowId: string;
+  workflowPath: string;
+}
+
+/**
+ * One detected (name, repository) pair with its configured state —
+ * `configuredId` is the covering secret's / matching environment's id.
+ */
 export interface DetectedRequirement {
   name: string;
-  /** True total — `references` is capped server-side (20 per name). */
+  repositoryId: string;
+  repositoryName: string;
+  configured: boolean;
+  configuredId: string | null;
+  /** True total — `references` is capped server-side (20 per entry). */
   referenceCount: number;
-  references: RequirementReference[];
+  references: RequirementWorkflowRef[];
 }

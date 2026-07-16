@@ -205,6 +205,7 @@ export function SecretsPage() {
 
         <div className="min-w-0 space-y-4">
           <DetectedRequirementsCard
+            slug={slug}
             requirements={requirements.data}
             onAdd={(name, repository) => {
               setPreset({ name, repository });

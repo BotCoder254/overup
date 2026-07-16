@@ -207,6 +207,7 @@ export function EnvironmentsPage() {
 
         <div className="min-w-0 space-y-4">
           <DetectedEnvironmentsCard
+            slug={slug}
             requirements={requirements.data}
             onCreate={(name) => {
               setPresetName(name);

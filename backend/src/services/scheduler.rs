@@ -19,6 +19,7 @@ use crate::db;
 use crate::models::pipeline::PipelineJob;
 use crate::models::runner::RunnerResponse;
 use crate::services::pipeline_run;
+use crate::services::workflow_parse;
 use crate::services::workspace_hub::WorkspaceEvent;
 use crate::state::AppState;
 
@@ -327,6 +328,8 @@ async fn dispatch(
     // failure while testing nothing.
     let mut injected_secret_ids: Vec<Uuid> = Vec::new();
     let mut secret_values: Vec<String> = Vec::new();
+    let mut resolved_secrets: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
     match &state.secrets_crypto {
         Some(crypto) => {
             let rows = db::secrets::resolve_for_dispatch(
@@ -358,7 +361,7 @@ async fn dispatch(
                     return Ok(DispatchOutcome::SecretsUnavailable);
                 };
                 secret_values.push(value.clone());
-                env.insert(row.name, value);
+                resolved_secrets.insert(row.name, value);
                 injected_secret_ids.push(row.id);
             }
         }
@@ -382,6 +385,34 @@ async fn dispatch(
         }
     }
 
+    // GitHub-style expression resolution, restricted to the secrets/vars
+    // contexts: `${{ secrets.NAME }}` in plan env VALUES and step `run`
+    // strings resolves to the secret's value (unknown names → empty string,
+    // GitHub's unset-secret semantics; vars → empty until a variables store
+    // exists). Substitution happens only here, in dispatch memory — the
+    // stored plan keeps the literals, so API responses never carry resolved
+    // values and reruns pick up rotated secrets automatically. Other
+    // contexts and compound expressions pass through untouched.
+    let lookup = |context: &str, name: &str| -> Option<String> {
+        match context {
+            "secrets" => Some(resolved_secrets.get(name).cloned().unwrap_or_default()),
+            "vars" => Some(String::new()),
+            _ => None,
+        }
+    };
+    for value in env.values_mut() {
+        if value.contains("${{") {
+            *value = workflow_parse::substitute_context_refs(value, &lookup);
+        }
+    }
+
+    // Merge resolved secrets on top of the (substituted) plan env under
+    // their own names. Precedence: plan env < workspace < repository <
+    // environment secret (resolve_for_dispatch already collapsed scopes).
+    for (name, value) in &resolved_secrets {
+        env.insert(name.clone(), value.clone());
+    }
+
     let steps: Vec<protocol::JobStep> = job
         .plan
         .get("steps")
@@ -390,9 +421,14 @@ async fn dispatch(
             steps
                 .iter()
                 .filter_map(|step| {
+                    let run = step.get("run")?.as_str()?;
                     Some(protocol::JobStep {
                         name: step.get("name")?.as_str()?.to_string(),
-                        run: step.get("run")?.as_str()?.to_string(),
+                        run: if run.contains("${{") {
+                            workflow_parse::substitute_context_refs(run, &lookup)
+                        } else {
+                            run.to_string()
+                        },
                         shell: step
                             .get("shell")
                             .and_then(|s| s.as_str())

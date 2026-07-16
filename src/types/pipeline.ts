@@ -50,6 +50,8 @@ export interface PipelineJobPlan {
   image: string;
   env: Record<string, string>;
   steps: PipelineJobPlanStep[];
+  /** YAML `environment:` binding — name only, resolved live at dispatch. */
+  environment?: string | null;
   notices: string[];
 }
 
