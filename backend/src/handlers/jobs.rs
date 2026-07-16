@@ -208,6 +208,7 @@ mod tests {
             position: 0,
             metrics: None,
             logs_archived_at: None,
+            logs_archive_backend: None,
             queued_at: Utc::now(),
             assigned_at: None,
             started_at: None,

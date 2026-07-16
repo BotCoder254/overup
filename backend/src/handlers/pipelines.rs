@@ -640,11 +640,14 @@ pub async fn job_logs_raw(
     // presigned GET (the gzip'd file; browsers download it as-is).
     if chunks.is_empty()
         && job.logs_archived_at.is_some()
-        && let Some(r2) = &state.r2
+        && let Some(storage) = &state.storage
     {
         let key = crate::services::log_archive::log_key_for(workspace_id, &job);
         let filename = format!("{}-{}.log.gz", job.job_key, job.attempt);
-        let url = r2
+        // NULL legacy markers read as 'r2' — every pre-marker archive
+        // was written when R2 was the only store.
+        let url = storage
+            .store_for(job.logs_archive_backend.as_deref().unwrap_or("r2"))
             .presign_get(&key, &filename)
             .await
             .map_err(AppError::Internal)?;
@@ -715,11 +718,12 @@ pub async fn artifact_download(
     if artifact.status != "uploaded" {
         return Err(AppError::Conflict("artifact is not available for download"));
     }
-    let Some(r2) = &state.r2 else {
+    let Some(storage) = &state.storage else {
         return Err(AppError::Conflict("artifact storage is not configured"));
     };
 
-    let url = r2
+    let url = storage
+        .store_for(&artifact.storage_backend)
         .presign_get(&artifact.r2_key, &artifact.name)
         .await
         .map_err(AppError::Internal)?;

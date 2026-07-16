@@ -120,9 +120,12 @@ pub struct PipelineJob {
     pub position: i32,
     /// Runner-reported resource metrics, clamped server-side before storage.
     pub metrics: Option<serde_json::Value>,
-    /// Set once the full log has been archived to R2; NULL chunks are the
-    /// only copy and must never be pruned.
+    /// Set once the full log has been archived to object storage; NULL
+    /// chunks are the only copy and must never be pruned.
     pub logs_archived_at: Option<DateTime<Utc>>,
+    /// Which store holds the archive ('minio' | 'r2'); NULL legacy rows
+    /// read as 'r2'. Internal routing marker, never serialized outward.
+    pub logs_archive_backend: Option<String>,
     pub queued_at: DateTime<Utc>,
     pub assigned_at: Option<DateTime<Utc>>,
     pub started_at: Option<DateTime<Utc>>,

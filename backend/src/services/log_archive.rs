@@ -1,11 +1,14 @@
-//! Post-completion log archival to R2.
+//! Post-completion log archival to object storage.
 //!
-//! When a job reaches a terminal state and R2 is configured, its persisted
-//! (already masked) log chunks are concatenated, gzip-compressed, and stored
-//! at `logs/{workspace}/{pipeline}/{job}-{attempt}.log.gz`. Postgres remains
+//! When a job reaches a terminal state and object storage is configured
+//! (MinIO primary and/or R2 fallback), its persisted (already masked) log
+//! chunks are concatenated, gzip-compressed, and stored at
+//! `logs/{workspace}/{pipeline}/{job}-{attempt}.log.gz`. Postgres remains
 //! the source of truth until the janitor prunes chunks whose hot-retention
 //! window has lapsed — a failed upload just leaves the job unarchived, and
-//! unarchived jobs are never pruned.
+//! unarchived jobs are never pruned. The write falls back to the secondary
+//! store automatically; whichever store accepted the archive is recorded on
+//! the job row so downloads presign against the right host.
 
 use std::io::Write;
 
@@ -13,13 +16,13 @@ use uuid::Uuid;
 
 use crate::db;
 use crate::models::pipeline::PipelineJob;
-use crate::services::r2::R2;
+use crate::services::object_store;
 use crate::state::AppState;
 
 /// Fire-and-forget archival for one finished job. Skipped jobs and jobs
 /// that never produced output are left alone.
 pub fn spawn_archive(state: &AppState, job: &PipelineJob) {
-    if state.r2.is_none() {
+    if state.storage.is_none() {
         return;
     }
     if job.conclusion.as_deref() == Some("skipped") || job.log_bytes == 0 {
@@ -39,7 +42,7 @@ pub fn spawn_archive(state: &AppState, job: &PipelineJob) {
 }
 
 async fn archive_job(state: &AppState, job: &PipelineJob) -> anyhow::Result<()> {
-    let Some(r2) = &state.r2 else {
+    let Some(storage) = &state.storage else {
         return Ok(());
     };
 
@@ -73,13 +76,15 @@ async fn archive_job(state: &AppState, job: &PipelineJob) -> anyhow::Result<()> 
     .await??;
 
     let key = log_key_for(pipeline.workspace_id, job);
-    r2.put_object(&key, compressed, "application/gzip").await?;
-    db::pipeline_jobs::mark_logs_archived(&state.pool, job.id).await?;
+    let backend = storage
+        .put_object(&key, compressed, "application/gzip")
+        .await?;
+    db::pipeline_jobs::mark_logs_archived(&state.pool, job.id, backend.as_str()).await?;
 
-    tracing::debug!(job_id = %job.id, key = %key, "job log archived to R2");
+    tracing::debug!(job_id = %job.id, key = %key, backend = %backend, "job log archived");
     Ok(())
 }
 
 pub fn log_key_for(workspace_id: Uuid, job: &PipelineJob) -> String {
-    R2::log_key(workspace_id, job.pipeline_id, job.id, job.attempt)
+    object_store::log_key(workspace_id, job.pipeline_id, job.id, job.attempt)
 }

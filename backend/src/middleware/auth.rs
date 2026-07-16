@@ -23,9 +23,13 @@ impl FromRequestParts<AppState> for CurrentUser {
             .map(|cookie| cookie.value().to_string())
             .ok_or(AppError::Unauthorized)?;
 
-        let user = db::sessions::find_valid_user(&state.pool, &session::hash_token(&token))
-            .await?
-            .ok_or(AppError::Unauthorized)?;
+        let user = db::sessions::find_valid_user(
+            &state.pool,
+            &session::hash_token(&token),
+            state.config.session_idle_timeout_hours,
+        )
+        .await?
+        .ok_or(AppError::Unauthorized)?;
 
         Ok(CurrentUser(user))
     }

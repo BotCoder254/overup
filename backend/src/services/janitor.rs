@@ -22,27 +22,33 @@ pub async fn run(state: AppState) {
 
 async fn pass(state: &AppState) {
     // 1. Expired sessions and abandoned login transactions.
-    if let Err(error) = db::sessions::delete_expired(&state.pool).await {
+    if let Err(error) =
+        db::sessions::delete_expired(&state.pool, state.config.session_idle_timeout_hours).await
+    {
         tracing::warn!(error = ?error, "failed to purge expired sessions");
     }
     if let Err(error) = db::oauth_states::delete_expired(&state.pool).await {
         tracing::warn!(error = ?error, "failed to purge expired oauth states");
     }
 
-    // 2. Uploaded artifacts whose retention lapsed: delete the R2 object
-    //    best-effort, then flip the row so downloads stop immediately even
-    //    if the delete failed (the next pass retries nothing — the object
-    //    becomes unreachable garbage at worst, never a live leak).
+    // 2. Uploaded artifacts whose retention lapsed: delete the stored
+    //    object best-effort (routed to the store that holds it), then flip
+    //    the row so downloads stop immediately even if the delete failed
+    //    (the next pass retries nothing — the object becomes unreachable
+    //    garbage at worst, never a live leak).
     match db::artifacts::find_expired(&state.pool, BATCH).await {
         Ok(expired) => {
             for artifact in expired {
-                if let Some(r2) = &state.r2
-                    && let Err(error) = r2.delete_object(&artifact.r2_key).await
+                if let Some(storage) = &state.storage
+                    && let Err(error) = storage
+                        .store_for(&artifact.storage_backend)
+                        .delete_object(&artifact.r2_key)
+                        .await
                 {
                     tracing::warn!(
                         artifact_id = %artifact.id,
                         error = ?error,
-                        "failed to delete expired artifact object from R2"
+                        "failed to delete expired artifact object from storage"
                     );
                 }
                 if let Err(error) = db::artifacts::mark_expired(&state.pool, artifact.id).await {
@@ -65,13 +71,16 @@ async fn pass(state: &AppState) {
     {
         Ok(stale) => {
             for artifact in stale {
-                if let Some(r2) = &state.r2
-                    && let Err(error) = r2.delete_object(&artifact.r2_key).await
+                if let Some(storage) = &state.storage
+                    && let Err(error) = storage
+                        .store_for(&artifact.storage_backend)
+                        .delete_object(&artifact.r2_key)
+                        .await
                 {
                     tracing::warn!(
                         artifact_id = %artifact.id,
                         error = ?error,
-                        "failed to delete abandoned artifact object from R2"
+                        "failed to delete abandoned artifact object from storage"
                     );
                 }
                 if let Err(error) =
@@ -84,10 +93,10 @@ async fn pass(state: &AppState) {
         Err(error) => tracing::warn!(error = ?error, "failed to scan stale pending artifacts"),
     }
 
-    // 4. Hot log chunks whose R2 archive exists and whose hot window has
-    //    lapsed. Only runs with R2 configured — without it, Postgres is the
-    //    only copy and is never pruned.
-    if state.r2.is_some() {
+    // 4. Hot log chunks whose object-storage archive exists and whose hot
+    //    window has lapsed. Only runs with storage configured — without it,
+    //    Postgres is the only copy and is never pruned.
+    if state.storage.is_some() {
         match db::pipeline_jobs::find_prunable_archived(
             &state.pool,
             state.config.log_hot_retention_days,

@@ -68,9 +68,9 @@ pub async fn update_profile(
 /// key, and deleting the workspace cascades to every workspace-scoped
 /// resource (members, repositories, pipelines, secrets, environments,
 /// runners). Sessions cascade with the user row itself. Returns the logo
-/// keys of deleted workspaces so the caller can best-effort remove the R2
-/// objects.
-pub async fn delete_account(pool: &PgPool, user_id: Uuid) -> sqlx::Result<Vec<String>> {
+/// `(key, storage_backend)` pairs of deleted workspaces so the caller can
+/// best-effort remove the objects from the stores that hold them.
+pub async fn delete_account(pool: &PgPool, user_id: Uuid) -> sqlx::Result<Vec<(String, String)>> {
     let mut tx = pool.begin().await?;
     sqlx::query(
         r#"
@@ -81,8 +81,9 @@ pub async fn delete_account(pool: &PgPool, user_id: Uuid) -> sqlx::Result<Vec<St
     .bind(user_id)
     .execute(&mut *tx)
     .await?;
-    let logo_keys: Vec<String> = sqlx::query_scalar(
-        "DELETE FROM workspaces WHERE created_by = $1 RETURNING COALESCE(logo_key, '')",
+    let logo_keys: Vec<(String, String)> = sqlx::query_as(
+        "DELETE FROM workspaces WHERE created_by = $1 \
+         RETURNING COALESCE(logo_key, ''), COALESCE(logo_storage_backend, 'r2')",
     )
     .bind(user_id)
     .fetch_all(&mut *tx)
@@ -92,5 +93,5 @@ pub async fn delete_account(pool: &PgPool, user_id: Uuid) -> sqlx::Result<Vec<St
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    Ok(logo_keys.into_iter().filter(|k| !k.is_empty()).collect())
+    Ok(logo_keys.into_iter().filter(|(k, _)| !k.is_empty()).collect())
 }

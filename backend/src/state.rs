@@ -11,7 +11,7 @@ use crate::services::github_app::GitHubApp;
 use crate::services::log_hub::LogHub;
 use crate::services::notification_hub::NotificationHub;
 use crate::services::notification_projector::NotificationProjector;
-use crate::services::r2::R2;
+use crate::services::object_store::Storage;
 use crate::services::runner_hub::RunnerHub;
 use crate::services::runner_provisioner::RunnerProvisioner;
 use crate::services::scheduler::Scheduler;
@@ -48,8 +48,9 @@ pub struct AppState {
     pub notification_hub: Arc<NotificationHub>,
     /// Wake handle for the audit-tail notification projector loop.
     pub notification_projector: Arc<NotificationProjector>,
-    /// Artifact storage; None disables artifact grants cleanly.
-    pub r2: Option<Arc<R2>>,
+    /// Object storage router (MinIO primary / R2 fallback when both are
+    /// configured); None disables artifact grants cleanly.
+    pub storage: Option<Arc<Storage>>,
     /// One-time tickets for cross-origin browser WebSocket auth
     /// (deployments whose proxy cannot forward upgrades, e.g. Netlify).
     pub ws_tickets: Arc<WsTicketStore>,
@@ -96,14 +97,19 @@ impl AppState {
             .map(|key| SecretsCrypto::new(key).map(Arc::new))
             .transpose()?;
 
-        let r2 = config.r2.as_ref().map(|r2| {
-            Arc::new(R2::new(
-                &r2.account_id,
-                &r2.access_key_id,
-                &r2.secret_access_key,
-                &r2.bucket,
-            ))
-        });
+        // MinIO (when configured) is the default/primary object store and
+        // R2 the fallback; R2 alone keeps its historical primary role.
+        let storage = match (config.minio.as_ref(), config.r2.as_ref()) {
+            (Some(minio), r2) => Some(Arc::new(Storage::new(
+                crate::services::minio::store(minio),
+                r2.map(crate::services::r2::store),
+            ))),
+            (None, Some(r2)) => Some(Arc::new(Storage::new(
+                crate::services::r2::store(r2),
+                None,
+            ))),
+            (None, None) => None,
+        };
 
         // Every WorkspaceHub::publish marks its workspace dirty on this
         // indexer and pokes the notification projector, so the hub is
@@ -127,7 +133,7 @@ impl AppState {
             search_indexer,
             notification_hub: Arc::new(NotificationHub::default()),
             notification_projector,
-            r2,
+            storage,
             ws_tickets: Arc::new(WsTicketStore::default()),
             // Requires async Docker probing; main fills it in right after.
             runner_provisioner: None,

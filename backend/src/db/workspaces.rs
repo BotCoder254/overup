@@ -233,27 +233,30 @@ pub async fn update_name(
 }
 
 /// Point the workspace at a new logo object (or clear it with `None`).
-/// Returns the previous key so the caller can best-effort delete the old
-/// R2 object after the row is safely updated.
+/// Returns the previous `(key, storage_backend)` so the caller can
+/// best-effort delete the old object from the store that holds it after
+/// the row is safely updated (a NULL legacy backend reads as 'r2').
 pub async fn set_logo_key(
     pool: &PgPool,
     workspace_id: Uuid,
     logo_key: Option<&str>,
-) -> sqlx::Result<Option<Option<String>>> {
-    let previous: Option<(Option<String>,)> = sqlx::query_as(
+    storage_backend: Option<&str>,
+) -> sqlx::Result<Option<Option<(String, String)>>> {
+    let previous: Option<(Option<String>, String)> = sqlx::query_as(
         r#"
         UPDATE workspaces w
-        SET logo_key = $2, updated_at = now()
-        FROM (SELECT id, logo_key FROM workspaces WHERE id = $1 FOR UPDATE) old
+        SET logo_key = $2, logo_storage_backend = $3, updated_at = now()
+        FROM (SELECT id, logo_key, logo_storage_backend FROM workspaces WHERE id = $1 FOR UPDATE) old
         WHERE w.id = old.id
-        RETURNING old.logo_key
+        RETURNING old.logo_key, COALESCE(old.logo_storage_backend, 'r2')
         "#,
     )
     .bind(workspace_id)
     .bind(logo_key)
+    .bind(storage_backend)
     .fetch_optional(pool)
     .await?;
-    Ok(previous.map(|(key,)| key))
+    Ok(previous.map(|(key, backend)| key.map(|key| (key, backend))))
 }
 
 /// Members with their role, owner first, then by join date.

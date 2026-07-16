@@ -640,7 +640,7 @@ async fn handle_artifact_request(
         deny("job is not assigned to this runner");
         return Ok(());
     };
-    let Some(r2) = &state.r2 else {
+    let Some(storage) = &state.storage else {
         deny("artifact storage is not configured");
         return Ok(());
     };
@@ -666,12 +666,18 @@ async fn handle_artifact_request(
     let pipeline = db::pipelines::find_by_id(&state.pool, job.pipeline_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("pipeline vanished"))?;
-    let key = crate::services::r2::R2::artifact_key(
+    let key = crate::services::object_store::artifact_key(
         pipeline.workspace_id,
         pipeline.id,
         job.id,
         &name,
     );
+
+    // Presigning is an offline signature, so the grant routes up front:
+    // the primary store while its cached health probe passes, else the
+    // fallback. The chosen backend is recorded on the row — verification,
+    // downloads and deletes all follow the marker.
+    let store = storage.store_for_upload().await;
 
     // Server-side classification drives per-kind retention and catalog
     // filters; the runner never influences it beyond the validated name.
@@ -689,16 +695,22 @@ async fn handle_artifact_request(
         job.id,
         &name,
         &key,
+        store.backend().as_str(),
         size_bytes as i64,
         &content_type,
         kind,
         // Retention clock starts at upload request; the janitor deletes the
-        // R2 object and flips the row to expired once it lapses.
+        // stored object and flips the row to expired once it lapses.
         Some(chrono::Utc::now() + chrono::Duration::days(retention_days)),
     )
     .await?;
 
-    let put_url = match r2.presign_put(&artifact.r2_key, &content_type).await {
+    // The declared size rides the signed headers: the store rejects a body
+    // of any other length at the edge (HeadObject re-verifies afterwards).
+    let put_url = match store
+        .presign_put(&artifact.r2_key, &content_type, size_bytes as i64)
+        .await
+    {
         Ok(url) => url,
         Err(error) => {
             tracing::warn!(error = ?error, "artifact presign failed");
@@ -715,7 +727,7 @@ async fn handle_artifact_request(
             put_url,
             key: artifact.r2_key,
             expires_at: chrono::Utc::now()
-                + chrono::Duration::from_std(crate::services::r2::UPLOAD_URL_TTL)
+                + chrono::Duration::from_std(crate::services::object_store::UPLOAD_URL_TTL)
                     .unwrap_or(chrono::Duration::minutes(15)),
         },
     );
@@ -783,7 +795,7 @@ async fn handle_artifact_done(
     let Some(job) = db::pipeline_jobs::find_assigned(&state.pool, job_id, runner_id).await? else {
         return Ok(());
     };
-    let Some(r2) = &state.r2 else {
+    let Some(storage) = &state.storage else {
         return Ok(());
     };
     if !crate::services::github_app::is_safe_name_segment(&name) {
@@ -800,15 +812,16 @@ async fn handle_artifact_done(
     let pipeline = db::pipelines::find_by_id(&state.pool, job.pipeline_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("pipeline vanished"))?;
-    let key = crate::services::r2::R2::artifact_key(
-        pipeline.workspace_id,
-        pipeline.id,
-        job.id,
-        &name,
-    );
+
+    // The pending row carries the key AND the storage-backend marker the
+    // grant recorded — verification must ask the store that was granted.
+    let Some(pending) = db::artifacts::find_pending(&state.pool, job.id, &name).await? else {
+        return Ok(());
+    };
+    let store = storage.store_for(&pending.storage_backend);
 
     // Trust the bucket, not the runner: the object must exist and fit.
-    let verified_size = match r2.head_size(&key).await {
+    let verified_size = match store.head_size(&pending.r2_key).await {
         Ok(Some(size)) if size > 0 && size <= state.config.max_artifact_bytes => size,
         Ok(_) => {
             db::artifacts::mark_failed(&state.pool, job.id, &name).await?;

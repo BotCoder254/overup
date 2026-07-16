@@ -13,6 +13,9 @@ pub struct Artifact {
     pub job_id: Uuid,
     pub name: String,
     pub r2_key: String,
+    /// Which object store holds the blob ('minio' | 'r2') — internal
+    /// routing marker, never exposed to clients (like r2_key).
+    pub storage_backend: String,
     pub size_bytes: Option<i64>,
     pub content_type: Option<String>,
     pub checksum_sha256: Option<String>,
