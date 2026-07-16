@@ -4,6 +4,7 @@ import type {
   SecretDetailResponse,
   SecretsAuditResponse,
   SecretsListResponse,
+  SecretsRequirements,
   SecretsSummary,
 } from '../../../types/secret';
 
@@ -30,6 +31,14 @@ export async function getSecretsCatalog(
 
 export async function getSecretsSummary(workspaceId: string): Promise<SecretsSummary> {
   return api.get(`/api/workspaces/${workspaceId}/secrets/summary`).json<SecretsSummary>();
+}
+
+export async function getSecretsRequirements(
+  workspaceId: string,
+): Promise<SecretsRequirements> {
+  return api
+    .get(`/api/workspaces/${workspaceId}/secrets/requirements`)
+    .json<SecretsRequirements>();
 }
 
 export async function getSecretsAudit(

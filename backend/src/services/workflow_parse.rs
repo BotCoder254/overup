@@ -213,6 +213,8 @@ pub fn parse_and_validate(content: &str) -> ParsedWorkflow {
             .map(|m| m.keys().filter_map(key_name).collect::<Vec<_>>())
             .unwrap_or_default(),
         "secretRefs": scan_secret_refs(content),
+        "varRefs": scan_var_refs(content),
+        "environments": distinct_environments(&jobs),
         "dispatchInputs": extract_dispatch_inputs(root, &mut diagnostics),
     });
 
@@ -655,34 +657,118 @@ fn validate_needs(jobs: &[ParsedJob], diagnostics: &mut Vec<Diagnostic>) {
     }
 }
 
-/// Names of secrets referenced as `${{ secrets.NAME }}` — metadata only,
-/// never values. Hand-rolled scan; no expression evaluation.
+/// Names of secrets referenced as `${{ secrets.NAME }}` (or the bracket form
+/// `secrets['NAME']`) — metadata only, never values.
 pub fn scan_secret_refs(content: &str) -> Vec<String> {
+    scan_context_refs(content, "secrets", &["GITHUB_TOKEN"])
+}
+
+/// Names of configuration variables referenced as `${{ vars.NAME }}` — the
+/// platform doesn't manage plain variables yet, so these are surfaced purely
+/// as detected requirements.
+pub fn scan_var_refs(content: &str) -> Vec<String> {
+    scan_context_refs(content, "vars", &[])
+}
+
+/// Names referenced as `${{ <context>.NAME }}` or `${{ <context>['NAME'] }}`
+/// inside expression blocks. Hand-rolled scan; no expression evaluation.
+/// Identifiers follow GitHub's rule (`[A-Za-z_][A-Za-z0-9_]*`, here capped at
+/// 200 bytes); deduped, capped at 100, sorted.
+fn scan_context_refs(content: &str, context: &str, exclude: &[&str]) -> Vec<String> {
     let mut refs: Vec<String> = Vec::new();
     let mut rest = content;
-    while let Some(start) = rest.find("${{") {
+    'blocks: while let Some(start) = rest.find("${{") {
         rest = &rest[start + 3..];
         let Some(end) = rest.find("}}") else { break };
         let expr = &rest[..end];
-        let mut scan = expr;
-        while let Some(pos) = scan.find("secrets.") {
-            let after = &scan[pos + "secrets.".len()..];
-            let name: String = after
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-                .collect();
-            if !name.is_empty() && name != "GITHUB_TOKEN" && !refs.contains(&name) {
-                refs.push(name);
+        let mut offset = 0;
+        while let Some(pos) = expr[offset..].find(context) {
+            let at = offset + pos;
+            let after = &expr[at + context.len()..];
+            offset = at + context.len();
+            // Word boundary: `mysecrets.X` or `x.vars.Y` must not match.
+            let bounded = at == 0 || {
+                let prev = expr.as_bytes()[at - 1];
+                !(prev.is_ascii_alphanumeric() || prev == b'_' || prev == b'.')
+            };
+            if !bounded {
+                continue;
             }
-            scan = after;
+            if let Some(name) = extract_ref_name(after)
+                && !exclude.contains(&name.as_str())
+                && !refs.contains(&name)
+            {
+                refs.push(name);
+                if refs.len() >= 100 {
+                    break 'blocks;
+                }
+            }
         }
         rest = &rest[end + 2..];
-        if refs.len() >= 100 {
-            break;
-        }
     }
     refs.sort();
     refs
+}
+
+/// The identifier after a context word: `.NAME`, or `['NAME']` / `["NAME"]`.
+/// Anything not matching `[A-Za-z_][A-Za-z0-9_]*` (≤200 bytes) is dropped —
+/// dynamic or malformed references never become metadata.
+fn extract_ref_name(after: &str) -> Option<String> {
+    let name: String = if let Some(rest) = after.strip_prefix('.') {
+        rest.chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect()
+    } else if let Some(rest) = after.strip_prefix('[') {
+        let rest = rest.trim_start();
+        let quote = rest.chars().next().filter(|c| matches!(c, '\'' | '"'))?;
+        let inner = &rest[1..];
+        let end = inner.find(quote)?;
+        let tail = inner[end + 1..].trim_start();
+        if !tail.starts_with(']') {
+            return None;
+        }
+        inner[..end].to_string()
+    } else {
+        return None;
+    };
+    let mut chars = name.chars();
+    let first = chars.next()?;
+    if !(first.is_ascii_alphabetic() || first == '_')
+        || name.len() > 200
+        || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return None;
+    }
+    Some(name)
+}
+
+/// Distinct `environment:` names across jobs, deduped case-insensitively
+/// (first-seen casing kept) and filtered to the slug charset an environment
+/// row can actually take — dynamic `${{ … }}` names are dropped, never stored.
+fn distinct_environments(jobs: &[ParsedJob]) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for job in jobs {
+        let Some(name) = job.environment.as_deref() else {
+            continue;
+        };
+        if !valid_environment_name(name) {
+            continue;
+        }
+        if !names.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+            names.push(name.to_string());
+        }
+    }
+    names.sort_by_key(|n| n.to_ascii_lowercase());
+    names
+}
+
+/// Mirrors the environments handler's name rule
+/// (`^[A-Za-z0-9][A-Za-z0-9._-]*$`, ≤100 chars).
+fn valid_environment_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphanumeric())
+        && name.len() <= 100
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 fn get<'a>(map: &'a Mapping, key: &str) -> Option<&'a Value> {
@@ -955,5 +1041,69 @@ jobs:
             "a ${{ secrets.API_KEY }} b ${{ secrets.GITHUB_TOKEN }} c ${{ secrets.API_KEY }}",
         );
         assert_eq!(refs, vec!["API_KEY"]);
+    }
+
+    #[test]
+    fn secret_scan_handles_bracket_form_and_word_boundaries() {
+        let refs = scan_secret_refs(
+            "a ${{ secrets['DEPLOY_KEY'] }} b ${{ secrets[\"OTHER\"] }} \
+             c ${{ secrets['GITHUB_TOKEN'] }} d ${{ mysecrets.NOPE }} \
+             e ${{ github.secrets.ALSO_NOPE }} f ${{ secrets['1BAD'] }}",
+        );
+        assert_eq!(refs, vec!["DEPLOY_KEY", "OTHER"]);
+    }
+
+    #[test]
+    fn scans_var_refs() {
+        let refs = scan_var_refs(
+            "x ${{ vars.NODE_ENV }} y ${{ vars['REGION'] }} z ${{ vars.NODE_ENV }} \
+             w ${{ canvars.NOPE }}",
+        );
+        assert_eq!(refs, vec!["NODE_ENV", "REGION"]);
+    }
+
+    #[test]
+    fn aggregates_environment_names_case_insensitively() {
+        let parsed = parse_and_validate(
+            r#"
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    environment: production
+    steps: []
+  b:
+    runs-on: ubuntu-latest
+    environment:
+      name: Production
+    steps: []
+  c:
+    runs-on: ubuntu-latest
+    environment: staging
+    steps: []
+"#,
+        );
+        assert_eq!(
+            parsed.metadata["environments"],
+            serde_json::json!(["production", "staging"])
+        );
+    }
+
+    #[test]
+    fn drops_dynamic_environment_names_from_metadata() {
+        let parsed = parse_and_validate(
+            "on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    environment: ${{ inputs.env }}\n    steps: []\n",
+        );
+        assert_eq!(parsed.metadata["environments"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn metadata_carries_empty_ref_arrays_when_nothing_is_referenced() {
+        let parsed = parse_and_validate(
+            "on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps: []\n",
+        );
+        assert_eq!(parsed.metadata["secretRefs"], serde_json::json!([]));
+        assert_eq!(parsed.metadata["varRefs"], serde_json::json!([]));
+        assert_eq!(parsed.metadata["environments"], serde_json::json!([]));
     }
 }

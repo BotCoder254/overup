@@ -66,6 +66,16 @@ interface SecretFormDialogProps {
    * is pre-scoped to this environment.
    */
   presetEnvironment?: { id: string; name: string } | null;
+  /**
+   * Pre-fills the name on create (e.g. opened from a detected-requirement
+   * entry). The name stays editable.
+   */
+  presetName?: string | null;
+  /**
+   * Pre-scopes the new secret to this repository (e.g. when every workflow
+   * reference to the detected name comes from one repository).
+   */
+  presetRepository?: { id: string; name: string } | null;
 }
 
 /**
@@ -79,6 +89,8 @@ export function SecretFormDialog({
   onClose,
   replaceTarget,
   presetEnvironment,
+  presetName,
+  presetRepository,
 }: SecretFormDialogProps) {
   const repositories = useRepositories();
   const environments = useEnvironmentsCatalog();
@@ -103,6 +115,16 @@ export function SecretFormDialog({
       setEnvironmentId(presetEnvironment.id);
     }
   }, [open, presetEnvironment]);
+
+  // Seed a detected-requirement name (and repo scope when the requirement
+  // came from exactly one repository) — both stay editable.
+  useEffect(() => {
+    if (open && presetName) setName(presetName);
+    if (open && presetRepository) {
+      setScope('repository');
+      setRepositoryId(presetRepository.id);
+    }
+  }, [open, presetName, presetRepository]);
 
   // Stable close that also resets state, read via the Dialog's onClose ref
   // so keystroke re-renders never disturb its focus effect.

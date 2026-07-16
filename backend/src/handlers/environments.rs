@@ -142,6 +142,30 @@ pub async fn summary(
     })))
 }
 
+/// GET /api/workspaces/{workspace_id}/environments/requirements
+///
+/// Environment names bound by workflow YAML (`environment:`) with no
+/// matching environment row — detected at sync time, computed as a set
+/// difference at query time. Deliberately never auto-created: YAML must not
+/// mint workspace resources past RBAC; the UI offers a one-click create
+/// through the ordinary RBAC'd endpoint instead.
+pub async fn requirements(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    Path(workspace_id): Path<Uuid>,
+) -> AppResult<Json<serde_json::Value>> {
+    authz::require_permission(&state.pool, user.id, workspace_id, authz::CONTENT_READ).await?;
+
+    let missing = db::workflows::missing_environment_refs(&state.pool, workspace_id).await?;
+    Ok(Json(json!({
+        // Read-time re-filter (the secrets requirements pattern): only names
+        // an environment row could actually take surface as creatable.
+        "environments": super::secrets::group_requirements(missing, |name| {
+            validate_name(name).is_ok()
+        }),
+    })))
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuditQuery {
@@ -175,9 +199,24 @@ pub async fn detail(
         .ok_or(AppError::NotFound)?;
     let audit =
         db::environments::list_audit(&state.pool, workspace_id, Some(environment_id), 20).await?;
+    // Workflows whose YAML binds this environment (case-insensitive, like
+    // dispatch resolution) — sync-time metadata, names/paths only.
+    let bound = db::workflows::list_binding_environment(&state.pool, workspace_id, &meta.name)
+        .await?
+        .into_iter()
+        .map(|row| {
+            json!({
+                "repositoryId": row.repository_id,
+                "repositoryName": row.repository_name,
+                "workflowId": row.workflow_id,
+                "workflowPath": row.workflow_path,
+            })
+        })
+        .collect::<Vec<_>>();
     Ok(Json(json!({
         "environment": EnvironmentResponse::from(meta),
         "audit": audit_events(audit),
+        "boundWorkflows": bound,
     })))
 }
 

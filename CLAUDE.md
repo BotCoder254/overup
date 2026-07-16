@@ -177,6 +177,34 @@ catalog (summary strip + URL-synced filters + keyset infinite scroll + detail pa
 audit history) plus a create/replace dialog that never echoes values and a security
 posture card that warns when `SECRETS_MASTER_KEY` is unset.
 
+**Detected requirements (sync-time reference discovery).** Workflow parsing records what
+each workflow *expects* as structured metadata in `workflows.metadata` JSONB — no
+migration: `secretRefs` (`${{ secrets.NAME }}`, dot AND bracket `secrets['NAME']` forms,
+word-boundary checked so `mysecrets.` never matches, `GITHUB_TOKEN` excluded),
+`varRefs` (`${{ vars.NAME }}` — detect/display only; the platform doesn't manage plain
+variables), and `environments` (distinct job `environment:` names, case-insensitively
+deduped, slug-filtered so dynamic `${{ … }}` names are never stored). All scanners share
+`workflow_parse::scan_context_refs` (identifier `[A-Za-z_][A-Za-z0-9_]*` ≤200 B, dedupe,
+cap 100, sort). Two read endpoints compute "referenced but not configured" as a set
+difference at QUERY time (`db/workflows.rs::missing_secret_refs/workspace_var_refs/
+missing_environment_refs` — `jsonb_array_elements_text` LATERAL with a `jsonb_typeof`
+guard so pre-feature/failed-parse metadata reads as empty; anti-join semantics: a secret
+name counts as configured via workspace scope, same-repo repository scope, or any
+environment scope): `GET …/secrets/requirements` (`secrets.read`) and
+`GET …/environments/requirements` (`content.read`). Handlers re-filter names at read
+time against the configurable-name allow-lists (defense-in-depth against hand-edited
+metadata) and cap output (200 names, 20 refs/name, true `referenceCount`). YAML never
+mints rows — the UI offers one-click create through the ordinary RBAC'd endpoints:
+`DetectedRequirementsCard` (secrets page right rail; "Add" pre-fills `SecretFormDialog`
+via `presetName`/`presetRepository`, repo scope only when every reference shares one
+repo) and `DetectedEnvironmentsCard` (environments page; "Create" pre-fills
+`EnvironmentFormDialog` via `presetName`). Both requirements queries live under their
+feature's react-query prefix, so every mutation's existing invalidation clears satisfied
+warnings automatically. The environment detail page lists `boundWorkflows` (from
+`list_binding_environment`, case-insensitive) linking to the workflow detail pages.
+Detection refreshes on every repo sync; workflows synced before this feature light up
+after their next push/manual re-sync.
+
 **Notification Center (operational inbox).** Notifications are a per-user, actionable
 PROJECTION of the immutable `audit_logs` ledger — the Activity Feed keeps the complete
 history, notifications hold only what a user should act on (OWASP's audit-vs-messaging
@@ -265,14 +293,18 @@ overup/
 │   │   ├── pipelines/          # execution ledger + live detail workspace: PipelineGraph,
 │   │   │                       #   ExecutionTimeline, LogViewer (xterm), tab panels,
 │   │   │                       #   usePipelineStream (WS), stores/logStore (zustand)
-│   │   ├── artifacts/          # workspace artifact catalog: summary strip, URL-synced
-│   │   │                       #   filters, keyset infinite scroll, provenance detail page
+│   │   ├── artifacts/          # workspace artifact catalog: summary strip (4 KPI cells —
+│   │   │                       #   the house norm), URL-synced filters, keyset infinite
+│   │   │                       #   scroll, provenance detail page
 │   │   ├── secrets/            # write-only encrypted secrets: catalog + posture column,
-│   │   │                       #   create/replace dialog (value never echoed), detail
-│   │   │                       #   page with audit history
+│   │   │                       #   detected-requirements card (missing secretRefs +
+│   │   │                       #   vars, one-click Add), create/replace dialog (value
+│   │   │                       #   never echoed), detail page with audit history
 │   │   ├── environments/       # deployment environments: catalog (summary strip +
-│   │   │                       #   URL-synced search + keyset infinite scroll), detail
-│   │   │                       #   page with scoped secrets + audit, create/edit dialog
+│   │   │                       #   URL-synced search + keyset infinite scroll +
+│   │   │                       #   detected-environments card w/ one-click create),
+│   │   │                       #   detail page with scoped secrets + bound workflows +
+│   │   │                       #   audit, create/edit dialog
 │   │   ├── notifications/      # operational inbox: NotificationBell (badge, popover/
 │   │   │                       #   bottom-sheet switch), NotificationPanel, history page,
 │   │   │                       #   PreferencesDialog, useNotificationStream (per-user WS)
@@ -558,6 +590,13 @@ into a traversal-safe tar streamed into the container via the Docker archive API
   `environment.created/updated/deleted` audit rows in-transaction, and a delete cascade
   audits every removed secret. A secret create with an `environmentId` from another
   workspace gets the same flat error as a bad `repositoryId` — no existence oracle
+- **Detected requirements are read-only projections of parser output**: sync-time
+  scanners only store allow-listed identifiers (charset + length + caps) into
+  `workflows.metadata`; the requirements endpoints re-filter names at read time against
+  the same configurable-name rules, cap output (200 names / 20 refs each), ride the
+  sibling read permissions (`secrets.read` / `content.read`), and expose names only —
+  never values. YAML never mints secrets or environments: "Add"/"Create" go through the
+  ordinary RBAC'd mutation endpoints
 - **Notifications are self-scoped by construction**: every read/mutation predicate pins
   `user_id = caller` in SQL (a forged notification id 404s flat), the live hub is keyed by
   the AUTHENTICATED user id (routing, not filtering, is the isolation), titles/bodies are

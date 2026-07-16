@@ -13,6 +13,7 @@ import {
   getEnvironmentDetail,
   getEnvironmentsAudit,
   getEnvironmentsCatalog,
+  getEnvironmentsRequirements,
   getEnvironmentsSummary,
   updateEnvironment,
   type CreateEnvironmentInput,
@@ -30,6 +31,8 @@ export const environmentsSummaryKey = (workspaceId: string) =>
   ['workspaces', workspaceId, 'environments', 'summary'] as const;
 export const environmentsAuditKey = (workspaceId: string) =>
   ['workspaces', workspaceId, 'environments', 'audit'] as const;
+export const environmentsRequirementsKey = (workspaceId: string) =>
+  ['workspaces', workspaceId, 'environments', 'requirements'] as const;
 export const environmentDetailKey = (workspaceId: string, environmentId: string) =>
   ['workspaces', workspaceId, 'environments', 'detail', environmentId] as const;
 
@@ -75,6 +78,20 @@ export function useEnvironmentsSummary() {
   return useQuery({
     queryKey: environmentsSummaryKey(workspaceId ?? ''),
     queryFn: () => getEnvironmentsSummary(workspaceId!),
+    enabled: Boolean(workspaceId),
+  });
+}
+
+/**
+ * YAML-bound environment names with no matching row. Lives under the
+ * environments prefix, so `invalidateEnvironments` clears it after every
+ * mutation — a detected entry disappears as soon as it's created.
+ */
+export function useEnvironmentsRequirements() {
+  const workspaceId = useWorkspaceId();
+  return useQuery({
+    queryKey: environmentsRequirementsKey(workspaceId ?? ''),
+    queryFn: () => getEnvironmentsRequirements(workspaceId!),
     enabled: Boolean(workspaceId),
   });
 }

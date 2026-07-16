@@ -1,5 +1,7 @@
 /** Environments API types — mirror the backend camelCase DTOs. */
 
+import type { DetectedRequirement, RequirementReference } from './requirements';
+
 export interface Environment {
   id: string;
   name: string;
@@ -25,6 +27,11 @@ export interface EnvironmentsSummary {
   scopedSecrets: number;
 }
 
+export interface EnvironmentsRequirements {
+  /** YAML-bound environment names with no matching environment row. */
+  environments: DetectedRequirement[];
+}
+
 export interface EnvironmentAuditEvent {
   action: string;
   actorLogin: string | null;
@@ -36,4 +43,6 @@ export interface EnvironmentAuditEvent {
 export interface EnvironmentDetailResponse {
   environment: Environment;
   audit: EnvironmentAuditEvent[];
+  /** Workflows whose YAML binds this environment (sync-time metadata). */
+  boundWorkflows: RequirementReference[];
 }

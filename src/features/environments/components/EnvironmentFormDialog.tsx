@@ -27,6 +27,11 @@ interface EnvironmentFormDialogProps {
   onClose: () => void;
   /** When set, the dialog edits this environment instead of creating. */
   editTarget?: Environment | null;
+  /**
+   * Pre-fills the name on create (e.g. opened from a detected-environment
+   * entry). Ignored while editing.
+   */
+  presetName?: string | null;
 }
 
 /**
@@ -34,7 +39,12 @@ interface EnvironmentFormDialogProps {
  * live at dispatch, so the edit variant spells out that renaming changes
  * which jobs pick up this environment's secrets going forward.
  */
-export function EnvironmentFormDialog({ open, onClose, editTarget }: EnvironmentFormDialogProps) {
+export function EnvironmentFormDialog({
+  open,
+  onClose,
+  editTarget,
+  presetName,
+}: EnvironmentFormDialogProps) {
   const create = useCreateEnvironment();
   const update = useUpdateEnvironment();
   const editing = Boolean(editTarget);
@@ -42,13 +52,14 @@ export function EnvironmentFormDialog({ open, onClose, editTarget }: Environment
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
 
-  // Seed the fields from the edit target whenever the dialog opens.
+  // Seed the fields from the edit target (or preset name) whenever the
+  // dialog opens.
   useEffect(() => {
     if (open) {
-      setName(editTarget?.name ?? '');
+      setName(editTarget?.name ?? presetName ?? '');
       setDescription(editTarget?.description ?? '');
     }
-  }, [open, editTarget]);
+  }, [open, editTarget, presetName]);
 
   const close = useCallback(() => {
     setName('');
