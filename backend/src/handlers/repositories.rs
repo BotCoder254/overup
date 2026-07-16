@@ -12,7 +12,8 @@ use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::middleware::auth::CurrentUser;
 use crate::models::repository::{
-    AvailableRepoResponse, BranchResponse, RepositoryResponse, SyncRunResponse,
+    AvailableRepoResponse, BranchResponse, RepositoryEventResponse, RepositoryHealthResponse,
+    RepositoryResponse, SyncRunResponse,
 };
 use crate::models::workflow::WorkflowSummaryResponse;
 use crate::services::workspace_hub::WorkspaceEvent;
@@ -217,13 +218,70 @@ pub async fn detail(
         .map(SyncRunResponse::from)
         .collect::<Vec<_>>();
 
+    // Webhook/sync health for the sync status panel: latest event, recent
+    // failures, and the live queue depth for this repository.
+    let overview = db::repository_events::overview(&state.pool, repository.id).await?;
+    let pending_deliveries =
+        db::webhook_deliveries::pending_count_for_repo(&state.pool, repository.github_repo_id)
+            .await?;
+    let health = RepositoryHealthResponse {
+        last_event_at: overview.last_event_at,
+        last_event_outcome: overview.last_event_outcome,
+        failed_events_24h: overview.failed_events_24h,
+        pending_deliveries,
+        checks_enabled: state.config.github_checks_enabled,
+    };
+
     let workflow_count = workflows.len() as i64;
     Ok(Json(json!({
         "repository": RepositoryResponse::from_row(repository, workflow_count),
         "branches": branches,
         "workflows": workflows,
         "syncRuns": sync_runs,
+        "health": health,
     })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EventsQuery {
+    cursor: Option<String>,
+    limit: Option<i64>,
+}
+
+/// GET /api/workspaces/{workspace_id}/repositories/{repository_id}/events
+///
+/// Keyset-paginated repository event timeline, newest first. The cursor is
+/// the shared `<rfc3339>~<uuid>` shape from the pipelines list.
+pub async fn events(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    Path((workspace_id, repository_id)): Path<(Uuid, Uuid)>,
+    axum::extract::Query(query): axum::extract::Query<EventsQuery>,
+) -> AppResult<Json<serde_json::Value>> {
+    authz::require_permission(&state.pool, user.id, workspace_id, authz::CONTENT_READ).await?;
+
+    let repository = db::repositories::find_for_workspace(&state.pool, workspace_id, repository_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    let cursor = match query.cursor.as_deref() {
+        None | Some("") => None,
+        Some(raw) => Some(super::pipelines::parse_cursor(raw)?),
+    };
+    let limit = query.limit.unwrap_or(30).clamp(1, 100);
+
+    let rows =
+        db::repository_events::list_for_repo(&state.pool, repository.id, cursor, limit).await?;
+    let next_cursor = (rows.len() as i64 == limit)
+        .then(|| rows.last())
+        .flatten()
+        .map(|row| super::pipelines::format_cursor(row.processed_at, row.id));
+    let events = rows
+        .into_iter()
+        .map(RepositoryEventResponse::from)
+        .collect::<Vec<_>>();
+
+    Ok(Json(json!({ "events": events, "nextCursor": next_cursor })))
 }
 
 /// POST /api/workspaces/{workspace_id}/repositories/{repository_id}/sync
@@ -239,7 +297,10 @@ pub async fn sync(
         .await?
         .ok_or(AppError::NotFound)?;
 
-    if !repo_sync::schedule(&state, repository_id, "manual").await? {
+    if repo_sync::schedule(&state, repository_id, "manual")
+        .await?
+        .is_none()
+    {
         return Err(AppError::Conflict("a sync is already running"));
     }
 

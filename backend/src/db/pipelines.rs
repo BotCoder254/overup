@@ -22,6 +22,8 @@ pub struct NewPipeline<'a> {
     pub actor_avatar_url: Option<&'a str>,
     pub git_ref: &'a str,
     pub trigger_inputs: Option<&'a serde_json::Value>,
+    /// Pull request number when trigger = 'pull_request'.
+    pub pr_number: Option<i32>,
     pub timeout_seconds: i32,
     pub job_timeout_seconds: i32,
     pub request_id: Option<&'a str>,
@@ -55,8 +57,9 @@ pub async fn create(
         INSERT INTO pipelines
             (workspace_id, repository_id, workflow_id, workflow_name, workflow_path,
              number, trigger, triggered_by, commit_sha, commit_message, commit_author,
-             actor_login, actor_avatar_url, git_ref, trigger_inputs, timeout_seconds)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+             actor_login, actor_avatar_url, git_ref, trigger_inputs, pr_number,
+             timeout_seconds)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
         RETURNING *
         "#,
     )
@@ -75,6 +78,7 @@ pub async fn create(
     .bind(new.actor_avatar_url)
     .bind(new.git_ref)
     .bind(new.trigger_inputs)
+    .bind(new.pr_number)
     .bind(new.timeout_seconds)
     .fetch_one(&mut *tx)
     .await?;
@@ -289,6 +293,55 @@ pub async fn finalize(
     .bind(conclusion)
     .fetch_optional(pool)
     .await
+}
+
+/// Everything the Checks API reporter needs to address GitHub for one
+/// pipeline, resolved in a single join. Returns None when the pipeline (or
+/// its repository/installation) is gone — the reporter then no-ops.
+#[derive(Debug, sqlx::FromRow)]
+pub struct ChecksContext {
+    pub workflow_name: String,
+    pub commit_sha: String,
+    pub trigger: String,
+    pub conclusion: Option<String>,
+    pub check_run_id: Option<i64>,
+    pub repo_owner: String,
+    pub repo_name: String,
+    pub installation_id: i64,
+    pub workspace_slug: String,
+}
+
+pub async fn checks_context(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<ChecksContext>> {
+    sqlx::query_as::<_, ChecksContext>(
+        r#"
+        SELECT p.workflow_name, p.commit_sha, p.trigger, p.conclusion,
+               p.check_run_id,
+               r.owner AS repo_owner, r.name AS repo_name,
+               gi.installation_id,
+               w.slug AS workspace_slug
+        FROM pipelines p
+        JOIN repositories r ON r.id = p.repository_id
+        JOIN github_installations gi ON gi.id = r.installation_id
+        JOIN workspaces w ON w.id = p.workspace_id
+        WHERE p.id = $1
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Record the GitHub check-run id after a successful create. Guarded so a
+/// duplicate create (retry race) never overwrites the first linkage.
+pub async fn set_check_run_id(pool: &PgPool, id: Uuid, check_run_id: i64) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE pipelines SET check_run_id = $2 WHERE id = $1 AND check_run_id IS NULL",
+    )
+    .bind(id)
+    .bind(check_run_id)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 /// Pipelines whose wall-clock budget lapsed; the scheduler sweep times

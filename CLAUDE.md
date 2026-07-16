@@ -15,8 +15,11 @@ module** (named deployment targets bound from workflow YAML `environment:`, acti
 highest-precedence secrets scope with `environments.manage` RBAC and a catalog + detail
 UI), and the **Notification Center** (a per-user, actionable projection of the audit
 ledger: bell + popover/bottom-sheet in the shell, per-user WebSocket delivery, dedup
-grouping, preferences, and a history page — see below). Matrix expansion and PR/cron
-triggers build on this foundation.
+grouping, preferences, and a history page — see below), and the **Event-driven
+orchestration layer** (durable async webhook queue + background processor, GitHub-style
+trigger evaluation with branch/tag/path glob filters, pull_request + tag pipelines,
+Checks API status reporting back to GitHub, and a per-repository event timeline + sync
+health panel — see below). Matrix expansion and cron triggers build on this foundation.
 
 ## Architecture
 
@@ -48,7 +51,9 @@ app JWT must succeed AND the account login must match the user — or an
 `installation.created` webhook recorded them as installer) before linking it to the
 workspace. `POST /webhooks/github` (outside `/api`, no CSRF/CORS) authenticates every
 delivery with constant-time HMAC-SHA256 over the raw body, dedupes on `X-GitHub-Delivery`,
-and drives incremental sync on push/repository/installation events. Sync fetches repo
+persists a normalized capped payload into the durable `webhook_deliveries` queue, and
+acks immediately — `services/webhook_processor.rs` drives incremental sync and pipeline
+triggering asynchronously (see "Event-driven orchestration" below). Sync fetches repo
 metadata, branches, and `.github/workflows` via the Contents API (no cloning, no git2),
 diffs blob shas, parses YAML with `services/workflow_parse.rs` (node budget 20k, depth 32,
 512 KB cap, ≤100 jobs — parse errors become diagnostics, never 500s; note YAML 1.1 parses
@@ -293,6 +298,55 @@ read/unread/archive, CSV export) routed WITHOUT a nav item, like `search`. Link 
 server-built `{kind, …Id}` objects resolved client-side through an allow-list
 (`lib/notificationPresentation.ts`) — never URLs.
 
+**Event-driven orchestration (async webhooks + trigger evaluation + Checks reporting).**
+GitHub is purely the event source and repository provider; overup is the control plane.
+The webhook receiver does verification → validation → durable persistence → 202 ack ONLY
+(GitHub's 10-second budget): each delivery lands in `webhook_deliveries` (now a durable
+queue — normalized server-built payload JSONB, `pending|processing|processed|ignored|failed`,
+retry_count) and `services/webhook_processor.rs` (the notification-projector loop shape:
+poke + 2 s tick, but per-row `FOR UPDATE SKIP LOCKED` claims drained SEQUENTIALLY — the
+per-repo ordering guarantee) performs every side effect off the request path: repo lookup
+(unconnected repos are discarded before any processing), default-branch sync scheduling,
+trigger evaluation, pipeline creation, and the timeline write. Deliveries retry ≤3 times
+(5-min stuck-row revert on the tick; a manual GitHub redelivery revives a terminally
+failed row), and completion commits the `repository_events` timeline row + the status
+flip in one transaction. **Trigger evaluation** (`services/trigger_eval.rs`, pure/bounded):
+parser v3 extracts `on.push`/`on.pull_request` filter lists into
+`workflows.metadata.triggerFilters` (branches/branchesIgnore/tags/tagsIgnore/paths/
+pathsIgnore + PR `types`, ≤50 patterns × 256 B, branches+branches-ignore on one event is
+an Error like GitHub); a hand-rolled GitHub-flavored glob (`*` no-slash, `**`, `?`/`+`
+quantify the preceding char, `[a-z]`, `\` escapes; ordered `!` negation, last match wins)
+evaluates each workflow against the event before `create_pipeline` — only-tags blocks
+branch pushes and vice versa, branch AND path dimensions must both pass, paths never
+apply to tag pushes, changed paths come from the push payload commits (truncated set ⇒
+path filters fail OPEN), PR `types` default `opened|synchronize|reopened` and PR branch
+filters match the BASE branch. Pre-v3 metadata evaluates as unfiltered. Skips are
+recorded per-workflow with static reasons in the event summary. **PR + tag pipelines**:
+pipeline trigger vocabulary is now `push|manual|pull_request|tag` (+ `pipelines.pr_number`);
+`pull_request` events build the PR head SHA under `refs/pull/{n}/head` (fork PRs are
+skipped with static `fork_pr_skipped` — secrets never flow to fork code; `closed` never
+builds — the merge commit's push event drives push workflows); `refs/tags/` pushes run
+`on: push` workflows as trigger `tag`. Cron stays parse/display-only. **Checks API
+reporting** (`services/github_checks.rs`): event-triggered pipelines (never manual)
+surface as GitHub check runs — created queued after `create_pipeline` (processor),
+in_progress in `on_job_started`, completed in `maybe_finalize` (conclusion map: partial →
+failure with a summary note; `details_url` → the pipeline page; output is static
+templates + job counts, never runner text). A second, separately cached installation
+token is minted with `checks:write` only (the sync token stays read-only); 403/422 marks
+the installation unavailable for 1 h with ONE edge-triggered warn (operator action:
+grant the App Checks Read & write + approve on installations). `GITHUB_CHECKS_ENABLED`
+(default true) gates it. **Repository timeline + health**: immutable `repository_events`
+(outcome CHECK `pipelines_created|sync_scheduled|pipelines_and_sync|ignored|failed`,
+static `ignored_reason`, `pipeline_ids[]`, `sync_run_id`, capped summary) feeds
+`GET …/repositories/{id}/events` (keyset, `content.read`) and a `health` object on the
+detail response (last event at/outcome, failed 24 h, pending deliveries, checksEnabled).
+Frontend: `RepositorySyncPanel` (KPI strip: Auto-sync, Last event, Pending, Failed 24 h,
+GitHub checks) between the meta strip and the tabs, plus an Events tab
+(`RepositoryEventsList`, ActivityFeed-compact rows with outcome badges, ref/PR chips,
+skip tooltips, pipeline links, infinite scroll); pipelines UI gained the
+pull_request/tag trigger filter options, icons (`GitPullRequest`/`Tag`), PR # link on the
+Metadata tab, and `branchOfRef` now renders tag and `PR #n` refs.
+
 **Dev networking.** CRA's `"proxy": "http://localhost:8080"` forwards XHR (`/api/*`,
 `/auth/logout`) to the backend. Full-page navigations are NOT proxied (CRA serves index.html
 for `Accept: text/html`), so the login redirect uses the absolute `REACT_APP_API_ORIGIN`.
@@ -367,7 +421,9 @@ overup/
     │                           #   RBAC backfill), secret value_set_at rotation clock,
     │                           #   notifications (+preferences/projector cursor),
     │                           #   storage_backend markers (artifacts/pipeline_jobs/
-    │                           #   workspaces — MinIO/R2 object routing)
+    │                           #   workspaces — MinIO/R2 object routing),
+    │                           #   webhook queue + repository_events + PR/tag triggers
+    │                           #   (payload/retry columns, pr_number, check_run_id)
     └── src/
         ├── main.rs             # bootstrap: env, tracing, pool, migrate, orphan recovery,
         │                       #   scheduler spawn, janitor, serve
@@ -386,7 +442,10 @@ overup/
         │                       #   notifications, notification_ws
         ├── middleware/         # security_headers, csrf, auth (CurrentUser extractor)
         └── services/           # session, github, github_app (JWT + token cache),
-                                #   auth_flow, workspace, authz (RBAC), repo_sync,
+                                #   github_checks (Checks API reporter), auth_flow,
+                                #   workspace, authz (RBAC), repo_sync,
+                                #   webhook_processor (async delivery queue consumer),
+                                #   trigger_eval (GitHub-flavored filter globs),
                                 #   workflow_parse, pipeline_plan, pipeline_run (state
                                 #   machine), scheduler, log_hub (mask+cap+broadcast),
                                 #   runner_hub, object_store (generic S3Store + Storage
@@ -533,9 +592,29 @@ into a traversal-safe tar streamed into the container via the Docker archive API
   (`contents:read + metadata:read`), cached in memory only — never logged, never in
   responses, never in Postgres; the private key PEM loads once at startup
 - Webhooks: constant-time HMAC-SHA256 over the raw body (`X-Hub-Signature-256`) before any
-  parsing; `X-GitHub-Delivery` primary key makes redeliveries no-ops; payloads are parsed
+  parsing; `X-GitHub-Delivery` primary key makes redeliveries no-ops (a redelivery only
+  revives a terminally FAILED row for another processing round); payloads are parsed
   into minimal typed envelopes and never logged; `GITHUB_WEBHOOK_SECRET` must be ≥ 16
   bytes at boot (signing-key parity — a guessable secret would let anyone forge deliveries)
+- **Webhook processing is async and durable**: the HTTP handler only verifies, validates,
+  persists a NORMALIZED server-built payload (strings ≤512 B, changed paths deduped/capped
+  at 300 with a truncation flag, avatars sanitized — never the raw body), and acks 2xx;
+  every side effect runs in `services/webhook_processor.rs` off the request path. Events
+  from repositories not connected to any workspace are discarded before any further
+  processing. A single sequential consumer preserves per-repo ordering; retries cap at 3;
+  stuck `processing` rows revert after 5 min; consumed payloads are nulled so the queue
+  table stays bounded. Trigger evaluation (`trigger_eval.rs`) is pure and bounded
+  (patterns ≤50×256 B re-capped at read time, values ≤1 KB, iterative matcher — no regex,
+  no recursion); unknown changed-file sets fail OPEN on path filters only. Fork PRs never
+  execute (static `fork_pr_skipped`) — secrets must not flow to fork code
+- **Checks API reporting is best-effort and permission-isolated**: a SEPARATE installation
+  token is minted with `checks:write` only (the sync token stays contents/metadata
+  read-only); reporting failures never fail/delay a pipeline; 403/422 (App lacks the
+  Checks permission) parks the installation for 1 h with one edge-triggered warn; check
+  bodies are static templates + job counts with owner/repo re-validated against the
+  segment allow-list before URL interpolation; manual dispatches never report;
+  `repository_events.outcome`/`ignored_reason` and every skip reason are static category
+  strings only
 - Request tracing records method + PATH only (custom `MakeSpan` in routes) — the query
   string carries secrets on some routes (`?code=`/`?state=` on the OAuth callback,
   `?ticket=` on WS upgrades) and must never land in spans, even at debug level
@@ -819,7 +898,10 @@ GitHub Apps → New GitHub App.
   configuration avoids the detour entirely
 - Webhook URL: needs a public tunnel in dev — `smee.io` or `cloudflared tunnel` forwarding
   to `http://localhost:8080/webhooks/github`; set a strong webhook secret
-- Repository permissions: **Metadata (read)** + **Contents (read)** — least privilege;
+- Repository permissions: **Metadata (read)** + **Contents (read)** + **Checks (read &
+  write)** (for reporting pipeline status back to commits/PRs via the Checks API —
+  existing installations must approve the permission update; until then reporting
+  degrades to one warn per installation and `GITHUB_CHECKS_ENABLED=false` silences it);
   `Workflows (write)` is only needed when editor write-back ships
 - Subscribe to events: Push, Repository, Installation target, Pull request
   (installation/installation_repositories events arrive automatically)

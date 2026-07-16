@@ -36,6 +36,10 @@ pub struct Config {
     /// Public slug of the GitHub App; builds the install URL
     /// https://github.com/apps/{slug}/installations/new.
     pub github_app_slug: String,
+    /// Report pipeline status back to GitHub via the Checks API (queued →
+    /// in_progress → completed). Requires the App's Checks (Read & write)
+    /// permission; without it reporting degrades to an edge-triggered warn.
+    pub github_checks_enabled: bool,
     /// Shared key (>= 32 bytes) for HMAC-SHA256 signatures over job payloads
     /// sent to runners. Never logged.
     pub runner_job_signing_key: Vec<u8>,
@@ -424,6 +428,9 @@ impl Config {
             github_app_private_key_pem,
             github_webhook_secret,
             github_app_slug: required("GITHUB_APP_SLUG")?,
+            github_checks_enabled: optional("GITHUB_CHECKS_ENABLED", "true")
+                .parse()
+                .context("GITHUB_CHECKS_ENABLED must be true or false")?,
             runner_job_signing_key,
             default_job_image,
             job_timeout_seconds: optional("JOB_TIMEOUT_SECONDS", "3600")

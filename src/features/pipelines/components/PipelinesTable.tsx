@@ -1,5 +1,12 @@
 import { format, formatDistanceToNow } from 'date-fns';
-import { GitBranch, GitCommitHorizontal, MousePointerClick, Webhook } from 'lucide-react';
+import {
+  GitBranch,
+  GitCommitHorizontal,
+  GitPullRequest,
+  MousePointerClick,
+  Tag,
+  Webhook,
+} from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { workspacePath } from '../../../app/navigation';
 import { Avatar } from '../../../components/ui/Avatar';
@@ -9,9 +16,18 @@ import { branchOfRef, formatDuration, shortSha } from '../lib/format';
 import { PipelineStatusBadge } from './PipelineStatusBadge';
 
 /** Trigger source icon + label, matching the API trigger vocabulary. */
+const TRIGGER_PRESENTATION: Record<
+  Pipeline['trigger'],
+  { icon: typeof Webhook; label: string }
+> = {
+  push: { icon: Webhook, label: 'Push' },
+  manual: { icon: MousePointerClick, label: 'Manual' },
+  pull_request: { icon: GitPullRequest, label: 'Pull request' },
+  tag: { icon: Tag, label: 'Tag' },
+};
+
 function TriggerCell({ trigger }: { trigger: Pipeline['trigger'] }) {
-  const Icon = trigger === 'push' ? Webhook : MousePointerClick;
-  const label = trigger === 'push' ? 'Push' : 'Manual';
+  const { icon: Icon, label } = TRIGGER_PRESENTATION[trigger] ?? TRIGGER_PRESENTATION.push;
   return (
     <span className="inline-flex items-center gap-1.5 text-steel">
       <Icon size={13} aria-hidden="true" />

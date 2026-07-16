@@ -18,7 +18,7 @@ use super::github_app::MAX_WORKFLOW_FILE_BYTES;
 /// whose stamped version is older, even when its blob sha is unchanged —
 /// otherwise new metadata (e.g. the detected-requirements ref arrays) would
 /// never materialize for files that don't change on GitHub.
-pub const PARSER_VERSION: i64 = 2;
+pub const PARSER_VERSION: i64 = 3;
 
 /// Resource budgets: a workflow file that exceeds these is hostile or
 /// broken, not "large". They bound both memory and walk time.
@@ -226,6 +226,7 @@ pub fn parse_and_validate(content: &str) -> ParsedWorkflow {
         "varRefs": scan_var_refs(content),
         "environments": distinct_environments(&jobs),
         "dispatchInputs": extract_dispatch_inputs(root, &mut diagnostics),
+        "triggerFilters": extract_trigger_filters(root, &mut diagnostics),
     });
 
     ParsedWorkflow {
@@ -306,6 +307,185 @@ fn extract_triggers(root: &Mapping, diagnostics: &mut Vec<Diagnostic>) -> Vec<St
         ));
     }
     triggers
+}
+
+/// Caps for trigger filter pattern lists (`on.push.branches`, …). A workflow
+/// with more patterns than this is hostile or broken, not "large".
+const MAX_FILTER_PATTERNS: usize = 50;
+const MAX_FILTER_PATTERN_LEN: usize = 256;
+
+/// The `pull_request` activity types GitHub defines. Unknown values are
+/// dropped with a warning — a typo'd type must never silently widen or
+/// narrow trigger matching at dispatch time.
+const PR_ACTIVITY_TYPES: &[&str] = &[
+    "opened",
+    "synchronize",
+    "reopened",
+    "closed",
+    "edited",
+    "assigned",
+    "unassigned",
+    "labeled",
+    "unlabeled",
+    "ready_for_review",
+    "converted_to_draft",
+    "review_requested",
+    "review_request_removed",
+    "locked",
+    "unlocked",
+];
+
+/// Structured `on.<event>` filter lists consumed by the dispatch-time trigger
+/// evaluation engine (`services/trigger_eval.rs`). Only the mapping form of
+/// `on:` carries filters; string/sequence forms yield the all-empty shape
+/// (= unfiltered). Every list is capped and length-bounded — patterns are
+/// stored verbatim (they are matched, never executed or interpolated).
+/// Combining `branches` with `branches-ignore` (or `tags` with `tags-ignore`)
+/// on the same event is an Error, matching GitHub's own rejection.
+fn extract_trigger_filters(root: &Mapping, diagnostics: &mut Vec<Diagnostic>) -> serde_json::Value {
+    // Same YAML 1.1 quirk as extract_triggers: `on` may be the bool key.
+    let events = root
+        .get(Value::String("on".into()))
+        .or_else(|| root.get(Value::Bool(true)))
+        .and_then(Value::as_mapping);
+
+    let mut filters = serde_json::json!({
+        "push": {
+            "branches": [], "branchesIgnore": [],
+            "tags": [], "tagsIgnore": [],
+            "paths": [], "pathsIgnore": [],
+        },
+        "pullRequest": {
+            "types": [],
+            "branches": [], "branchesIgnore": [],
+            "paths": [], "pathsIgnore": [],
+        },
+    });
+    let Some(events) = events else {
+        return filters;
+    };
+
+    for (event, yaml_key, keys) in [
+        (
+            "push",
+            "push",
+            &[
+                ("branches", "branches"),
+                ("branches-ignore", "branchesIgnore"),
+                ("tags", "tags"),
+                ("tags-ignore", "tagsIgnore"),
+                ("paths", "paths"),
+                ("paths-ignore", "pathsIgnore"),
+            ][..],
+        ),
+        (
+            "pullRequest",
+            "pull_request",
+            &[
+                ("branches", "branches"),
+                ("branches-ignore", "branchesIgnore"),
+                ("paths", "paths"),
+                ("paths-ignore", "pathsIgnore"),
+            ][..],
+        ),
+    ] {
+        let Some(body) = get(events, yaml_key).and_then(Value::as_mapping) else {
+            continue;
+        };
+        for (yaml_name, json_name) in keys {
+            filters[event][*json_name] = serde_json::json!(filter_patterns(
+                get(body, yaml_name),
+                &format!("on.{yaml_key}.{yaml_name}"),
+                diagnostics,
+            ));
+        }
+        // GitHub rejects a workflow that combines the include and ignore
+        // forms of the same dimension on one event.
+        for (include, ignore) in [("branches", "branches-ignore"), ("tags", "tags-ignore")] {
+            if get(body, include).is_some() && get(body, ignore).is_some() {
+                diagnostics.push(Diagnostic::error(
+                    format!("`on.{yaml_key}` cannot combine `{include}` with `{ignore}`"),
+                    Some(format!("on.{yaml_key}.{ignore}")),
+                ));
+            }
+        }
+        if get(body, "paths").is_some() && get(body, "paths-ignore").is_some() {
+            diagnostics.push(Diagnostic::error(
+                format!("`on.{yaml_key}` cannot combine `paths` with `paths-ignore`"),
+                Some(format!("on.{yaml_key}.paths-ignore")),
+            ));
+        }
+    }
+
+    // pull_request activity types: allow-listed, deduped, capped.
+    if let Some(body) = get(events, "pull_request").and_then(Value::as_mapping) {
+        let mut types: Vec<String> = Vec::new();
+        for value in string_or_list(get(body, "types")) {
+            if !PR_ACTIVITY_TYPES.contains(&value.as_str()) {
+                diagnostics.push(Diagnostic::warning(
+                    format!(
+                        "unknown pull_request activity type `{}`",
+                        value.chars().take(50).collect::<String>()
+                    ),
+                    Some("on.pull_request.types".into()),
+                ));
+                continue;
+            }
+            if !types.contains(&value) {
+                types.push(value);
+            }
+        }
+        filters["pullRequest"]["types"] = serde_json::json!(types);
+    }
+
+    filters
+}
+
+/// One filter pattern list: string-or-sequence, non-empty, byte-capped,
+/// count-capped. Oversized patterns and overflow are dropped with a warning
+/// — a filter that can't be stored must never silently match everything.
+fn filter_patterns(
+    value: Option<&Value>,
+    path: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Vec<String> {
+    let raw = match value {
+        None => return Vec::new(),
+        Some(Value::String(s)) => vec![s.clone()],
+        Some(Value::Sequence(seq)) => seq
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        Some(_) => {
+            diagnostics.push(Diagnostic::warning(
+                format!("`{path}` must be a string or a list of patterns"),
+                Some(path.to_string()),
+            ));
+            return Vec::new();
+        }
+    };
+    if raw.len() > MAX_FILTER_PATTERNS {
+        diagnostics.push(Diagnostic::warning(
+            format!("`{path}` lists more than {MAX_FILTER_PATTERNS} patterns; extras are ignored"),
+            Some(path.to_string()),
+        ));
+    }
+    let mut out = Vec::new();
+    for pattern in raw.into_iter().take(MAX_FILTER_PATTERNS) {
+        if pattern.is_empty() {
+            continue;
+        }
+        if pattern.len() > MAX_FILTER_PATTERN_LEN {
+            diagnostics.push(Diagnostic::warning(
+                format!("`{path}` contains a pattern longer than {MAX_FILTER_PATTERN_LEN} bytes; it was ignored"),
+                Some(path.to_string()),
+            ));
+            continue;
+        }
+        out.push(pattern);
+    }
+    out
 }
 
 /// Caps for `on.workflow_dispatch.inputs` extraction. GitHub itself allows
@@ -1229,6 +1409,129 @@ jobs:
                 &test_lookup
             ),
             "a=s3cr3t-value b=${{ github.ref }} c="
+        );
+    }
+
+    #[test]
+    fn extracts_trigger_filters_from_mapping_form() {
+        let parsed = parse_and_validate(
+            r#"
+on:
+  push:
+    branches: [main, 'releases/**']
+    paths-ignore:
+      - 'docs/**'
+  pull_request:
+    types: [opened, labeled]
+    branches: [main]
+jobs:
+  a:
+    runs-on: x
+    steps: []
+"#,
+        );
+        assert_eq!(parsed.status(), "valid");
+        let filters = &parsed.metadata["triggerFilters"];
+        assert_eq!(
+            filters["push"]["branches"],
+            serde_json::json!(["main", "releases/**"])
+        );
+        assert_eq!(
+            filters["push"]["pathsIgnore"],
+            serde_json::json!(["docs/**"])
+        );
+        assert_eq!(filters["push"]["tags"], serde_json::json!([]));
+        assert_eq!(
+            filters["pullRequest"]["types"],
+            serde_json::json!(["opened", "labeled"])
+        );
+        assert_eq!(
+            filters["pullRequest"]["branches"],
+            serde_json::json!(["main"])
+        );
+    }
+
+    #[test]
+    fn string_and_sequence_on_forms_yield_empty_filters() {
+        for yaml in [
+            "on: push\njobs:\n  a:\n    runs-on: x\n    steps: []\n",
+            "on: [push, pull_request]\njobs:\n  a:\n    runs-on: x\n    steps: []\n",
+        ] {
+            let parsed = parse_and_validate(yaml);
+            let filters = &parsed.metadata["triggerFilters"];
+            assert_eq!(filters["push"]["branches"], serde_json::json!([]));
+            assert_eq!(filters["pullRequest"]["types"], serde_json::json!([]));
+        }
+    }
+
+    #[test]
+    fn combining_branches_with_branches_ignore_is_an_error() {
+        let parsed = parse_and_validate(
+            "on:\n  push:\n    branches: [main]\n    branches-ignore: [dev]\n\
+             jobs:\n  a:\n    runs-on: x\n    steps: []\n",
+        );
+        assert_eq!(parsed.status(), "errors");
+        assert!(
+            parsed
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("cannot combine `branches` with `branches-ignore`"))
+        );
+    }
+
+    #[test]
+    fn combining_paths_with_paths_ignore_is_an_error() {
+        let parsed = parse_and_validate(
+            "on:\n  pull_request:\n    paths: [src/**]\n    paths-ignore: [docs/**]\n\
+             jobs:\n  a:\n    runs-on: x\n    steps: []\n",
+        );
+        assert_eq!(parsed.status(), "errors");
+    }
+
+    #[test]
+    fn unknown_pr_types_are_dropped_with_a_warning() {
+        let parsed = parse_and_validate(
+            "on:\n  pull_request:\n    types: [opened, bogus_type]\n\
+             jobs:\n  a:\n    runs-on: x\n    steps: []\n",
+        );
+        assert_eq!(parsed.status(), "warnings");
+        assert_eq!(
+            parsed.metadata["triggerFilters"]["pullRequest"]["types"],
+            serde_json::json!(["opened"])
+        );
+    }
+
+    #[test]
+    fn filter_patterns_enforce_caps() {
+        let mut yaml = String::from("on:\n  push:\n    branches:\n");
+        for i in 0..60 {
+            yaml.push_str(&format!("      - branch-{i}\n"));
+        }
+        yaml.push_str(&format!("      - '{}'\n", "x".repeat(300)));
+        yaml.push_str("jobs:\n  a:\n    runs-on: x\n    steps: []\n");
+        let parsed = parse_and_validate(&yaml);
+        let branches = parsed.metadata["triggerFilters"]["push"]["branches"]
+            .as_array()
+            .unwrap();
+        assert_eq!(branches.len(), MAX_FILTER_PATTERNS);
+        assert!(
+            parsed
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("more than"))
+        );
+    }
+
+    #[test]
+    fn bool_on_key_still_extracts_filters() {
+        // Unquoted `on` resolves to boolean true in YAML 1.1; the mapping
+        // form must still be found under the bool key.
+        let parsed = parse_and_validate(
+            "on:\n  push:\n    branches: [main]\njobs:\n  a:\n    runs-on: x\n    steps: []\n",
+        );
+        assert_eq!(
+            parsed.metadata["triggerFilters"]["push"]["branches"],
+            serde_json::json!(["main"])
         );
     }
 

@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { HTTPError } from 'ky';
 import { toast } from 'sonner';
 import { useMe } from '../../auth/hooks/useAuth';
@@ -7,6 +7,7 @@ import {
   getInstallations,
   getRepositories,
   getRepositoryDetail,
+  getRepositoryEvents,
   importRepository,
   removeRepository,
   syncRepository,
@@ -26,6 +27,8 @@ export const repositoryKey = (workspaceId: string, repositoryId: string) =>
   ['workspaces', workspaceId, 'repositories', 'detail', repositoryId] as const;
 export const installationsKey = (workspaceId: string) =>
   ['workspaces', workspaceId, 'installations'] as const;
+export const repositoryEventsKey = (workspaceId: string, repositoryId: string) =>
+  ['workspaces', workspaceId, 'repositories', 'detail', repositoryId, 'events'] as const;
 
 /** Poll every few seconds while any repository is mid-sync. */
 const pollWhileSyncing = 3000;
@@ -73,6 +76,22 @@ export function useRepositoryDetail(repositoryId: string | undefined) {
       const status = query.state.data?.repository.syncStatus;
       return status === 'syncing' || status === 'pending' ? pollWhileSyncing : false;
     },
+  });
+}
+
+/** Keyset-paginated repository event timeline (the Events tab). Refreshes
+ * alongside the detail poll while a sync is running via `enabled` timing —
+ * a modest refetchInterval keeps the timeline live the rest of the time. */
+export function useRepositoryEvents(repositoryId: string | undefined, enabled = true) {
+  const workspaceId = useWorkspaceId();
+  return useInfiniteQuery({
+    queryKey: repositoryEventsKey(workspaceId ?? '', repositoryId ?? ''),
+    queryFn: ({ pageParam }) =>
+      getRepositoryEvents(workspaceId!, repositoryId!, pageParam || undefined),
+    initialPageParam: '',
+    getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
+    enabled: Boolean(workspaceId && repositoryId) && enabled,
+    refetchInterval: 15000,
   });
 }
 

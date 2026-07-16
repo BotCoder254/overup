@@ -99,6 +99,11 @@ async fn main() -> anyhow::Result<()> {
     // cursor and materializes per-user Notification Center rows.
     tokio::spawn(services::notification_projector::run(state.clone()));
 
+    // Webhook processor: drains the durable webhook_deliveries queue —
+    // sync scheduling, trigger evaluation, and pipeline creation all happen
+    // here, off the HTTP ack path.
+    tokio::spawn(services::webhook_processor::run(state.clone()));
+
     let router = routes::build_router(state)?;
 
     let listener = tokio::net::TcpListener::bind(&config.bind_addr)

@@ -1,4 +1,12 @@
-import { GitBranch, GitCommitHorizontal, MousePointerClick, Server, Webhook } from 'lucide-react';
+import {
+  GitBranch,
+  GitCommitHorizontal,
+  GitPullRequest,
+  MousePointerClick,
+  Server,
+  Tag,
+  Webhook,
+} from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { workspacePath } from '../../../app/navigation';
 import { Avatar } from '../../../components/ui/Avatar';
@@ -31,7 +39,14 @@ function Item({ label, children }: { label: string; children: React.ReactNode })
  */
 export function JobIdentityBar({ slug, pipeline, job, runner }: JobIdentityBarProps) {
   useNow(job.status !== 'completed');
-  const TriggerIcon = pipeline.trigger === 'push' ? Webhook : MousePointerClick;
+  const TriggerIcon =
+    pipeline.trigger === 'pull_request'
+      ? GitPullRequest
+      : pipeline.trigger === 'tag'
+        ? Tag
+        : pipeline.trigger === 'push'
+          ? Webhook
+          : MousePointerClick;
 
   return (
     <div className="sticky top-0 z-10 -mx-1 mb-4 border-b border-steel/20 bg-canvas px-1 pb-2">

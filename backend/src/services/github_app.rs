@@ -29,6 +29,9 @@ pub struct GitHubApp {
     client_id: String,
     encoding_key: EncodingKey,
     token_cache: RwLock<HashMap<i64, CachedToken>>,
+    /// Separate cache for checks-scoped tokens: the sync token stays
+    /// read-only (least privilege) and never grows write permissions.
+    checks_token_cache: RwLock<HashMap<i64, CachedToken>>,
 }
 
 struct CachedToken {
@@ -75,6 +78,7 @@ impl GitHubApp {
             client_id,
             encoding_key,
             token_cache: RwLock::new(HashMap::new()),
+            checks_token_cache: RwLock::new(HashMap::new()),
         })
     }
 
@@ -98,9 +102,46 @@ impl GitHubApp {
         http: &reqwest::Client,
         installation_id: i64,
     ) -> anyhow::Result<String> {
+        self.mint_scoped_token(
+            http,
+            installation_id,
+            &self.token_cache,
+            // Least privilege: the token can never do more than read.
+            &serde_json::json!({
+                "permissions": { "contents": "read", "metadata": "read" }
+            }),
+        )
+        .await
+    }
+
+    /// Checks-scoped installation token for the Checks API reporter. Minted
+    /// separately so the sync token stays read-only; requires the GitHub App
+    /// to have the Checks (Read & write) permission — GitHub answers 422
+    /// when it doesn't, which the reporter treats as "checks unavailable".
+    pub async fn checks_token(
+        &self,
+        http: &reqwest::Client,
+        installation_id: i64,
+    ) -> anyhow::Result<String> {
+        self.mint_scoped_token(
+            http,
+            installation_id,
+            &self.checks_token_cache,
+            &serde_json::json!({ "permissions": { "checks": "write" } }),
+        )
+        .await
+    }
+
+    async fn mint_scoped_token(
+        &self,
+        http: &reqwest::Client,
+        installation_id: i64,
+        cache: &RwLock<HashMap<i64, CachedToken>>,
+        permissions: &serde_json::Value,
+    ) -> anyhow::Result<String> {
         let refresh_after = Utc::now() + Duration::minutes(TOKEN_REFRESH_MARGIN_MINUTES);
         {
-            let cache = self.token_cache.read().await;
+            let cache = cache.read().await;
             if let Some(cached) = cache.get(&installation_id)
                 && cached.expires_at > refresh_after
             {
@@ -116,10 +157,7 @@ impl GitHubApp {
             .bearer_auth(&jwt)
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
-            // Least privilege: the token can never do more than read.
-            .json(&serde_json::json!({
-                "permissions": { "contents": "read", "metadata": "read" }
-            }))
+            .json(permissions)
             .send()
             .await
             .context("installation token request failed")?;
@@ -137,7 +175,7 @@ impl GitHubApp {
             .context("installation token response was malformed")?;
 
         let token = minted.token.clone();
-        self.token_cache.write().await.insert(
+        cache.write().await.insert(
             installation_id,
             CachedToken {
                 token: minted.token,
@@ -166,6 +204,10 @@ impl GitHubApp {
 
     pub async fn evict_token(&self, installation_id: i64) {
         self.token_cache.write().await.remove(&installation_id);
+        self.checks_token_cache
+            .write()
+            .await
+            .remove(&installation_id);
     }
 }
 

@@ -13,6 +13,8 @@ import { TBody, Table, Td, Th, THead, Tr } from '../../../components/ui/Table';
 import { Tabs } from '../../../components/ui/Tabs';
 import { workspacePath } from '../../../app/navigation';
 import { ValidationBadge } from '../../workflows/components/ValidationBadge';
+import { RepositoryEventsList } from '../components/RepositoryEventsList';
+import { RepositorySyncPanel } from '../components/RepositorySyncPanel';
 import { SyncHistoryList } from '../components/SyncHistoryList';
 import { SyncStatusBadge } from '../components/SyncStatusBadge';
 import {
@@ -21,7 +23,7 @@ import {
   useSyncRepository,
 } from '../hooks/useRepositories';
 
-type TabId = 'workflows' | 'branches' | 'history';
+type TabId = 'workflows' | 'branches' | 'events' | 'history';
 
 export function RepositoryDetailPage() {
   const { slug = '', repoId } = useParams<{ slug: string; repoId: string }>();
@@ -53,7 +55,7 @@ export function RepositoryDetailPage() {
     );
   }
 
-  const { repository, branches, workflows, syncRuns } = detail.data;
+  const { repository, branches, workflows, syncRuns, health } = detail.data;
   const syncing = repository.syncStatus === 'syncing' || repository.syncStatus === 'pending';
 
   return (
@@ -114,6 +116,8 @@ export function RepositoryDetailPage() {
         )}
       </div>
 
+      <RepositorySyncPanel repository={repository} health={health} />
+
       <Tabs
         ariaLabel="Repository sections"
         active={tab}
@@ -122,6 +126,7 @@ export function RepositoryDetailPage() {
         tabs={[
           { id: 'workflows', label: `Workflows (${workflows.length})` },
           { id: 'branches', label: `Branches (${branches.length})` },
+          { id: 'events', label: 'Events' },
           { id: 'history', label: 'Sync history' },
         ]}
       />
@@ -216,6 +221,8 @@ export function RepositoryDetailPage() {
             </TBody>
           </Table>
         ))}
+
+      {tab === 'events' && repoId && <RepositoryEventsList repositoryId={repoId} slug={slug} />}
 
       {tab === 'history' && <SyncHistoryList runs={syncRuns} />}
 

@@ -63,3 +63,51 @@ export interface SyncRun {
   startedAt: string;
   finishedAt: string | null;
 }
+
+/** What processing one repository event caused (static categories). */
+export type RepositoryEventOutcome =
+  | 'pipelines_created'
+  | 'sync_scheduled'
+  | 'pipelines_and_sync'
+  | 'ignored'
+  | 'failed';
+
+/** One entry of the chronological repository event timeline. */
+export interface RepositoryEvent {
+  id: string;
+  event: string;
+  action: string | null;
+  gitRef: string | null;
+  headSha: string | null;
+  actorLogin: string | null;
+  actorAvatarUrl: string | null;
+  outcome: RepositoryEventOutcome;
+  /** Static category (e.g. filters_not_matched) when outcome = ignored. */
+  ignoredReason: string | null;
+  pipelineIds: string[];
+  syncRunId: string | null;
+  summary: {
+    skipped?: { path: string; reason: string }[];
+    prNumber?: number;
+    merged?: boolean;
+    syncCollapsed?: boolean;
+    branchDeleted?: boolean;
+    tagDeleted?: boolean;
+  } & Record<string, unknown>;
+  receivedAt: string;
+  processedAt: string;
+}
+
+export interface RepositoryEventsPage {
+  events: RepositoryEvent[];
+  nextCursor: string | null;
+}
+
+/** Webhook/sync health figures for the repository sync status panel. */
+export interface RepositoryHealth {
+  lastEventAt: string | null;
+  lastEventOutcome: RepositoryEventOutcome | null;
+  failedEvents24h: number;
+  pendingDeliveries: number;
+  checksEnabled: boolean;
+}

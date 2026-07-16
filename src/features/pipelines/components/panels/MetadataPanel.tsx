@@ -49,8 +49,21 @@ export function MetadataPanel({
             <span className="font-mono text-xs">{branchOfRef(pipeline.gitRef)}</span>
           </Field>
           <Field label="Trigger">
-            <Badge variant="outline">{pipeline.trigger}</Badge>
+            <Badge variant="outline">{pipeline.trigger.replaceAll('_', ' ')}</Badge>
           </Field>
+          {pipeline.trigger === 'pull_request' && pipeline.prNumber != null && (
+            <Field label="Pull request">
+              <a
+                href={`https://github.com/${pipeline.repoFullName}/pull/${pipeline.prNumber}`}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 text-link hover:underline"
+              >
+                {`#${pipeline.prNumber}`}
+                <ArrowUpRight size={12} aria-hidden="true" />
+              </a>
+            </Field>
+          )}
           <Field label="Created">{format(new Date(pipeline.createdAt), 'PPpp')}</Field>
           <Field label="Queue time">
             {formatDuration(pipeline.createdAt, pipeline.startedAt)}

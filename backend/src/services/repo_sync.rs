@@ -17,12 +17,17 @@ use crate::state::AppState;
 /// Never parse more workflow files than this per repository.
 const MAX_WORKFLOW_FILES: usize = 50;
 
-/// Claim the repository and spawn a background sync. Returns false when a
-/// sync is already running (callers map that to 409).
-pub async fn schedule(state: &AppState, repository_id: Uuid, trigger: &str) -> sqlx::Result<bool> {
+/// Claim the repository and spawn a background sync. Returns the sync-run id,
+/// or None when a sync is already running (callers map that to 409; the
+/// webhook processor links the id into the repository event timeline).
+pub async fn schedule(
+    state: &AppState,
+    repository_id: Uuid,
+    trigger: &str,
+) -> sqlx::Result<Option<Uuid>> {
     let Some(repository) = db::repositories::claim_for_sync(&state.pool, repository_id).await?
     else {
-        return Ok(false);
+        return Ok(None);
     };
     let run_id = db::repositories::insert_sync_run(&state.pool, repository_id, trigger).await?;
 
@@ -65,7 +70,7 @@ pub async fn schedule(state: &AppState, repository_id: Uuid, trigger: &str) -> s
         }
     });
 
-    Ok(true)
+    Ok(Some(run_id))
 }
 
 /// Static failure category + full server-side detail.

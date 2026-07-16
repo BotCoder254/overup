@@ -146,7 +146,7 @@ export function PipelinesPage() {
             description={
               hasFilters
                 ? 'Nothing matches the current filters. Clear them to see the full execution history.'
-                : 'Pipelines appear here when a push hits a connected repository or a workflow is dispatched manually from its detail page.'
+                : 'Pipelines appear here when a push, pull request, or tag hits a connected repository — or a workflow is dispatched manually from its detail page.'
             }
           />
           {hasFilters && (
