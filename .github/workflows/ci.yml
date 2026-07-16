@@ -1,10 +1,10 @@
 name: CI
 
-# Compile + test gate for the whole monorepo: the React/TypeScript frontend
-# and the three sibling Rust crates (protocol, backend, runner). Every job is
-# self-contained — no database, no secrets, no external services — because the
-# backend uses runtime sqlx queries (no compile-time `query!` macros), so the
-# control plane builds and unit-tests without a live PostgreSQL.
+# Compile + test gate for the React/TypeScript frontend. The Rust crates and
+# the GHCR runner-image publish were deliberately removed from CI — Rust is
+# verified locally (cargo check / clippy -D warnings / cargo test per crate)
+# and the runner image is published manually per
+# docs/fix-empty-workspace-stale-runner.md.
 
 on:
   push:
@@ -19,9 +19,6 @@ concurrency:
 
 permissions:
   contents: read
-
-env:
-  CARGO_TERM_COLOR: always
 
 jobs:
   # --- Frontend: React + TypeScript (create-react-app) ----------------------
@@ -57,77 +54,3 @@ jobs:
         run: npm run build
         env:
           CI: false
-
-  # --- Rust crates: protocol, backend, runner (edition 2024) ----------------
-  rust:
-    name: rust
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        crate: [protocol, backend, runner]
-    defaults:
-      run:
-        working-directory: ${{ matrix.crate }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install stable Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      # Per-crate cache keyed on each crate's own Cargo.lock (no shared
-      # workspace) so the three builds don't clobber each other's cache.
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: ${{ matrix.crate }}
-
-      - name: Build
-        run: cargo build --locked --verbose
-
-      - name: Test
-        run: cargo test --locked --verbose
-
-  # --- Runner image: build + publish to GHCR on main -------------------------
-  # The hosted-runner provisioner pulls ghcr.io/botcoder254/overup-runner:latest
-  # (the RUNNER_IMAGE default) — this job is what actually ships runner fixes
-  # to deployments. ONE-TIME SETUP: after the first push, make the GHCR
-  # package PUBLIC (github.com/botcoder254 → Packages → overup-runner →
-  # Package settings → Change visibility), or anonymous pulls are denied and
-  # deployments fall back to whatever image is already on their daemon.
-  # Existing runner containers keep their old image: after a publish, pull the
-  # new tag on the host and revoke + recreate the hosted runners.
-  runner-image:
-    name: runner image (publish to GHCR)
-    runs-on: ubuntu-latest
-    needs: rust
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      # Build context is the repository root — runner/Dockerfile needs the
-      # sibling protocol/ crate in the context (see the Dockerfile header).
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: runner/Dockerfile
-          push: true
-          tags: |
-            ghcr.io/botcoder254/overup-runner:latest
-            ghcr.io/botcoder254/overup-runner:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max

@@ -1,17 +1,17 @@
 import { AlertTriangle, GitBranch, Squirrel } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { PageHeader } from '../../../components/layout/PageHeader';
 import { Button } from '../../../components/ui/Button';
 import { Card, CardBody, CardHeader } from '../../../components/ui/Card';
 import { EmptyState } from '../../../components/ui/EmptyState';
-import { Spinner } from '../../../components/ui/Spinner';
 import type { DashboardRange } from '../../../types/dashboard';
 import { PipelinesTable } from '../../pipelines/components/PipelinesTable';
 import { useRunners } from '../../runners/hooks/useRunners';
 import { ActivityChart } from '../components/ActivityChart';
 import { ActivityPanel } from '../components/ActivityPanel';
 import { KpiStrip } from '../components/KpiStrip';
+import { PagerControls } from '../components/PagerControls';
 import { RunnerHealthPanel } from '../components/RunnerHealthPanel';
 import { SuccessRateChart } from '../components/SuccessRateChart';
 import { useDashboardActivity, useDashboardRecentPipelines, useDashboardSummary } from '../hooks/useDashboard';
@@ -50,30 +50,45 @@ export function DashboardPage() {
     (summary.data?.pipelinesTotal ?? 0) === 0 &&
     (runners.data?.length ?? 0) === 0;
 
-  // Flatten the keyset pages for the full-width recent-pipelines table.
+  // Flatten the keyset pages for the full-width recent-pipelines table,
+  // then page through them five at a time — the next keyset page is fetched
+  // on demand when the reader steps past what's already loaded.
+  const PIPELINES_PAGE_SIZE = 5;
   const pipelines = (recentPipelines.data?.pages ?? []).flatMap((page) => page.pipelines);
-
-  // Infinite scroll: pull the next page when the sentinel scrolls into view.
-  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const [pipelinePage, setPipelinePage] = useState(0);
   const {
     hasNextPage: pipelinesHasNext,
     isFetchingNextPage: pipelinesFetchingNext,
     fetchNextPage: fetchNextPipelines,
   } = recentPipelines;
+
+  const pipelineStart = pipelinePage * PIPELINES_PAGE_SIZE;
+  const visiblePipelines = pipelines.slice(pipelineStart, pipelineStart + PIPELINES_PAGE_SIZE);
+  const moreLoaded = pipelineStart + PIPELINES_PAGE_SIZE < pipelines.length;
+
+  // Clamp when live updates shrink the loaded list.
   useEffect(() => {
-    const sentinel = sentinelRef.current;
-    if (!sentinel || !pipelinesHasNext) return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((entry) => entry.isIntersecting) && !pipelinesFetchingNext) {
-          void fetchNextPipelines();
+    const maxPage = Math.max(0, Math.ceil(pipelines.length / PIPELINES_PAGE_SIZE) - 1);
+    if (pipelinePage > maxPage) setPipelinePage(maxPage);
+  }, [pipelinePage, pipelines.length]);
+
+  const nextPipelinePage = () => {
+    if (moreLoaded) {
+      setPipelinePage((current) => current + 1);
+      return;
+    }
+    if (pipelinesHasNext && !pipelinesFetchingNext) {
+      void fetchNextPipelines().then((result) => {
+        const loaded = (result.data?.pages ?? []).reduce(
+          (count, page) => count + page.pipelines.length,
+          0,
+        );
+        if (pipelineStart + PIPELINES_PAGE_SIZE < loaded) {
+          setPipelinePage((current) => current + 1);
         }
-      },
-      { rootMargin: '200px' },
-    );
-    observer.observe(sentinel);
-    return () => observer.disconnect();
-  }, [pipelinesHasNext, pipelinesFetchingNext, fetchNextPipelines]);
+      });
+    }
+  };
 
   return (
     <>
@@ -151,17 +166,19 @@ export function DashboardPage() {
               />
             ) : (
               <>
-                <PipelinesTable slug={slug} pipelines={pipelines} />
-                {pipelinesHasNext && (
-                  <div ref={sentinelRef} className="mt-4 flex justify-center">
-                    {pipelinesFetchingNext ? (
-                      <Spinner className="h-5 w-5 text-steel" />
-                    ) : (
-                      <Button size="sm" variant="secondary" onClick={() => void fetchNextPipelines()}>
-                        Load more
-                      </Button>
-                    )}
-                  </div>
+                <PipelinesTable slug={slug} pipelines={visiblePipelines} />
+                {(pipelines.length > PIPELINES_PAGE_SIZE || pipelinesHasNext) && (
+                  <PagerControls
+                    label={`${pipelineStart + 1}–${Math.min(
+                      pipelineStart + PIPELINES_PAGE_SIZE,
+                      pipelines.length,
+                    )}${pipelinesHasNext ? '' : ` of ${pipelines.length}`}`}
+                    hasPrev={pipelinePage > 0}
+                    hasNext={moreLoaded || pipelinesHasNext}
+                    loadingNext={pipelinesFetchingNext}
+                    onPrev={() => setPipelinePage((current) => Math.max(0, current - 1))}
+                    onNext={nextPipelinePage}
+                  />
                 )}
               </>
             )}
