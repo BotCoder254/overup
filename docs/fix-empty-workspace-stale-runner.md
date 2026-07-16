@@ -305,6 +305,30 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 Whatever image a job pins, add it to `RUNNER_PREPULL_IMAGES` (comma-separated) so it
 is warmed into the daemon instead of pulled mid-pipeline.
 
+## 7b. Long-path files "missing" from /workspace (pax extended headers)
+
+Fingerprint (hit 2026-07-16 running this repo's own CI on an overup runner): the
+checkout log shows a **healthy file count** (`checkout complete (394 files)` — matching
+`git ls-files | wc -l` exactly), yet the job fails with dozens of
+`TS2307: Cannot find module` / `No such file or directory` errors, and every missing
+file has a LONG path. Short-path siblings in the same directory are present.
+
+Cause: GitHub tarballs come from git's tar writer, which stores any path longer than
+the 100-byte ustar name field in a **pax extended header** (a type-`x` pseudo-entry
+that applies to the next entry) — git never uses the ustar prefix field. With the
+`owner-repo-<40-char-sha>/` wrapper (~60 chars), even modest source paths cross 100
+bytes. Runner binaries before the 2026-07-16 fix copied those pseudo-entries into the
+repackaged archive with a stripped path but **unmodified record data**, so Docker's
+extractor re-applied the ORIGINAL unstripped path and nested the affected files under
+`/workspace/owner-repo-<sha>/…`. The regular-file count stays correct, which is what
+makes the log look healthy.
+
+Fix: runner ≥ the commit adding `repackage_applies_pax_long_paths_and_drops_pseudo_entries`
+resolves the pax `path` for the following entry and drops all pseudo-entries from the
+output. Roll out per §2–§4 (rebuild → verify in-image → revoke + re-create). To confirm
+a failing workspace exhibits this: `ls /workspace` in a debug step — the wrapper dir
+sitting next to your source tree is the tell.
+
 ## 8. Troubleshooting quick reference
 
 | Symptom | Diagnosis | Fix |
@@ -313,6 +337,7 @@ is warmed into the daemon instead of pulled mid-pipeline.
 | Rebuilt + pushed, jobs still old | Image built from a stale clone (fresh timestamp, old binary) | §2 `git log` check, §3 grep check |
 | Pulled new image on VPS, jobs still old | Runner containers were restarted, not re-created | §4 revoke + re-create |
 | `checkout failed: repository archive contained no usable files` | New binary working as designed: the tarball filtered to zero files (unexpected layout) | Inspect the repo/tarball; this replaces the old silent-empty behavior |
+| File count healthy but LONG-path files "missing"; wrapper dir visible inside /workspace | Pax extended headers mishandled by a pre-2026-07-16 runner binary | §7b, then roll out per §2–§4 |
 | `image pull failed (…); using locally cached image` (job continues) | New binary tolerating a transient pull failure | Nothing — informational; heal the host per §6 when frequent |
 | `failed to extract layer … Lchown … no such file or directory` | Docker-host snapshotter state | §6 |
 | `sh: 1: <tool>: not found` in a step | Job image lacks the toolchain | §7 |
