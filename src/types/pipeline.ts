@@ -3,7 +3,7 @@
 export type PipelineStatus = 'queued' | 'in_progress' | 'completed';
 export type PipelineConclusion = 'success' | 'failure' | 'cancelled' | 'timed_out' | 'partial';
 export type JobConclusion = 'success' | 'failure' | 'cancelled' | 'timed_out' | 'skipped';
-export type PipelineTrigger = 'push' | 'manual';
+export type PipelineTrigger = 'push' | 'manual' | 'pull_request' | 'tag';
 export type LogStreamName = 'stdout' | 'stderr' | 'system';
 /** Execution phase a log chunk is attributed to (protocol::LOG_PHASES). */
 export type LogPhase =
@@ -32,6 +32,8 @@ export interface Pipeline {
   gitRef: string;
   /** Manual dispatch inputs (workflow_dispatch-style); absent otherwise. */
   triggerInputs?: Record<string, string | number | boolean> | null;
+  /** Pull request number when trigger = 'pull_request' (reruns keep it). */
+  prNumber: number | null;
   status: PipelineStatus;
   conclusion: PipelineConclusion | null;
   createdAt: string;

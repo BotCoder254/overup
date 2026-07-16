@@ -213,33 +213,40 @@ pub async fn find_detail_for_workspace(
     .await
 }
 
-/// Workflows of one repository that a push event can trigger: they declare
-/// the `push` trigger and are not in an error state.
-pub async fn push_runnable_for_repo(
+/// Workflows of one repository that an event of the given kind can trigger:
+/// they declare the event in `triggers` and are not in an error state.
+/// Callers pass static event names only ("push", "pull_request"); the
+/// per-workflow filter conditions in `metadata.triggerFilters` are evaluated
+/// afterwards by `services/trigger_eval.rs`.
+pub async fn runnable_for_repo(
     pool: &PgPool,
     repository_id: Uuid,
-) -> sqlx::Result<Vec<PushRunnableWorkflow>> {
-    sqlx::query_as::<_, PushRunnableWorkflow>(
+    event: &str,
+) -> sqlx::Result<Vec<RunnableWorkflow>> {
+    sqlx::query_as::<_, RunnableWorkflow>(
         r#"
-        SELECT id, name, path, raw_content
+        SELECT id, name, path, raw_content, triggers, metadata
         FROM workflows
         WHERE repository_id = $1
-          AND 'push' = ANY(triggers)
+          AND $2 = ANY(triggers)
           AND validation_status <> 'errors'
         ORDER BY path
         "#,
     )
     .bind(repository_id)
+    .bind(event)
     .fetch_all(pool)
     .await
 }
 
 #[derive(Debug, sqlx::FromRow)]
-pub struct PushRunnableWorkflow {
+pub struct RunnableWorkflow {
     pub id: Uuid,
     pub name: String,
     pub path: String,
     pub raw_content: String,
+    pub triggers: Vec<String>,
+    pub metadata: serde_json::Value,
 }
 
 /// One workflow-YAML reference to a secret/var/environment name, with the

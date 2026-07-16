@@ -135,6 +135,8 @@ export function PipelineFilters({ value, onChange }: PipelineFiltersProps) {
       >
         <option value="">All triggers</option>
         <option value="push">Push</option>
+        <option value="pull_request">Pull request</option>
+        <option value="tag">Tag</option>
         <option value="manual">Manual</option>
       </select>
 

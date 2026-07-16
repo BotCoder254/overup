@@ -8,6 +8,7 @@ use sqlx::PgPool;
 
 use crate::config::Config;
 use crate::services::github_app::GitHubApp;
+use crate::services::github_checks::GithubChecks;
 use crate::services::log_hub::LogHub;
 use crate::services::notification_hub::NotificationHub;
 use crate::services::notification_projector::NotificationProjector;
@@ -17,6 +18,7 @@ use crate::services::runner_provisioner::RunnerProvisioner;
 use crate::services::scheduler::Scheduler;
 use crate::services::search_indexer::SearchIndexer;
 use crate::services::secrets_crypto::SecretsCrypto;
+use crate::services::webhook_processor::WebhookProcessor;
 use crate::services::workspace_hub::WorkspaceHub;
 use crate::services::ws_ticket::WsTicketStore;
 
@@ -48,6 +50,10 @@ pub struct AppState {
     pub notification_hub: Arc<NotificationHub>,
     /// Wake handle for the audit-tail notification projector loop.
     pub notification_projector: Arc<NotificationProjector>,
+    /// Wake handle for the async webhook-delivery processor loop.
+    pub webhook_processor: Arc<WebhookProcessor>,
+    /// Per-installation availability cache for GitHub Checks reporting.
+    pub github_checks: Arc<GithubChecks>,
     /// Object storage router (MinIO primary / R2 fallback when both are
     /// configured); None disables artifact grants cleanly.
     pub storage: Option<Arc<Storage>>,
@@ -133,6 +139,8 @@ impl AppState {
             search_indexer,
             notification_hub: Arc::new(NotificationHub::default()),
             notification_projector,
+            webhook_processor: Arc::new(WebhookProcessor::default()),
+            github_checks: Arc::new(GithubChecks::default()),
             storage,
             ws_tickets: Arc::new(WsTicketStore::default()),
             // Requires async Docker probing; main fills it in right after.

@@ -4,6 +4,8 @@ import type {
   Branch,
   InstallationsResponse,
   Repository,
+  RepositoryEventsPage,
+  RepositoryHealth,
   SyncRun,
 } from '../../../types/repository';
 import type { WorkflowSummary } from '../../../types/workflow';
@@ -13,6 +15,7 @@ export interface RepositoryDetail {
   branches: Branch[];
   workflows: WorkflowSummary[];
   syncRuns: SyncRun[];
+  health: RepositoryHealth;
 }
 
 export async function getInstallations(workspaceId: string): Promise<InstallationsResponse> {
@@ -53,6 +56,17 @@ export async function getRepositoryDetail(
   return api
     .get(`/api/workspaces/${workspaceId}/repositories/${repositoryId}`)
     .json<RepositoryDetail>();
+}
+
+export async function getRepositoryEvents(
+  workspaceId: string,
+  repositoryId: string,
+  cursor?: string,
+): Promise<RepositoryEventsPage> {
+  const searchParams = cursor ? { cursor } : undefined;
+  return api
+    .get(`/api/workspaces/${workspaceId}/repositories/${repositoryId}/events`, { searchParams })
+    .json<RepositoryEventsPage>();
 }
 
 export async function syncRepository(workspaceId: string, repositoryId: string): Promise<void> {

@@ -22,6 +22,13 @@ pub struct Pipeline {
     pub actor_avatar_url: Option<String>,
     pub git_ref: String,
     pub trigger_inputs: Option<serde_json::Value>,
+    /// Pull request number when trigger = 'pull_request'.
+    pub pr_number: Option<i32>,
+    /// GitHub check-run id once Checks reporting created one. Internal
+    /// routing state — never serialized into API responses (the checks
+    /// reporter reads it through db::pipelines::ChecksContext).
+    #[allow(dead_code)]
+    pub check_run_id: Option<i64>,
     pub status: String,
     pub conclusion: Option<String>,
     #[allow(dead_code)] // enforced in SQL sweeps, mapped for completeness
@@ -58,6 +65,7 @@ pub struct PipelineResponse {
     pub git_ref: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trigger_inputs: Option<serde_json::Value>,
+    pub pr_number: Option<i32>,
     pub status: String,
     pub conclusion: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -83,6 +91,7 @@ impl PipelineResponse {
             actor_avatar_url: pipeline.actor_avatar_url,
             git_ref: pipeline.git_ref,
             trigger_inputs: pipeline.trigger_inputs,
+            pr_number: pipeline.pr_number,
             status: pipeline.status,
             conclusion: pipeline.conclusion,
             created_at: pipeline.created_at,

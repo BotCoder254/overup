@@ -250,6 +250,10 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
             post(repositories::sync).layer(GovernorLayer::new(sync_governor)),
         )
         .route(
+            "/workspaces/{workspace_id}/repositories/{repository_id}/events",
+            get(repositories::events),
+        )
+        .route(
             "/workspaces/{workspace_id}/workflows",
             get(workflows::list),
         )

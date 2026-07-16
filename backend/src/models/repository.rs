@@ -163,3 +163,57 @@ impl From<RepoSyncRun> for SyncRunResponse {
         }
     }
 }
+
+/// One entry of the repository event timeline. `outcome`/`ignoredReason`
+/// are static category strings; `summary` is server-built, capped JSON.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryEventResponse {
+    pub id: Uuid,
+    pub event: String,
+    pub action: Option<String>,
+    pub git_ref: Option<String>,
+    pub head_sha: Option<String>,
+    pub actor_login: Option<String>,
+    pub actor_avatar_url: Option<String>,
+    pub outcome: String,
+    pub ignored_reason: Option<String>,
+    pub pipeline_ids: Vec<Uuid>,
+    pub sync_run_id: Option<Uuid>,
+    pub summary: serde_json::Value,
+    pub received_at: DateTime<Utc>,
+    pub processed_at: DateTime<Utc>,
+}
+
+impl From<crate::db::repository_events::RepositoryEventRow> for RepositoryEventResponse {
+    fn from(row: crate::db::repository_events::RepositoryEventRow) -> Self {
+        Self {
+            id: row.id,
+            event: row.event,
+            action: row.action,
+            git_ref: row.git_ref,
+            head_sha: row.head_sha,
+            actor_login: row.actor_login,
+            actor_avatar_url: row.actor_avatar_url,
+            outcome: row.outcome,
+            ignored_reason: row.ignored_reason,
+            pipeline_ids: row.pipeline_ids,
+            sync_run_id: row.sync_run_id,
+            summary: row.summary,
+            received_at: row.received_at,
+            processed_at: row.processed_at,
+        }
+    }
+}
+
+/// Webhook/sync health for the repository detail sync panel.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryHealthResponse {
+    pub last_event_at: Option<DateTime<Utc>>,
+    /// Static outcome category of the latest processed event.
+    pub last_event_outcome: Option<String>,
+    pub failed_events_24h: i64,
+    pub pending_deliveries: i64,
+    pub checks_enabled: bool,
+}

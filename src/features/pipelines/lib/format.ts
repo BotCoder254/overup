@@ -17,9 +17,16 @@ export function shortSha(sha: string): string {
   return sha.slice(0, 7);
 }
 
-/** "refs/heads/main" -> "main"; other refs pass through untouched. */
+/**
+ * "refs/heads/main" -> "main", "refs/tags/v1" -> "v1",
+ * "refs/pull/7/head" -> "PR #7"; other refs pass through untouched.
+ */
 export function branchOfRef(ref: string): string {
-  return ref.startsWith('refs/heads/') ? ref.slice('refs/heads/'.length) : ref;
+  if (ref.startsWith('refs/heads/')) return ref.slice('refs/heads/'.length);
+  if (ref.startsWith('refs/tags/')) return ref.slice('refs/tags/'.length);
+  const pull = ref.match(/^refs\/pull\/(\d+)\/head$/);
+  if (pull) return `PR #${pull[1]}`;
+  return ref;
 }
 
 export function formatBytes(bytes: number | null): string {

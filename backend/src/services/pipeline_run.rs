@@ -34,6 +34,8 @@ pub struct TriggerContext<'a> {
     /// Always an object; values are strings/numbers/booleans, already checked
     /// against the workflow's parsed input definitions by the handler.
     pub inputs: Option<&'a serde_json::Value>,
+    /// Pull request number (pull_request trigger; reruns copy the original's).
+    pub pr_number: Option<i32>,
     pub request_id: Option<&'a str>,
 }
 
@@ -138,6 +140,7 @@ pub async fn create_pipeline(
         actor_avatar_url: ctx.actor_avatar_url,
         git_ref: ctx.git_ref,
         trigger_inputs: ctx.inputs,
+        pr_number: ctx.pr_number,
         timeout_seconds: state.config.pipeline_timeout_seconds,
         job_timeout_seconds: state.config.job_timeout_seconds,
         request_id: ctx.request_id,
@@ -265,6 +268,8 @@ pub async fn on_job_started(state: &AppState, job: &PipelineJob) -> sqlx::Result
         )
         .await?;
         publish_pipeline(state, &pipeline);
+        // Report in_progress to GitHub (best-effort, spawned).
+        crate::services::github_checks::spawn_started(state, pipeline.id);
     }
     record_event(
         state,
@@ -536,6 +541,10 @@ pub async fn maybe_finalize(state: &AppState, pipeline_id: Uuid) -> sqlx::Result
     )
     .await?;
     publish_pipeline(state, &pipeline);
+    // Report the terminal conclusion to GitHub (best-effort, spawned). This
+    // is the single terminal convergence point, so cancel/timeout/partial all
+    // report through here.
+    crate::services::github_checks::spawn_completed(state, pipeline.id);
 
     sqlx::query(
         r#"

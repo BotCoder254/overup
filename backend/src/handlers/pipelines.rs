@@ -114,7 +114,7 @@ fn build_list_filter(
 
     let trigger = match query.trigger.as_deref() {
         None | Some("") => None,
-        Some(t @ ("push" | "manual")) => Some(t.to_string()),
+        Some(t @ ("push" | "manual" | "pull_request" | "tag")) => Some(t.to_string()),
         Some(_) => return Err(AppError::Validation("invalid trigger filter".into())),
     };
 
@@ -260,6 +260,8 @@ pub async fn rerun(
         git_ref: &original.git_ref,
         // Reruns reproduce the original run, inputs included.
         inputs: original.trigger_inputs.as_ref(),
+        // A rerun of a PR pipeline keeps its PR association visible.
+        pr_number: original.pr_number,
         request_id,
     };
     let pipeline = pipeline_run::create_pipeline(
@@ -492,6 +494,7 @@ pub async fn dispatch(
         actor_avatar_url: github_app::sanitize_avatar_url(user.avatar_url.as_deref()),
         git_ref: &git_ref,
         inputs: inputs.as_ref(),
+        pr_number: None,
         request_id,
     };
     let pipeline = pipeline_run::create_pipeline(
@@ -794,6 +797,13 @@ mod tests {
         let mut query = empty_query();
         query.trigger = Some("cron".into());
         assert!(build_list_filter(&query, None, 50).is_err());
+
+        for trigger in ["push", "manual", "pull_request", "tag"] {
+            let mut query = empty_query();
+            query.trigger = Some(trigger.into());
+            let filter = build_list_filter(&query, None, 50).unwrap();
+            assert_eq!(filter.trigger.as_deref(), Some(trigger));
+        }
     }
 
     #[test]
