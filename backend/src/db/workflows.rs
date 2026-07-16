@@ -6,18 +6,32 @@ use uuid::Uuid;
 use crate::models::workflow::{WorkflowDetailRow, WorkflowJobRow, WorkflowSummaryRow};
 use crate::services::workflow_parse::ParsedJob;
 
-/// blob shas of the workflows currently stored for a repository — sync
-/// compares against GitHub's listing to fetch only changed files.
-pub async fn blob_shas_for_repo(
+/// Per-path sync state of the workflows currently stored for a repository:
+/// blob sha (fetch only changed files) and the stamped parser version
+/// (re-parse stored files after a parser upgrade even when the sha is
+/// unchanged — otherwise new metadata never materializes). The `jsonb_typeof`
+/// guard reads legacy/hand-edited metadata as version 0, never an error.
+pub async fn sync_states_for_repo(
     pool: &PgPool,
     repository_id: Uuid,
-) -> sqlx::Result<HashMap<String, String>> {
-    let rows: Vec<(String, String)> =
-        sqlx::query_as("SELECT path, blob_sha FROM workflows WHERE repository_id = $1")
-            .bind(repository_id)
-            .fetch_all(pool)
-            .await?;
-    Ok(rows.into_iter().collect())
+) -> sqlx::Result<HashMap<String, (String, i64)>> {
+    let rows: Vec<(String, String, i64)> = sqlx::query_as(
+        r#"
+        SELECT path, blob_sha,
+               CASE WHEN jsonb_typeof(metadata->'parserVersion') = 'number'
+                    THEN floor((metadata->>'parserVersion')::numeric)::bigint
+                    ELSE 0 END
+        FROM workflows
+        WHERE repository_id = $1
+        "#,
+    )
+    .bind(repository_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(path, sha, version)| (path, (sha, version)))
+        .collect())
 }
 
 /// Upsert one workflow and replace its job rows. Runs inside the sync

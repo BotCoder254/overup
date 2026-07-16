@@ -135,7 +135,7 @@ async fn run_sync(
         .take(MAX_WORKFLOW_FILES)
         .collect();
 
-    let known = db::workflows::blob_shas_for_repo(&state.pool, repository.id)
+    let known = db::workflows::sync_states_for_repo(&state.pool, repository.id)
         .await
         .map_err(|e| fail("database error")(e.into()))?;
 
@@ -143,8 +143,14 @@ async fn run_sync(
     let mut parsed_files = Vec::new();
     let mut fetched = 0usize;
     for entry in &eligible {
-        if known.get(&entry.path).map(String::as_str) == Some(entry.sha.as_str()) {
-            continue; // unchanged
+        // Skip only when the content is unchanged AND it was parsed by the
+        // current parser — a parser upgrade re-parses stored files once so
+        // new metadata (secretRefs/varRefs/environments) materializes for
+        // workflows that never change on GitHub.
+        if known.get(&entry.path).is_some_and(|(sha, version)| {
+            sha == &entry.sha && *version == workflow_parse::PARSER_VERSION
+        }) {
+            continue;
         }
         if entry.size as usize > github_app::MAX_WORKFLOW_FILE_BYTES {
             // Oversized files become an errored catalog entry, not a fetch.
@@ -314,7 +320,9 @@ fn oversize_placeholder() -> workflow_parse::ParsedWorkflow {
         name: None,
         triggers: Vec::new(),
         jobs: Vec::new(),
-        metadata: serde_json::json!({}),
+        // Version-stamped so sync doesn't re-process the oversized file on
+        // every run.
+        metadata: serde_json::json!({ "parserVersion": workflow_parse::PARSER_VERSION }),
         diagnostics: vec![workflow_parse::Diagnostic {
             severity: workflow_parse::Severity::Error,
             message: "workflow file exceeds the size limit and was not parsed".into(),

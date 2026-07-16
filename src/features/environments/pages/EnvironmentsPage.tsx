@@ -164,7 +164,7 @@ export function EnvironmentsPage() {
                 description={
                   q
                     ? 'Nothing matches the current search. Clear it to see every environment.'
-                    : 'Create environments like production or staging, give each its own secrets, and reference them from workflow YAML with `environment: <name>`.'
+                    : 'Create environments like production or staging, give each its own secrets, and reference them from workflow YAML with `environment: <name>`. Environments referenced in YAML appear as detected entries after the repository’s next sync.'
                 }
                 action={
                   !q ? (
