@@ -60,24 +60,28 @@ export function QueueTable({ slug, jobs, onCancel }: QueueTableProps) {
             className="cursor-pointer transition-colors hover:bg-surface"
           >
             <Td className="font-mono text-xs text-steel">{index + 1}</Td>
-            <Td>
-              <div className="font-medium text-charcoal">{job.name ?? job.key}</div>
-              <div className="text-xs text-steel">
-                {job.workflowName}
-                <span className="font-mono"> #{job.pipelineNumber}</span>
-                <span className="inline-flex items-center gap-1 pl-2 font-mono">
-                  <GitBranch size={11} aria-hidden="true" />
-                  {branchOfRef(job.gitRef)}
-                </span>
-                {(job.actorLogin || job.actorAvatarUrl) && (
-                  <span className="inline-flex items-center gap-1 pl-2 align-middle">
-                    <Avatar size="xs" login={job.actorLogin} avatarUrl={job.actorAvatarUrl} />
-                    {job.actorLogin}
+            <Td className="max-w-0">
+              <div className="min-w-0">
+                <div className="truncate font-medium text-charcoal">{job.name ?? job.key}</div>
+                <div className="flex flex-wrap items-center gap-x-2 text-xs text-steel">
+                  <span className="min-w-0 truncate">
+                    {job.workflowName}
+                    <span className="font-mono"> #{job.pipelineNumber}</span>
                   </span>
-                )}
+                  <span className="inline-flex items-center gap-1 font-mono">
+                    <GitBranch size={11} aria-hidden="true" />
+                    {branchOfRef(job.gitRef)}
+                  </span>
+                  {(job.actorLogin || job.actorAvatarUrl) && (
+                    <span className="inline-flex items-center gap-1 align-middle">
+                      <Avatar size="xs" login={job.actorLogin} avatarUrl={job.actorAvatarUrl} />
+                      {job.actorLogin}
+                    </span>
+                  )}
+                </div>
+                {/* On phones the Repository column is hidden; fold it in here. */}
+                <div className="truncate text-xs text-steel md:hidden">{job.repoFullName}</div>
               </div>
-              {/* On phones the Repository column is hidden; fold it in here. */}
-              <div className="text-xs text-steel md:hidden">{job.repoFullName}</div>
             </Td>
             <Td className="hidden sm:table-cell">
               <span className="inline-flex items-center gap-1.5 font-mono text-xs text-charcoal">

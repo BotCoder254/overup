@@ -490,6 +490,20 @@ fn validate_minio_endpoint(endpoint: &str) -> anyhow::Result<()> {
     if rest.is_empty() || rest.starts_with('/') {
         anyhow::bail!("MINIO_ENDPOINT is missing a host");
     }
+    // A bare host with no explicit port defaults to 80/443 — almost always the
+    // MinIO *console*, not the S3 API. Bucket/object operations against the
+    // console fail with "S3 API Requests must be made to API port." Warn (never
+    // fail: a fronting proxy on 443 may legitimately route to the API).
+    let authority = rest.split('/').next().unwrap_or_default();
+    let after_bracket = authority.rsplit(']').next().unwrap_or(authority);
+    if !after_bracket.contains(':') {
+        tracing::warn!(
+            "MINIO_ENDPOINT has no explicit port — a bare host defaults to 80/443, which is \
+             usually the MinIO console, not the S3 API. If bucket creation fails with \
+             \"S3 API Requests must be made to API port.\", point MINIO_ENDPOINT at the API \
+             endpoint (e.g. host:9000)"
+        );
+    }
     Ok(())
 }
 

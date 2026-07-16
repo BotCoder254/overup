@@ -41,7 +41,7 @@ export function RunnerAvailabilityPanel({
 
   return (
     <Card>
-      <CardHeader>
+      <CardHeader className="flex-col items-start gap-1">
         <h2 className="text-sm font-semibold text-charcoal">Runner availability</h2>
         <p className="text-xs text-steel">
           Jobs are matched to runners by label containment — every requested label must be
@@ -73,11 +73,11 @@ export function RunnerAvailabilityPanel({
                 <div className="min-w-0">
                   <Link
                     to={workspacePath(slug, `runners/${runner.id}`)}
-                    className="text-sm font-medium text-charcoal hover:text-link hover:underline"
+                    className="block truncate text-sm font-medium text-charcoal hover:text-link hover:underline"
                   >
                     {runner.name}
                   </Link>
-                  <div className="mt-1 flex flex-wrap gap-1">
+                  <div className="mt-1 flex max-w-[220px] flex-wrap gap-1">
                     {runner.labels.map((label) => (
                       <Badge key={label} variant="outline">
                         {label}
@@ -85,12 +85,12 @@ export function RunnerAvailabilityPanel({
                     ))}
                   </div>
                   {runner.lastSeenAt && (
-                    <div className="mt-1 text-xs text-steel">
+                    <div className="mt-1 truncate text-xs text-steel">
                       seen {formatDistanceToNow(new Date(runner.lastSeenAt), { addSuffix: true })}
                     </div>
                   )}
                 </div>
-                <RunnerStatusBadge status={runner.status} draining={runner.draining} />
+                <RunnerStatusBadge status={runner.status} draining={runner.draining} className="shrink-0" />
               </li>
             ))}
           </ul>

@@ -273,8 +273,27 @@ impl S3Store {
             {
                 Ok(false)
             }
-            Err(err) => Err(anyhow::Error::new(err)
-                .context(format!("failed to create bucket on {} storage", self.backend))),
+            Err(err) => {
+                // "InvalidArgument" here is MinIO's "S3 API Requests must be made
+                // to API port." — MINIO_ENDPOINT is pointing at the console, not
+                // the S3 API. Surface the remediation so the boot warn is actionable.
+                let hints_console_port = matches!(
+                    &err,
+                    aws_sdk_s3::error::SdkError::ServiceError(service_err)
+                        if service_err.err().meta().code() == Some("InvalidArgument")
+                );
+                let context = if hints_console_port {
+                    format!(
+                        "failed to create bucket on {} storage — MINIO_ENDPOINT appears to point \
+                         at the MinIO console, not the S3 API; set it to the API endpoint \
+                         (e.g. host:9000)",
+                        self.backend
+                    )
+                } else {
+                    format!("failed to create bucket on {} storage", self.backend)
+                };
+                Err(anyhow::Error::new(err).context(context))
+            }
         }
     }
 }
