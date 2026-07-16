@@ -158,7 +158,7 @@ export function SecretsPage() {
                 description={
                   hasFilters
                     ? 'Nothing matches the current filters. Clear them to see every secret.'
-                    : 'Store deployment tokens, registry credentials, and API keys here — encrypted at rest, injected into jobs at run time, masked in logs.'
+                    : 'Store deployment tokens, registry credentials, and API keys here — encrypted at rest, injected into jobs at run time, masked in logs. GitHub never exposes existing secret values, so they can’t be imported: re-enter each value once and it stays encrypted here.'
                 }
                 action={
                   !hasFilters ? (

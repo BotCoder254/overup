@@ -13,6 +13,13 @@ use serde_yaml_ng::{Mapping, Value};
 
 use super::github_app::MAX_WORKFLOW_FILE_BYTES;
 
+/// Stamped into every workflow's `metadata` JSONB. Bump whenever the parse
+/// output or metadata shape changes: repo sync re-parses any stored workflow
+/// whose stamped version is older, even when its blob sha is unchanged —
+/// otherwise new metadata (e.g. the detected-requirements ref arrays) would
+/// never materialize for files that don't change on GitHub.
+pub const PARSER_VERSION: i64 = 2;
+
 /// Resource budgets: a workflow file that exceeds these is hostile or
 /// broken, not "large". They bound both memory and walk time.
 const MAX_NODES: usize = 20_000;
@@ -141,7 +148,9 @@ impl ParsedWorkflow {
             name: None,
             triggers: Vec::new(),
             jobs: Vec::new(),
-            metadata: serde_json::json!({}),
+            // Version-stamped even on failure so sync doesn't re-parse a
+            // persistently broken file on every run.
+            metadata: serde_json::json!({ "parserVersion": PARSER_VERSION }),
             diagnostics,
         }
     }
@@ -206,6 +215,7 @@ pub fn parse_and_validate(content: &str) -> ParsedWorkflow {
     validate_needs(&jobs, &mut diagnostics);
 
     let metadata = serde_json::json!({
+        "parserVersion": PARSER_VERSION,
         "permissions": get(root, "permissions").map(value_to_json),
         "concurrency": get(root, "concurrency").map(value_to_json),
         "envKeys": get(root, "env")
@@ -1105,5 +1115,21 @@ jobs:
         assert_eq!(parsed.metadata["secretRefs"], serde_json::json!([]));
         assert_eq!(parsed.metadata["varRefs"], serde_json::json!([]));
         assert_eq!(parsed.metadata["environments"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn metadata_is_parser_version_stamped_on_success_and_failure() {
+        let parsed = parse_and_validate(
+            "on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps: []\n",
+        );
+        assert_eq!(
+            parsed.metadata["parserVersion"],
+            serde_json::json!(PARSER_VERSION)
+        );
+        let broken = parse_and_validate("{not yaml");
+        assert_eq!(
+            broken.metadata["parserVersion"],
+            serde_json::json!(PARSER_VERSION)
+        );
     }
 }
