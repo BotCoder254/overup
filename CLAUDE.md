@@ -109,9 +109,12 @@ AND completed-job log archives live in **S3-compatible object storage**
 the default/primary backend whenever configured** (`services/minio.rs`; explicit endpoint,
 path-style addressing, startup bucket auto-create) and **Cloudflare R2 the fallback**
 (`services/r2.rs`; derived account endpoint, region `auto`) — R2 alone keeps its historical
-primary role. The `Storage` router in AppState handles it: server-side writes (log
-archives, logos) reactively fall back to the secondary store on failure; presigned upload
-grants route via a 60 s-cached HeadBucket health probe of the primary; and every stored
+primary role. The `Storage` router in AppState handles it: every new-object
+path (server-side writes for log archives/logos AND presigned upload grants) routes off
+one shared 60 s-cached HeadBucket health probe of the primary — a primary that fails its
+boot bucket check or a real write is demoted immediately so new objects go to the
+fallback, and it re-promotes automatically on the next healthy probe (no restart);
+server-side writes additionally keep the reactive try-fallback-on-error; and every stored
 object carries a `storage_backend` marker ('minio'|'r2', migration `20260716100001`) so
 presigns/HeadObject/deletes always target the store that holds it — presigned URLs are
 host-specific, and NULL/legacy markers read as 'r2'. Artifact presigned PUT/GET minted

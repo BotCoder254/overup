@@ -353,9 +353,54 @@ impl Storage {
         &self.primary
     }
 
-    /// Server-side write with reactive fallback: try the primary; if it
-    /// fails and a fallback exists, try that. Returns the backend that
-    /// accepted the object so the caller can record the marker.
+    /// Cached primary liveness (60 s TTL HeadBucket probe). Every new-object
+    /// routing decision shares this one cache, so a failure observed on any
+    /// path demotes the primary for all of them until the next probe window.
+    /// Without a fallback there is nowhere else to route — report healthy
+    /// and let the write surface its own error (single-store behavior).
+    async fn primary_healthy(&self) -> bool {
+        if self.fallback.is_none() {
+            return true;
+        }
+        let mut cache = self.primary_health.lock().await;
+        let stale = cache
+            .checked_at
+            .is_none_or(|at| at.elapsed() >= HEALTH_PROBE_TTL);
+        if stale {
+            let healthy = self.primary.bucket_reachable().await;
+            if healthy != cache.healthy {
+                tracing::warn!(
+                    primary = %self.primary.backend(),
+                    healthy,
+                    "primary storage health changed"
+                );
+            }
+            cache.checked_at = Some(Instant::now());
+            cache.healthy = healthy;
+        }
+        cache.healthy
+    }
+
+    /// Record a primary failure observed outside the probe (a real write or
+    /// the boot bucket check) so subsequent routing demotes it immediately
+    /// instead of waiting to trip over it again.
+    async fn mark_primary_unhealthy(&self) {
+        let mut cache = self.primary_health.lock().await;
+        if cache.healthy {
+            tracing::warn!(
+                primary = %self.primary.backend(),
+                healthy = false,
+                "primary storage health changed"
+            );
+        }
+        cache.checked_at = Some(Instant::now());
+        cache.healthy = false;
+    }
+
+    /// Server-side write routed to a healthy backend: a primary known to be
+    /// down is skipped proactively; otherwise try it first and fall back
+    /// reactively (recording the failure for every other path). Returns the
+    /// backend that accepted the object so the caller can record the marker.
     pub async fn put_object(
         &self,
         key: &str,
@@ -366,6 +411,10 @@ impl Storage {
             self.primary.put_object(key, body, content_type).await?;
             return Ok(self.primary.backend());
         };
+        if !self.primary_healthy().await {
+            fallback.put_object(key, body, content_type).await?;
+            return Ok(fallback.backend());
+        }
         match self.primary.put_object(key, body.clone(), content_type).await {
             Ok(()) => Ok(self.primary.backend()),
             Err(primary_error) => {
@@ -376,6 +425,7 @@ impl Storage {
                     fallback = %fallback.backend(),
                     "primary storage write failed; trying fallback"
                 );
+                self.mark_primary_unhealthy().await;
                 fallback
                     .put_object(key, body, content_type)
                     .await
@@ -393,48 +443,62 @@ impl Storage {
 
     /// The store presigned upload grants should target. Presigning is an
     /// offline signature (it cannot fail over reactively), so routing keys
-    /// off a cached HeadBucket probe of the primary: healthy → primary,
-    /// unreachable → fallback. Without a fallback the primary is always
-    /// used — exactly the single-store behavior.
+    /// off the shared cached health probe: healthy → primary, unreachable →
+    /// fallback. Without a fallback the primary is always used — exactly
+    /// the single-store behavior.
     pub async fn store_for_upload(&self) -> &S3Store {
-        let Some(fallback) = &self.fallback else {
-            return &self.primary;
-        };
-        let mut cache = self.primary_health.lock().await;
-        let stale = cache
-            .checked_at
-            .is_none_or(|at| at.elapsed() >= HEALTH_PROBE_TTL);
-        if stale {
-            let healthy = self.primary.bucket_reachable().await;
-            if healthy != cache.healthy {
-                tracing::warn!(
-                    primary = %self.primary.backend(),
-                    healthy,
-                    "primary storage health changed"
-                );
-            }
-            cache.checked_at = Some(Instant::now());
-            cache.healthy = healthy;
+        match &self.fallback {
+            Some(fallback) if !self.primary_healthy().await => fallback,
+            _ => &self.primary,
         }
-        if cache.healthy { &self.primary } else { fallback }
     }
 
-    /// Startup bucket bootstrap: MinIO buckets are created when missing
-    /// (a fresh `docker compose` MinIO starts empty); R2 buckets are
-    /// dashboard-managed and left alone. Warn-only — storage stays enabled
-    /// either way and writes surface their own errors.
+    /// Startup verification of every configured store: MinIO buckets are
+    /// created when missing (a fresh `docker compose` MinIO starts empty);
+    /// R2 buckets are dashboard-managed, so they only get a warn-only
+    /// reachability check. Warn-only either way — storage stays enabled and
+    /// writes surface their own errors — but a failing PRIMARY seeds the
+    /// shared health cache so new uploads/archives route to the fallback
+    /// immediately (and return automatically once the primary recovers).
     pub async fn ensure_buckets(&self) {
         for store in std::iter::once(&self.primary).chain(self.fallback.as_ref()) {
-            if store.backend() != StorageBackend::Minio {
-                continue;
-            }
-            match store.ensure_bucket().await {
-                Ok(true) => tracing::info!("created MinIO storage bucket"),
-                Ok(false) => {}
-                Err(error) => tracing::warn!(
-                    error = ?error,
-                    "could not verify/create the MinIO bucket; uploads may fail until it exists"
-                ),
+            let is_primary = std::ptr::eq(store, &self.primary);
+            let ok = if store.backend() == StorageBackend::Minio {
+                match store.ensure_bucket().await {
+                    Ok(true) => {
+                        tracing::info!("created MinIO storage bucket");
+                        true
+                    }
+                    Ok(false) => true,
+                    Err(error) => {
+                        tracing::warn!(
+                            error = ?error,
+                            "could not verify/create the MinIO bucket; uploads may fail until it exists"
+                        );
+                        false
+                    }
+                }
+            } else {
+                let reachable = store.bucket_reachable().await;
+                if !reachable {
+                    tracing::warn!(
+                        backend = %store.backend(),
+                        role = if is_primary { "primary" } else { "fallback" },
+                        "storage bucket is unreachable; check the credentials and bucket name"
+                    );
+                }
+                reachable
+            };
+            if !ok
+                && is_primary
+                && let Some(fallback) = &self.fallback
+            {
+                self.mark_primary_unhealthy().await;
+                tracing::warn!(
+                    primary = %self.primary.backend(),
+                    fallback = %fallback.backend(),
+                    "primary storage is unreachable — routing new uploads/archives to the fallback until it recovers"
+                );
             }
         }
     }
@@ -445,9 +509,13 @@ mod tests {
     use super::*;
 
     fn store(backend: StorageBackend) -> S3Store {
+        store_at(backend, "http://localhost:9000")
+    }
+
+    fn store_at(backend: StorageBackend, endpoint: &str) -> S3Store {
         S3Store::new(
             backend,
-            "http://localhost:9000",
+            endpoint,
             "us-east-1",
             "test",
             "test-secret",
@@ -479,6 +547,37 @@ mod tests {
         let r2_only = Storage::new(store(StorageBackend::R2), None);
         assert_eq!(r2_only.store_for("minio").backend(), StorageBackend::R2);
         assert_eq!(r2_only.store_for("r2").backend(), StorageBackend::R2);
+    }
+
+    /// A primary that fails its boot check is demoted in the shared health
+    /// cache, so upload-grant routing goes to the fallback without waiting
+    /// to trip over the dead store again. Port 9 (discard) is unreachable —
+    /// connection refused, no live MinIO needed.
+    #[tokio::test]
+    async fn boot_check_failure_demotes_primary_for_upload_routing() {
+        let storage = Storage::new(
+            store_at(StorageBackend::Minio, "http://127.0.0.1:9"),
+            Some(store_at(StorageBackend::R2, "http://127.0.0.1:9")),
+        );
+        storage.ensure_buckets().await;
+        // The cache was just seeded (checked_at fresh), so this must route
+        // to the fallback without re-probing the dead primary.
+        assert_eq!(
+            storage.store_for_upload().await.backend(),
+            StorageBackend::R2
+        );
+    }
+
+    /// Without a fallback there is nowhere to route: the primary stays the
+    /// target no matter what the health probe would say.
+    #[tokio::test]
+    async fn single_store_routing_never_demotes() {
+        let storage = Storage::new(store_at(StorageBackend::Minio, "http://127.0.0.1:9"), None);
+        storage.ensure_buckets().await;
+        assert_eq!(
+            storage.store_for_upload().await.backend(),
+            StorageBackend::Minio
+        );
     }
 
     #[test]
