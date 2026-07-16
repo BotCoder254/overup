@@ -158,10 +158,11 @@ pub async fn delete_me(
 
     let logo_keys = db::users::delete_account(&state.pool, user.id).await?;
 
-    // Best-effort R2 cleanup of workspace logos; row state is already final.
-    if let Some(r2) = state.r2.as_ref() {
-        for key in logo_keys {
-            if let Err(error) = r2.delete_object(&key).await {
+    // Best-effort storage cleanup of workspace logos; row state is already
+    // final. Each delete routes to the store that holds the object.
+    if let Some(storage) = state.storage.as_ref() {
+        for (key, backend) in logo_keys {
+            if let Err(error) = storage.store_for(&backend).delete_object(&key).await {
                 tracing::warn!(%key, error = ?error, "failed to delete logo object for deleted account");
             }
         }

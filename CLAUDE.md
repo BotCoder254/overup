@@ -5,8 +5,9 @@ Rust (axum) API with PostgreSQL. Shipped so far: the production-grade skeleton, 
 GitHub-OAuth authentication subsystem, the **Repository + Workflow Management modules**
 (GitHub App integration, webhook-driven sync, workflow YAML parsing/validation, Monaco
 workspace with dependency graph), and the **Pipeline Execution subsystem** (event-driven
-scheduler, HMAC-signed runner WebSocket protocol, live log streaming, Cloudflare R2
-artifacts, a reference Docker runner in `runner/`, and the full Pipelines UI), and the
+scheduler, HMAC-signed runner WebSocket protocol, live log streaming, S3-compatible object
+storage for artifacts — MinIO as the default/primary store with Cloudflare R2 as the
+fallback — a reference Docker runner in `runner/`, and the full Pipelines UI), and the
 **Secrets Management module** (envelope-encrypted write-only workspace/repository/
 environment secrets, dispatch-time injection with unconditional log masking, dedicated
 `secrets.read`/`secrets.manage` RBAC, full catalog + detail UI), and the **Environments
@@ -103,12 +104,23 @@ on (job, seq)) → broadcast to browser subscribers on `/ws/workspaces/{ws}/pipe
 (strict Origin check + session cookie + `content.read` BEFORE upgrade; snapshot then live
 events with `createdAt`; server pings every 30 s and answers client `{"type":"ping"}` with
 a pong; `log_gap` on lag → client backfills over REST, paging until exhausted). Artifacts
-AND completed-job log archives live in **Cloudflare R2** (S3 API; artifact presigned
-PUT/GET minted server-side, HeadObject verification before rows flip to `uploaded`; logs
-gzip'd server-side to `logs/{ws}/{pipeline}/{job}-{attempt}.log.gz` on job completion —
-feature-gated on R2 env, clean denial/Postgres-only without it; runner convention: files in
+AND completed-job log archives live in **S3-compatible object storage**
+(`services/object_store.rs`: one generic `S3Store` client with two flavors — **MinIO is
+the default/primary backend whenever configured** (`services/minio.rs`; explicit endpoint,
+path-style addressing, startup bucket auto-create) and **Cloudflare R2 the fallback**
+(`services/r2.rs`; derived account endpoint, region `auto`) — R2 alone keeps its historical
+primary role. The `Storage` router in AppState handles it: server-side writes (log
+archives, logos) reactively fall back to the secondary store on failure; presigned upload
+grants route via a 60 s-cached HeadBucket health probe of the primary; and every stored
+object carries a `storage_backend` marker ('minio'|'r2', migration `20260716100001`) so
+presigns/HeadObject/deletes always target the store that holds it — presigned URLs are
+host-specific, and NULL/legacy markers read as 'r2'. Artifact presigned PUT/GET minted
+server-side with the declared Content-Length bound into the signature, HeadObject
+verification before rows flip to `uploaded`; logs gzip'd server-side to
+`logs/{ws}/{pipeline}/{job}-{attempt}.log.gz` on job completion — feature-gated on
+MinIO/R2 env, clean denial/Postgres-only without either; runner convention: files in
 `.overup/artifacts/`). `services/janitor.rs` (hourly) expires uploaded artifacts after
-`ARTIFACT_RETENTION_DAYS` (deleting the R2 object), removes stale pending artifact rows,
+`ARTIFACT_RETENTION_DAYS` (deleting the stored object), removes stale pending artifact rows,
 prunes archived log chunks past `LOG_HOT_RETENTION_DAYS` (the raw-log download then
 307-redirects to a presigned R2 GET), and purges sessions/oauth states. The ledger list API
 filters on repository, workflow, status, conclusion, trigger, branch, actor, runner, date
@@ -350,14 +362,16 @@ overup/
     │                           #   secrets (ciphertext-only + RBAC backfill),
     │                           #   environments (+secrets.environment_id scope +
     │                           #   RBAC backfill), secret value_set_at rotation clock,
-    │                           #   notifications (+preferences/projector cursor)
+    │                           #   notifications (+preferences/projector cursor),
+    │                           #   storage_backend markers (artifacts/pipeline_jobs/
+    │                           #   workspaces — MinIO/R2 object routing)
     └── src/
         ├── main.rs             # bootstrap: env, tracing, pool, migrate, orphan recovery,
         │                       #   scheduler spawn, janitor, serve
         ├── config.rs           # all env-driven configuration (GitHub App, signing key,
         │                       #   execution budgets, optional R2 group)
         ├── state.rs            # AppState: pool, config, oauth, http, github_app,
-        │                       #   log_hub, runner_hub, scheduler, r2
+        │                       #   log_hub, runner_hub, scheduler, storage
         ├── error.rs            # AppError → sanitized JSON responses
         ├── db/                 # parameterized sqlx queries only, one module per table
         ├── models/             # FromRow rows + camelCase response DTOs, per resource
@@ -372,7 +386,9 @@ overup/
                                 #   auth_flow, workspace, authz (RBAC), repo_sync,
                                 #   workflow_parse, pipeline_plan, pipeline_run (state
                                 #   machine), scheduler, log_hub (mask+cap+broadcast),
-                                #   runner_hub, r2 (presign + HeadObject),
+                                #   runner_hub, object_store (generic S3Store + Storage
+                                #   router: MinIO primary / R2 fallback, presign +
+                                #   HeadObject) + minio/r2 (per-backend constructors),
                                 #   secrets_crypto (AES-256-GCM envelope encryption),
                                 #   notification (mapping) + notification_hub (per-user
                                 #   fan-out) + notification_projector (audit tail)
@@ -459,8 +475,11 @@ Secrets subsystem; DEKs and decrypted values ride in `zeroize::Zeroizing` buffer
 `serde_yaml_ng` (maintained serde_yaml fork; workflow
 parsing under strict budgets), `axum` with the **`ws` feature** (runner + browser WebSocket
 upgrades), `dashmap` (RunnerHub connection registry + LogHub broadcast/mask maps),
-`futures-util` (WS stream splitting), `aws-sdk-s3` (Cloudflare R2 via its S3 API — custom
-endpoint, region `auto`, presigned URLs; isolated in `services/r2.rs`), and the local
+`futures-util` (WS stream splitting), `aws-sdk-s3` (one generic client for both object
+stores — MinIO via explicit endpoint + path-style addressing, Cloudflare R2 via its
+account endpoint + region `auto`; presigned URLs, HeadObject/HeadBucket; isolated in
+`services/object_store.rs` with per-backend constructors in `services/minio.rs` /
+`services/r2.rs`), and the local
 `protocol` crate (shared WS message types + HMAC helpers). The `runner/` crate adds
 `bollard` 0.21 (Docker Engine API: image pull, container lifecycle, exec streams),
 `tokio-tungstenite` (rustls), `tar` + `flate2` + `bytes` (repackaging the source tarball
@@ -475,7 +494,10 @@ into a traversal-safe tar streamed into the container via the Docker archive API
 - Exact redirect-URI allow-list (one registered callback URL)
 - Code exchange server-to-server over TLS (rustls), HTTP redirects disabled
 - Session tokens: 32 bytes OS RNG; **only SHA-256 hashes** in the database
-- Session rotation on every login; absolute expiry; hourly janitor purges expired rows
+- Session rotation on every login; absolute expiry PLUS an idle timeout
+  (`SESSION_IDLE_TIMEOUT_HOURS`, default 72, 0 disables — rides the `last_seen_at`
+  column touched on every request, so a leaked token dies after inactivity); hourly
+  janitor purges expired AND idle-expired rows with the same predicate
 - Cookie: `HttpOnly`, `Secure` (prod), `SameSite=Lax`, `Path=/`; with `COOKIE_SECURE=true`
   the name is auto-prefixed `__Host-` (binds the cookie to the exact host — no subdomain
   planting/fixation)
@@ -509,7 +531,20 @@ into a traversal-safe tar streamed into the container via the Docker archive API
   responses, never in Postgres; the private key PEM loads once at startup
 - Webhooks: constant-time HMAC-SHA256 over the raw body (`X-Hub-Signature-256`) before any
   parsing; `X-GitHub-Delivery` primary key makes redeliveries no-ops; payloads are parsed
-  into minimal typed envelopes and never logged
+  into minimal typed envelopes and never logged; `GITHUB_WEBHOOK_SECRET` must be ≥ 16
+  bytes at boot (signing-key parity — a guessable secret would let anyone forge deliveries)
+- Request tracing records method + PATH only (custom `MakeSpan` in routes) — the query
+  string carries secrets on some routes (`?code=`/`?state=` on the OAuth callback,
+  `?ticket=` on WS upgrades) and must never land in spans, even at debug level
+- **Object storage routing is marker-driven**: every stored object (artifact, log archive,
+  logo) records which backend holds it (`storage_backend` columns, 'minio'|'r2',
+  NULL/legacy → 'r2'); presigns/HeadObject/deletes always target that store — presigned
+  URLs are host-specific, so a marker mix-up would 404, never leak. Server-side writes
+  fall back MinIO→R2 reactively; presigned upload grants route on a cached health probe.
+  Presigned PUTs bind the runner-declared Content-Length (and content type) into the
+  signed headers, so the store rejects any different body size at the edge; HeadObject
+  re-verifies afterwards. MINIO_ENDPOINT is validated at boot and plain http on a
+  non-loopback host draws a startup warning (cleartext credentials)
 - Setup redirect: `installation_id` is length-capped, numeric-validated, then verified
   against the GitHub API with an app JWT + account/installer match before linking
 - Workflow YAML parsing is deterministic and side-effect free: 512 KB cap, 20k node budget,
@@ -585,8 +620,9 @@ into a traversal-safe tar streamed into the container via the Docker archive API
 - Storage hygiene: artifacts carry an immutable `expires_at` computed at upload from
   per-kind workspace retention policies (`artifact_retention_policies`, 1–400 days,
   kind row → `default` row → `ARTIFACT_RETENTION_DAYS` env); the hourly janitor deletes
-  expired/abandoned R2 objects and rows, and prunes archived log chunks only when the R2
-  archive exists (`LOG_HOT_RETENTION_DAYS`). Artifact `kind` is classified SERVER-side
+  expired/abandoned stored objects (routed per-object to MinIO or R2 by marker) and rows,
+  and prunes archived log chunks only when the object-storage archive exists
+  (`LOG_HOT_RETENTION_DAYS`). Artifact `kind` is classified SERVER-side
   from the validated name (`services/artifact_kind.rs`); runner-reported archive manifests
   (entries/uncompressed size/file count) are capped (1000 entries, 96 KB JSON, 1 TiB/1M
   ceilings) and dropped whole on any violation — the upload itself still succeeds
@@ -650,9 +686,14 @@ into a traversal-safe tar streamed into the container via the Docker archive API
 #    (openssl rand -hex 32) enables the Secrets module — without it secret
 #    creation is denied and pipelines for repos WITH stored secrets fail
 #    closed (secrets_unavailable); losing it makes stored values permanently
-#    undecryptable (re-enter values to recover). R2_* vars are optional —
-#    without them pipelines run but artifact uploads are denied and logs
-#    stay in Postgres (no archival/pruning). Retention knobs:
+#    undecryptable (re-enter values to recover). Object storage is optional
+#    and S3-compatible with two backends: MINIO_* vars (endpoint/key/secret/
+#    bucket — the local docker-compose MinIO is http://localhost:9000 with
+#    overup / overup-minio; bucket auto-created at startup) make MinIO the
+#    DEFAULT/primary store, and R2_* vars configure Cloudflare R2 as the
+#    fallback (or the primary when MinIO is absent). Without either,
+#    pipelines run but artifact uploads are denied and logs stay in
+#    Postgres (no archival/pruning). Retention knobs:
 #    ARTIFACT_RETENTION_DAYS / ARTIFACT_PENDING_TTL_HOURS /
 #    LOG_HOT_RETENTION_DAYS — per-kind artifact retention (1–400 days) is
 #    also configurable per workspace in the Artifacts UI and takes

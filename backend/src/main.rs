@@ -42,6 +42,13 @@ async fn main() -> anyhow::Result<()> {
         .context("failed to run database migrations")?;
 
     let mut state = AppState::new(pool.clone(), config.clone())?;
+    // Object storage bootstrap: create missing MinIO buckets (fresh local
+    // deployments start empty). Warn-only — storage stays enabled and any
+    // real outage surfaces on the first write.
+    if let Some(storage) = &state.storage {
+        tracing::info!(primary = %storage.primary_backend(), "object storage configured");
+        storage.ensure_buckets().await;
+    }
     // Optional hosted-runner provisioner. Constructed whenever configured;
     // its reconnect loop owns the Docker connection, so a daemon outage (at
     // boot or later) degrades to a clean 409 on the hosted-runner endpoint

@@ -564,7 +564,19 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
             security_headers::security_headers,
         ))
         .layer(cors)
-        .layer(TraceLayer::new_for_http())
+        // The default span records the full URI including the query string,
+        // which carries secrets on some routes (?code=/&state= on the OAuth
+        // callback, ?ticket= on WS upgrades). Record method + PATH only so
+        // raising the log filter to debug can never capture them.
+        .layer(TraceLayer::new_for_http().make_span_with(
+            |request: &Request<axum::body::Body>| {
+                tracing::info_span!(
+                    "request",
+                    method = %request.method(),
+                    path = %request.uri().path(),
+                )
+            },
+        ))
         .layer(PropagateRequestIdLayer::new(X_REQUEST_ID))
         .layer(SetRequestIdLayer::new(X_REQUEST_ID, MakeRequestUuid))
         .with_state(state);

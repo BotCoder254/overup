@@ -63,9 +63,17 @@ pub struct Config {
     pub notification_retention_days: i32,
     /// Days after a notification is read before the janitor auto-archives it.
     pub notification_auto_archive_days: i32,
+    /// Idle timeout for sessions: a session unused for this many hours is
+    /// invalid even before its absolute expiry (0 disables). Uses the
+    /// `last_seen_at` column that is already touched on every request.
+    pub session_idle_timeout_hours: i64,
+    /// MinIO (or any S3-compatible endpoint) storage — all-or-none optional
+    /// group. When configured, MinIO is the DEFAULT / primary object store;
+    /// R2 becomes the fallback.
+    pub minio: Option<MinioConfig>,
     /// Cloudflare R2 storage (artifacts + gzip'd log archives) — all-or-none
-    /// optional group; without it, artifact grants are cleanly denied and
-    /// logs simply stay in Postgres.
+    /// optional group; without it (and without MinIO), artifact grants are
+    /// cleanly denied and logs simply stay in Postgres.
     pub r2: Option<R2Config>,
     /// Hosted-runner provisioning (Docker containers spawned by the control
     /// plane) — optional group enabled with RUNNER_PROVISIONER=docker;
@@ -86,6 +94,21 @@ pub struct R2Config {
     pub access_key_id: String,
     pub secret_access_key: String,
     pub bucket: String,
+}
+
+#[derive(Clone)]
+pub struct MinioConfig {
+    /// Full http(s) endpoint, e.g. http://localhost:9000. Plain http on a
+    /// non-loopback host draws a startup warning (credentials in cleartext).
+    pub endpoint: String,
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub bucket: String,
+    /// MinIO's own default region (MINIO_REGION, default us-east-1).
+    pub region: String,
+    /// Path-style addressing (MINIO_FORCE_PATH_STYLE, default true) — the
+    /// standard MinIO deployment shape.
+    pub force_path_style: bool,
 }
 
 #[derive(Clone)]
@@ -169,6 +192,56 @@ impl Config {
         if runner_job_signing_key.len() < 32 {
             anyhow::bail!("RUNNER_JOB_SIGNING_KEY must be at least 32 bytes");
         }
+
+        // Parity with the signing-key rule: a guessable webhook secret would
+        // let anyone forge GitHub deliveries, so a weak one fails at boot.
+        let github_webhook_secret = required("GITHUB_WEBHOOK_SECRET")?;
+        if github_webhook_secret.len() < 16 {
+            anyhow::bail!(
+                "GITHUB_WEBHOOK_SECRET must be at least 16 bytes (generate one with `openssl rand -hex 32` and set it on the GitHub App too)"
+            );
+        }
+
+        let session_idle_timeout_hours: i64 = optional("SESSION_IDLE_TIMEOUT_HOURS", "72")
+            .parse()
+            .context("SESSION_IDLE_TIMEOUT_HOURS must be an integer (0 disables)")?;
+        if session_idle_timeout_hours < 0 {
+            anyhow::bail!("SESSION_IDLE_TIMEOUT_HOURS must be 0 (disabled) or positive");
+        }
+
+        // MinIO settings are all-or-none, mirroring the R2 group. MinIO is
+        // the default/primary object store whenever it is configured.
+        let minio_keys = [
+            "MINIO_ENDPOINT",
+            "MINIO_ACCESS_KEY_ID",
+            "MINIO_SECRET_ACCESS_KEY",
+            "MINIO_BUCKET",
+        ];
+        let minio_present = minio_keys
+            .iter()
+            .filter(|key| std::env::var(key).is_ok())
+            .count();
+        let minio = match minio_present {
+            0 => None,
+            4 => {
+                let endpoint = required("MINIO_ENDPOINT")?.trim_end_matches('/').to_string();
+                validate_minio_endpoint(&endpoint)?;
+                let force_path_style: bool = optional("MINIO_FORCE_PATH_STYLE", "true")
+                    .parse()
+                    .context("MINIO_FORCE_PATH_STYLE must be true or false")?;
+                Some(MinioConfig {
+                    endpoint,
+                    access_key_id: required("MINIO_ACCESS_KEY_ID")?,
+                    secret_access_key: required("MINIO_SECRET_ACCESS_KEY")?,
+                    bucket: required("MINIO_BUCKET")?,
+                    region: optional("MINIO_REGION", "us-east-1"),
+                    force_path_style,
+                })
+            }
+            _ => anyhow::bail!(
+                "MinIO configuration is incomplete: set all of MINIO_ENDPOINT, MINIO_ACCESS_KEY_ID, MINIO_SECRET_ACCESS_KEY, MINIO_BUCKET or none"
+            ),
+        };
 
         // R2 settings are all-or-none: a partial configuration is a
         // deployment mistake, not a feature toggle.
@@ -349,7 +422,7 @@ impl Config {
                 .context("TRUST_PROXY must be true or false")?,
             github_app_client_id: required("GITHUB_APP_CLIENT_ID")?,
             github_app_private_key_pem,
-            github_webhook_secret: required("GITHUB_WEBHOOK_SECRET")?,
+            github_webhook_secret,
             github_app_slug: required("GITHUB_APP_SLUG")?,
             runner_job_signing_key,
             default_job_image,
@@ -373,6 +446,8 @@ impl Config {
             log_hot_retention_days,
             notification_retention_days,
             notification_auto_archive_days,
+            session_idle_timeout_hours,
+            minio,
             r2,
             runner_provisioner,
             secrets_master_key,
@@ -382,6 +457,40 @@ impl Config {
 
 fn required(key: &str) -> anyhow::Result<String> {
     std::env::var(key).with_context(|| format!("missing required environment variable {key}"))
+}
+
+/// MINIO_ENDPOINT must be a syntactically sane http(s) URL. Plain http is
+/// allowed (the standard local `docker compose` shape) but draws a loud
+/// warning on non-loopback hosts: S3 credentials would cross the network in
+/// cleartext.
+fn validate_minio_endpoint(endpoint: &str) -> anyhow::Result<()> {
+    let rest = if let Some(rest) = endpoint.strip_prefix("https://") {
+        rest
+    } else if let Some(rest) = endpoint.strip_prefix("http://") {
+        let host = rest
+            .split(['/', ':'])
+            .next()
+            .unwrap_or_default()
+            .trim_start_matches('[')
+            .trim_end_matches(']');
+        let loopback = host == "localhost"
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback());
+        if !loopback {
+            tracing::warn!(
+                "MINIO_ENDPOINT uses plain http on a non-loopback host — S3 credentials and \
+                 presigned uploads cross the network in cleartext; put MinIO behind TLS"
+            );
+        }
+        rest
+    } else {
+        anyhow::bail!("MINIO_ENDPOINT must start with http:// or https://");
+    };
+    if rest.is_empty() || rest.starts_with('/') {
+        anyhow::bail!("MINIO_ENDPOINT is missing a host");
+    }
+    Ok(())
 }
 
 fn optional(key: &str, default: &str) -> String {
@@ -420,7 +529,24 @@ fn parse_prepull_list(raw: &str) -> anyhow::Result<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_prepull_list;
+    use super::{parse_prepull_list, validate_minio_endpoint};
+
+    #[test]
+    fn minio_endpoint_accepts_http_and_https_urls() {
+        assert!(validate_minio_endpoint("http://localhost:9000").is_ok());
+        assert!(validate_minio_endpoint("http://127.0.0.1:9000").is_ok());
+        assert!(validate_minio_endpoint("https://minio.example.com").is_ok());
+        // Non-loopback http is allowed (warn-only at startup).
+        assert!(validate_minio_endpoint("http://10.0.0.5:9000").is_ok());
+    }
+
+    #[test]
+    fn minio_endpoint_rejects_malformed_urls() {
+        assert!(validate_minio_endpoint("localhost:9000").is_err());
+        assert!(validate_minio_endpoint("ftp://minio.example.com").is_err());
+        assert!(validate_minio_endpoint("http://").is_err());
+        assert!(validate_minio_endpoint("https:///bucket").is_err());
+    }
 
     #[test]
     fn prepull_list_trims_dedupes_and_drops_empties() {

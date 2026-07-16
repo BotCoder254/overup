@@ -66,7 +66,13 @@ pub async fn list(
     jar: CookieJar,
 ) -> AppResult<Json<serde_json::Value>> {
     let current_hash = current_token_hash(&state, &jar)?;
-    let rows = db::sessions::list_for_user(&state.pool, user.id, &current_hash).await?;
+    let rows = db::sessions::list_for_user(
+        &state.pool,
+        user.id,
+        &current_hash,
+        state.config.session_idle_timeout_hours,
+    )
+    .await?;
     let sessions: Vec<SessionResponse> = rows
         .into_iter()
         .map(|row| SessionResponse {

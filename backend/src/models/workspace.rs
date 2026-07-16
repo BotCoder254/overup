@@ -13,6 +13,9 @@ pub struct Workspace {
     pub description: Option<String>,
     pub created_by: Uuid,
     pub logo_key: Option<String>,
+    /// Which store holds the logo ('minio' | 'r2'); NULL legacy rows read
+    /// as 'r2'. Internal routing marker, never serialized outward.
+    pub logo_storage_backend: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

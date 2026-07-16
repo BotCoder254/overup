@@ -12,7 +12,7 @@ use crate::db::workspaces::ProvisionOutcome;
 use crate::error::{AppError, AppResult};
 use crate::middleware::auth::CurrentUser;
 use crate::models::workspace::{WorkspaceMemberResponse, WorkspaceResponse};
-use crate::services::r2::R2;
+use crate::services::object_store;
 use crate::services::workspace as workspace_service;
 use crate::services::{authz, image_sniff};
 use crate::state::AppState;
@@ -209,8 +209,8 @@ pub async fn upload_logo(
     body: Bytes,
 ) -> AppResult<Json<serde_json::Value>> {
     authz::require_permission(&state.pool, user.id, workspace_id, authz::WORKSPACE_MANAGE).await?;
-    let r2 = state
-        .r2
+    let storage = state
+        .storage
         .as_ref()
         .ok_or(AppError::Conflict(STORAGE_NOT_CONFIGURED))?;
 
@@ -227,17 +227,23 @@ pub async fn upload_logo(
     };
 
     // Server-generated key — the object lands before the row points at it,
-    // so a crash in between leaves only an unreferenced object.
-    let key = R2::logo_key(workspace_id, ext);
-    r2.put_object(&key, body.to_vec(), content_type).await?;
+    // so a crash in between leaves only an unreferenced object. The write
+    // falls back to the secondary store; the accepting backend is recorded.
+    let key = object_store::logo_key(workspace_id, ext);
+    let backend = storage.put_object(&key, body.to_vec(), content_type).await?;
 
-    let previous = db::workspaces::set_logo_key(&state.pool, workspace_id, Some(&key))
-        .await?
-        .ok_or(AppError::NotFound)?;
+    let previous = db::workspaces::set_logo_key(
+        &state.pool,
+        workspace_id,
+        Some(&key),
+        Some(backend.as_str()),
+    )
+    .await?
+    .ok_or(AppError::NotFound)?;
 
     // Best-effort removal of the replaced object; the row already moved on.
-    if let Some(old_key) = previous.filter(|old| old != &key)
-        && let Err(error) = r2.delete_object(&old_key).await
+    if let Some((old_key, old_backend)) = previous.filter(|(old, _)| old != &key)
+        && let Err(error) = storage.store_for(&old_backend).delete_object(&old_key).await
     {
         tracing::warn!(key = %old_key, error = ?error, "failed to delete replaced workspace logo");
     }
@@ -257,7 +263,10 @@ pub async fn upload_logo(
     .execute(&state.pool)
     .await?;
 
-    let url = r2.presign_get_inline(&key).await?;
+    let url = storage
+        .store_for(backend.as_str())
+        .presign_get_inline(&key)
+        .await?;
     Ok(Json(json!({ "logoUrl": url })))
 }
 
@@ -270,13 +279,13 @@ pub async fn remove_logo(
 ) -> AppResult<Response> {
     authz::require_permission(&state.pool, user.id, workspace_id, authz::WORKSPACE_MANAGE).await?;
 
-    let previous = db::workspaces::set_logo_key(&state.pool, workspace_id, None)
+    let previous = db::workspaces::set_logo_key(&state.pool, workspace_id, None, None)
         .await?
         .ok_or(AppError::NotFound)?;
 
-    if let Some(old_key) = previous {
-        if let Some(r2) = state.r2.as_ref()
-            && let Err(error) = r2.delete_object(&old_key).await
+    if let Some((old_key, old_backend)) = previous {
+        if let Some(storage) = state.storage.as_ref()
+            && let Err(error) = storage.store_for(&old_backend).delete_object(&old_key).await
         {
             tracing::warn!(key = %old_key, error = ?error, "failed to delete removed workspace logo");
         }
@@ -312,8 +321,13 @@ pub async fn logo_url(
         .await?
         .ok_or(AppError::NotFound)?;
 
-    let url = match (workspace.logo_key.as_deref(), state.r2.as_ref()) {
-        (Some(key), Some(r2)) => Some(r2.presign_get_inline(key).await?),
+    let url = match (workspace.logo_key.as_deref(), state.storage.as_ref()) {
+        (Some(key), Some(storage)) => Some(
+            storage
+                .store_for(workspace.logo_storage_backend.as_deref().unwrap_or("r2"))
+                .presign_get_inline(key)
+                .await?,
+        ),
         _ => None,
     };
     Ok(Json(json!({ "url": url })))

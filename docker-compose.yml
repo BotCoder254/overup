@@ -17,5 +17,34 @@ services:
       timeout: 5s
       retries: 10
 
+  # MinIO — the default/primary object store (artifacts + log archives +
+  # logos). Point the backend at it with:
+  #   MINIO_ENDPOINT=http://localhost:9000
+  #   MINIO_ACCESS_KEY_ID=overup
+  #   MINIO_SECRET_ACCESS_KEY=overup-minio
+  #   MINIO_BUCKET=overup
+  # The backend creates the bucket at startup if it is missing. Console UI
+  # at http://localhost:9001 (same credentials). Dev credentials only —
+  # never reuse them in a real deployment.
+  minio:
+    image: minio/minio:latest
+    container_name: overup-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: overup
+      MINIO_ROOT_PASSWORD: overup-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - overup_minio:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
 volumes:
   overup_pgdata:
+  overup_minio:

@@ -608,12 +608,19 @@ pub async fn add_log_bytes(pool: &PgPool, job_id: Uuid, delta: i64) -> sqlx::Res
     Ok(total)
 }
 
-/// Guarded archive marker: set once, never overwritten.
-pub async fn mark_logs_archived(pool: &PgPool, job_id: Uuid) -> sqlx::Result<bool> {
+/// Guarded archive marker: set once, never overwritten. Records which
+/// object store took the archive so downloads route to the right host.
+pub async fn mark_logs_archived(
+    pool: &PgPool,
+    job_id: Uuid,
+    storage_backend: &str,
+) -> sqlx::Result<bool> {
     let result = sqlx::query(
-        "UPDATE pipeline_jobs SET logs_archived_at = now() WHERE id = $1 AND logs_archived_at IS NULL",
+        "UPDATE pipeline_jobs SET logs_archived_at = now(), logs_archive_backend = $2 \
+         WHERE id = $1 AND logs_archived_at IS NULL",
     )
     .bind(job_id)
+    .bind(storage_backend)
     .execute(pool)
     .await?;
     Ok(result.rows_affected() == 1)

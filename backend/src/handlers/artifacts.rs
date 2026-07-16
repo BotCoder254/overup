@@ -326,13 +326,16 @@ pub async fn remove(
         .ok_or(AppError::NotFound)?;
 
     if matches!(artifact.status.as_str(), "uploaded" | "pending")
-        && let Some(r2) = &state.r2
-        && let Err(error) = r2.delete_object(&artifact.r2_key).await
+        && let Some(storage) = &state.storage
+        && let Err(error) = storage
+            .store_for(&artifact.storage_backend)
+            .delete_object(&artifact.r2_key)
+            .await
     {
         tracing::warn!(
             %artifact_id,
             error = ?error,
-            "failed to delete artifact object from R2 during operator delete"
+            "failed to delete artifact object from storage during operator delete"
         );
     }
 

@@ -17,6 +17,7 @@ pub async fn insert_pending(
     job_id: Uuid,
     name: &str,
     r2_key: &str,
+    storage_backend: &str,
     size_bytes: i64,
     content_type: &str,
     kind: &str,
@@ -25,12 +26,13 @@ pub async fn insert_pending(
     sqlx::query_as::<_, Artifact>(
         r#"
         INSERT INTO artifacts
-            (workspace_id, pipeline_id, job_id, name, r2_key, size_bytes, content_type, kind, expires_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            (workspace_id, pipeline_id, job_id, name, r2_key, storage_backend, size_bytes, content_type, kind, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         ON CONFLICT ON CONSTRAINT artifacts_job_name_key
         DO UPDATE SET size_bytes = EXCLUDED.size_bytes,
                       content_type = EXCLUDED.content_type,
                       kind = EXCLUDED.kind,
+                      storage_backend = EXCLUDED.storage_backend,
                       status = 'pending',
                       checksum_sha256 = NULL,
                       uncompressed_bytes = NULL,
@@ -45,11 +47,28 @@ pub async fn insert_pending(
     .bind(job_id)
     .bind(name)
     .bind(r2_key)
+    .bind(storage_backend)
     .bind(size_bytes)
     .bind(content_type)
     .bind(kind)
     .bind(expires_at)
     .fetch_one(pool)
+    .await
+}
+
+/// The pending row for one (job, name) pair — the verification path needs
+/// its key and storage-backend marker before HeadObject.
+pub async fn find_pending(
+    pool: &PgPool,
+    job_id: Uuid,
+    name: &str,
+) -> sqlx::Result<Option<Artifact>> {
+    sqlx::query_as::<_, Artifact>(
+        "SELECT * FROM artifacts WHERE job_id = $1 AND name = $2 AND status = 'pending'",
+    )
+    .bind(job_id)
+    .bind(name)
+    .fetch_optional(pool)
     .await
 }
 
@@ -209,6 +228,7 @@ const CATALOG_PROVENANCE: &str = r#"
 /// stay cheap and the manifest remains a detail-only payload.
 const CATALOG_LIST_COLUMNS: &str = r#"
     SELECT a.id, a.workspace_id, a.pipeline_id, a.job_id, a.name, a.r2_key,
+           a.storage_backend,
            a.size_bytes, a.content_type, a.checksum_sha256, a.status, a.kind,
            a.uncompressed_bytes, a.file_count, NULL::jsonb AS entries,
            a.created_at, a.expires_at,
