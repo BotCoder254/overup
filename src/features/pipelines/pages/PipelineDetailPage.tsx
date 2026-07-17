@@ -223,7 +223,7 @@ export function PipelineDetailPage() {
               <div className="flex flex-col overflow-hidden rounded border border-steel/20 bg-canvas">
                 {inspectorTabs}
                 {tab === 'logs' ? (
-                  <div className="h-[60vh] min-h-[320px]">{logView}</div>
+                  <div className="h-[68vh] min-h-[420px]">{logView}</div>
                 ) : (
                   <div className="p-3">{panelView}</div>
                 )}
@@ -233,7 +233,7 @@ export function PipelineDetailPage() {
         }
 
         return (
-          <div className="h-[72vh] min-h-[520px] overflow-hidden rounded border border-steel/20 bg-canvas">
+          <div className="h-[80vh] min-h-[620px] overflow-hidden rounded border border-steel/20 bg-canvas">
             <Group orientation="horizontal" className="h-full">
               <Panel defaultSize="44%" minSize="30%" className="flex flex-col">
                 <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">{overview}</div>

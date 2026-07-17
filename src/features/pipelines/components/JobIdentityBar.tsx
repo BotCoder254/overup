@@ -24,10 +24,12 @@ interface JobIdentityBarProps {
 
 function Item({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <span className="inline-flex items-baseline gap-1.5 whitespace-nowrap">
-      <span className="text-[10px] uppercase tracking-wide text-steel">{label}</span>
-      <span className="text-charcoal">{children}</span>
-    </span>
+    <div className="flex items-baseline gap-2">
+      <span className="w-16 shrink-0 text-[10px] uppercase tracking-wide text-steel">
+        {label}
+      </span>
+      <span className="min-w-0 truncate text-charcoal">{children}</span>
+    </div>
   );
 }
 
@@ -50,7 +52,7 @@ export function JobIdentityBar({ slug, pipeline, job, runner }: JobIdentityBarPr
 
   return (
     <div className="sticky top-0 z-10 -mx-1 mb-4 border-b border-steel/20 bg-canvas px-1 pb-2">
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-xs">
+      <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 font-mono text-xs sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
         <Item label="repo">
           <Link
             to={workspacePath(slug, `repositories/${pipeline.repositoryId}`)}
