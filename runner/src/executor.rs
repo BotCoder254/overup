@@ -497,16 +497,38 @@ async fn execute(
 
     // --- sudo shim ----------------------------------------------------------
     // GitHub's hosted runners execute as a non-root user with passwordless
-    // sudo, so workflows are written with `sudo`. Our containers run as root
-    // already AND set no-new-privileges (which makes the kernel ignore the
-    // setuid bit), so the real sudo fails while its privilege is redundant.
-    // Shim it rather than weaken the container: root -> root grants nothing.
-    if isolation.sudo_shim {
-        if isolation.readonly_rootfs {
-            log.system("read-only rootfs: skipping the sudo shim; `sudo` steps will not work")
+    // sudo, so workflows are written with `sudo`. Our containers already run
+    // as root, but cap-drop strips CAP_SETUID from that root and
+    // no-new-privileges makes the kernel ignore the setuid bit — so the real
+    // sudo cannot run, while the privilege it asks for is already held. Shim
+    // it rather than weaken the container: root -> root grants nothing.
+    //
+    // Every branch logs. A silent skip here is indistinguishable from a
+    // runner too old to have this code at all, which is precisely the
+    // confusion docs/fix-empty-workspace-stale-runner.md exists to end.
+    if !isolation.sudo_shim {
+        log.system("sudo shim disabled by configuration (RUNNER_SUDO_SHIM=false)")
+            .await;
+    } else if isolation.readonly_rootfs {
+        log.system("sudo shim skipped: read-only rootfs; `sudo` steps will fail")
+            .await;
+    } else {
+        match container_uid(&docker, &container).await {
+            Some(0) => install_sudo_shim(&docker, &container, log).await,
+            Some(uid) => {
+                log.system(&format!(
+                    "sudo shim skipped: container runs as uid {uid}, not root; \
+                     `sudo` steps will fail"
+                ))
                 .await;
-        } else if container_uid(&docker, &container).await == Some(0) {
-            install_sudo_shim(&docker, &container, log).await;
+            }
+            None => {
+                log.system(
+                    "sudo shim skipped: could not determine the container uid; \
+                     `sudo` steps may fail",
+                )
+                .await;
+            }
         }
     }
 

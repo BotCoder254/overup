@@ -86,7 +86,7 @@ pub async fn run_connection(
         &mut sink,
         &RunnerMsg::Hello {
             name: config.name.clone(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            version: crate::runner_version(),
             labels: config.labels.clone(),
             docker_available: docker.is_some(),
         },

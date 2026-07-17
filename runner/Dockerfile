@@ -39,6 +39,18 @@ RUN mkdir -p protocol/src runner/src \
 # 2. Real sources.
 COPY protocol/src protocol/src
 COPY runner/src runner/src
+COPY runner/build.rs runner/build.rs
+
+# Source revision stamped into the binary (reported in hello, logged at
+# startup, shown in the Runners UI as 0.1.0+<ref>). Passed IN because
+# .dockerignore excludes .git — build.rs cannot shell out to git here:
+#
+#   docker build --build-arg BUILD_REF=$(git rev-parse --short HEAD) …
+#
+# Declared after the dependency-cache layer on purpose: a new ref must not
+# invalidate the expensive dep compile above, only the local-crate build below.
+ARG BUILD_REF=unknown
+ENV OVERUP_BUILD_REF=$BUILD_REF
 
 # Force cargo to recompile the local crates (deps stay cached).
 RUN touch protocol/src/lib.rs runner/src/main.rs \

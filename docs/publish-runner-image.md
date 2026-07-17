@@ -34,7 +34,7 @@ directory`.
 
 ```bash
 cd <repo-root>        # `ls` must show runner/, protocol/, backend/
-docker build -f runner/Dockerfile -t ghcr.io/<your-gh-username>/overup-runner:latest .
+docker build --build-arg BUILD_REF=$(git rev-parse --short HEAD) -f runner/Dockerfile -t ghcr.io/<your-gh-username>/overup-runner:latest .
 ```
 
 The first build compiles the Rust dependencies and takes several minutes; the
@@ -47,7 +47,7 @@ spaces:
 
 ```bash
 cd "/mnt/c/Users/<you>/Desktop/overup"
-docker build -f runner/Dockerfile -t ghcr.io/<your-gh-username>/overup-runner:latest .
+docker build --build-arg BUILD_REF=$(git rev-parse --short HEAD) -f runner/Dockerfile -t ghcr.io/<your-gh-username>/overup-runner:latest .
 ```
 
 `/mnt/c` I/O is slow; if the context upload or build crawls, clone natively into
@@ -105,7 +105,7 @@ Hosted runner creation in the wizard now proceeds past the image-pull stage.
 Rebuild and push the same tag whenever `runner/` or `protocol/` change:
 
 ```bash
-docker build -f runner/Dockerfile -t ghcr.io/<your-gh-username>/overup-runner:latest .
+docker build --build-arg BUILD_REF=$(git rev-parse --short HEAD) -f runner/Dockerfile -t ghcr.io/<your-gh-username>/overup-runner:latest .
 docker push ghcr.io/<your-gh-username>/overup-runner:latest
 ```
 
@@ -113,6 +113,21 @@ The backend pre-pulls `:latest` on every provisioner (re)connect and before ever
 hosted-runner provision, so **new** runner containers get the new image
 automatically. **Existing** runner containers keep the image they were created
 from — revoke and re-create a hosted runner to move it onto the new image.
+Restarting the backend does **not** move a runner onto a new image: nothing compares
+image digests, so a container stays on its original image ID for life.
+
+`BUILD_REF` is what makes the update checkable afterwards. It stamps the source ref
+into the binary, surfacing as `0.1.0+<ref>` in the Runners UI version column and in
+the runner's first log line. After re-creating the runner, confirm it matches the ref
+you built — that is the difference between "I pushed an image" and "the new code is
+running":
+
+```bash
+git rev-parse --short HEAD                 # what you built
+docker logs <runner-container> | head -1   # what is running
+```
+
+Omitting the arg yields `+unknown`, which works but is unidentifiable later.
 
 ## 6. No-registry alternative: build on the VPS
 
@@ -121,7 +136,7 @@ the same tag:
 
 ```bash
 # on the VPS, in a checkout of the repo
-docker build -f runner/Dockerfile -t ghcr.io/<your-gh-username>/overup-runner:latest .
+docker build --build-arg BUILD_REF=$(git rev-parse --short HEAD) -f runner/Dockerfile -t ghcr.io/<your-gh-username>/overup-runner:latest .
 ```
 
 The provisioner still tries the registry first (to keep `:latest` fresh) and that
@@ -136,6 +151,8 @@ The trade-off: you rebuild manually on the VPS for every update.
 | Symptom | Fix |
 | --- | --- |
 | `resolve : lstat runner: no such file or directory` at build | You ran `docker build` outside the repo root — `cd` to the checkout (the `.` context must contain `runner/` **and** `protocol/`). |
+| A runner fix "didn't work" — job log identical to before | The runner is stale. Compare its `0.1.0+<ref>` to `git rev-parse --short HEAD`; if they differ, rebuild (§5) **and revoke + re-create** the runner. See [fix-empty-workspace-stale-runner.md](./fix-empty-workspace-stale-runner.md). |
+| `sudo: … setresuid … Operation not permitted` in a job | Stale runner predating the sudo shim (§5). A current runner logs `sudo shim installed` right after `container started`. |
 | `error from registry: denied` on pull / pre-pull | The package was never pushed, or is still **private** — complete §3 including the visibility flip, then re-test with an anonymous `docker pull`. |
 | `denied` / `unauthorized` on **push** | The PAT lacks `write:packages`, is expired, or you're pushing to someone else's namespace — the path segment after `ghcr.io/` must be your username (or an org you can publish in). |
 | Build extremely slow under WSL | You're building from `/mnt/c` — clone natively into the WSL filesystem (§2). |

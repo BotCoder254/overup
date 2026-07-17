@@ -108,6 +108,16 @@ pub struct ActiveJob {
 
 pub type CurrentJob = Arc<Mutex<Option<ActiveJob>>>;
 
+/// This binary's identity: `0.1.0+<git sha>`, stamped by `build.rs`.
+///
+/// Reported in `hello` (stored on the runner row, shown in the Runners UI)
+/// and logged at startup. `CARGO_PKG_VERSION` alone is the same string in
+/// every build ever made, so it cannot distinguish a stale runner image from
+/// a current one — the build ref is what makes that answerable.
+pub fn runner_version() -> String {
+    format!("{}+{}", env!("CARGO_PKG_VERSION"), env!("RUNNER_BUILD_REF"))
+}
+
 fn required(key: &str) -> anyhow::Result<String> {
     std::env::var(key).with_context(|| format!("missing required environment variable {key}"))
 }
@@ -135,6 +145,12 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
+
+    // First line in the log, before anything can fail: which build is this?
+    // A deployment that forgot to rebuild is the most common cause of "the
+    // fix didn't work" (docs/fix-empty-workspace-stale-runner.md), and this
+    // answers it without inferring from log ordering.
+    tracing::info!(version = %runner_version(), "overup runner starting");
 
     // Optional since the control plane delivers the key in hello_ack; a
     // locally set key is validated here and takes precedence.
@@ -291,5 +307,20 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(delay = ?backoff, "reconnecting");
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(Duration::from_secs(60));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runner_version_carries_a_build_ref() {
+        let version = runner_version();
+        // `0.1.0` alone is identical in every build ever made; the ref after
+        // `+` is the only part that can identify a stale deployed runner.
+        let (pkg, build_ref) = version.split_once('+').expect("version must carry a build ref");
+        assert_eq!(pkg, env!("CARGO_PKG_VERSION"));
+        assert!(!build_ref.is_empty());
     }
 }
