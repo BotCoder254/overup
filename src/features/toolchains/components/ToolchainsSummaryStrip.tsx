@@ -37,12 +37,12 @@ export function ToolchainsSummaryStrip({ data, loading, error }: ToolchainsSumma
     );
   }
 
-  const prewarmed = data?.toolchains.filter((t) => t.prewarmed).length ?? 0;
+  const installed = data?.toolchains.filter((t) => t.installStatus === 'installed').length ?? 0;
   const cells: CellProps[] =
     loading || !data
       ? [
           { label: 'Toolchains', value: '—' },
-          { label: 'Prewarmed', value: '—' },
+          { label: 'Installed', value: '—' },
           { label: 'Default image', value: '—' },
           { label: 'Allow-list', value: '—' },
         ]
@@ -53,9 +53,9 @@ export function ToolchainsSummaryStrip({ data, loading, error }: ToolchainsSumma
             hint: 'Pre-built language images',
           },
           {
-            label: 'Prewarmed',
-            value: String(prewarmed),
-            hint: 'Warmed via RUNNER_PREPULL_IMAGES',
+            label: 'Installed',
+            value: String(installed),
+            hint: data.installSupported ? 'Pulled + warmed on runners' : 'Hosted runners required',
           },
           {
             label: 'Default image',

@@ -16,6 +16,7 @@ pub mod runners;
 pub mod search;
 pub mod secrets;
 pub mod sessions;
+pub mod toolchain_images;
 pub mod users;
 pub mod webhook_deliveries;
 pub mod workflows;

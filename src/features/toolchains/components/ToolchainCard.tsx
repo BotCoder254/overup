@@ -1,35 +1,13 @@
-import {
-  Boxes,
-  Check,
-  Copy,
-  Cog,
-  Coffee,
-  FileCode2,
-  GitBranch,
-  HardDrive,
-  Package,
-  Rocket,
-  Terminal,
-  type LucideIcon,
-} from 'lucide-react';
+import { Check, Copy, Download, RefreshCw, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { toast } from 'sonner';
+import { ToolchainLogo } from '../../../components/brand/toolchains/ToolchainLogo';
 import { Badge } from '../../../components/ui/Badge';
+import { Button } from '../../../components/ui/Button';
 import { Card, CardBody, CardHeader } from '../../../components/ui/Card';
+import { Dialog } from '../../../components/ui/Dialog';
 import type { Toolchain } from '../../../types/toolchain';
-
-/** A lucide glyph per toolchain key; a generic box for anything unmapped. */
-const ICONS: Record<string, LucideIcon> = {
-  act: Boxes,
-  rust: Cog,
-  js: FileCode2,
-  go: Rocket,
-  dotnet: Package,
-  java: Coffee,
-  pwsh: Terminal,
-  gh: GitBranch,
-  full: HardDrive,
-};
+import { useInstallToolchain, useUninstallToolchain } from '../hooks/useToolchains';
 
 /** Copy `text`, flashing a check on the button and a toast. */
 function useCopy() {
@@ -49,29 +27,48 @@ function useCopy() {
 
 interface ToolchainCardProps {
   toolchain: Toolchain;
+  /** Whether install/uninstall is possible (hosted provisioner reachable). */
+  installSupported: boolean;
 }
 
-export function ToolchainCard({ toolchain }: ToolchainCardProps) {
-  const Icon = ICONS[toolchain.key] ?? Boxes;
+/** The status badge in the header — install state wins over the prewarm hint. */
+function StatusBadge({ toolchain }: { toolchain: Toolchain }) {
+  switch (toolchain.installStatus) {
+    case 'installed':
+      return <Badge variant="success">Installed</Badge>;
+    case 'pending':
+      return <Badge variant="info">Installing…</Badge>;
+    case 'failed':
+      return <Badge variant="danger">Failed</Badge>;
+    default:
+      return toolchain.prewarmed ? <Badge variant="success">Prewarmed</Badge> : null;
+  }
+}
+
+export function ToolchainCard({ toolchain, installSupported }: ToolchainCardProps) {
   const snippet = `container: ${toolchain.key}`;
   const image = useCopy();
   const usage = useCopy();
+  const install = useInstallToolchain();
+  const uninstall = useUninstallToolchain();
+  const [confirmUninstall, setConfirmUninstall] = useState(false);
+
+  const status = toolchain.installStatus;
 
   return (
     <Card>
       <CardHeader>
         <div className="flex items-start justify-between gap-2">
           <div className="flex items-center gap-2.5">
-            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded bg-primary/10 text-primary">
-              <Icon size={18} aria-hidden="true" />
-            </span>
+            {/* Official brand logo, transparent background (no box). */}
+            <ToolchainLogo toolchainKey={toolchain.key} className="h-8 w-8 shrink-0" />
             <div className="min-w-0">
               <h2 className="truncate text-sm font-semibold text-charcoal">{toolchain.label}</h2>
               <p className="truncate text-xs text-steel">{toolchain.language}</p>
             </div>
           </div>
           <div className="flex shrink-0 flex-wrap justify-end gap-1">
-            {toolchain.prewarmed && <Badge variant="success">Prewarmed</Badge>}
+            <StatusBadge toolchain={toolchain} />
             {toolchain.large && <Badge variant="danger">Large</Badge>}
           </div>
         </div>
@@ -142,7 +139,81 @@ export function ToolchainCard({ toolchain }: ToolchainCardProps) {
             </button>
           </div>
         </div>
+
+        {/* Install / Uninstall action row. */}
+        <div className="mt-4 border-t border-steel/10 pt-3">
+          {!installSupported ? (
+            <div>
+              <Button size="sm" variant="secondary" disabled title="Requires hosted runners">
+                <Download size={14} aria-hidden="true" />
+                Install
+              </Button>
+              <p className="mt-1.5 text-xs text-steel">
+                Requires hosted runners (RUNNER_PROVISIONER=docker).
+              </p>
+            </div>
+          ) : status === 'pending' ? (
+            <Button size="sm" variant="secondary" isLoading disabled>
+              Installing…
+            </Button>
+          ) : status === 'installed' ? (
+            <Button
+              size="sm"
+              variant="secondary"
+              isLoading={uninstall.isPending}
+              onClick={() => setConfirmUninstall(true)}
+            >
+              <Trash2 size={14} aria-hidden="true" />
+              Uninstall
+            </Button>
+          ) : status === 'failed' ? (
+            <div>
+              <Button
+                size="sm"
+                variant="secondary"
+                isLoading={install.isPending}
+                onClick={() => install.mutate(toolchain.key)}
+              >
+                <RefreshCw size={14} aria-hidden="true" />
+                Retry install
+              </Button>
+              <p className="mt-1.5 text-xs text-danger">Install failed — try again.</p>
+            </div>
+          ) : (
+            <Button
+              size="sm"
+              isLoading={install.isPending}
+              onClick={() => install.mutate(toolchain.key)}
+            >
+              <Download size={14} aria-hidden="true" />
+              Install
+            </Button>
+          )}
+        </div>
       </CardBody>
+
+      <Dialog
+        open={confirmUninstall}
+        onClose={() => setConfirmUninstall(false)}
+        title={`Uninstall ${toolchain.label}?`}
+        description={`This removes ${toolchain.imageLatest} from the runner daemon and stops warming it. Jobs can still pull it on demand, and you can reinstall anytime.`}
+        footer={
+          <>
+            <Button variant="ghost" size="sm" onClick={() => setConfirmUninstall(false)}>
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              isLoading={uninstall.isPending}
+              onClick={() =>
+                uninstall.mutate(toolchain.key, { onSuccess: () => setConfirmUninstall(false) })
+              }
+            >
+              Uninstall
+            </Button>
+          </>
+        }
+      />
     </Card>
   );
 }
