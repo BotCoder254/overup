@@ -25,6 +25,7 @@ pub mod scheduler;
 pub mod search_indexer;
 pub mod secrets_crypto;
 pub mod session;
+pub mod toolchain_images;
 pub mod trigger_eval;
 pub mod webhook_processor;
 pub mod webhook_stats;

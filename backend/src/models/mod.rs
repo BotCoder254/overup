@@ -8,6 +8,7 @@ pub mod repository;
 pub mod runner;
 pub mod search;
 pub mod secret;
+pub mod toolchain;
 pub mod user;
 pub mod workflow;
 pub mod workspace;

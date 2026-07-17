@@ -46,6 +46,13 @@ pub struct Config {
     /// Container image used when a job declares no container and no known
     /// runs-on label.
     pub default_job_image: String,
+    /// Optional allow-list of images a job's `container:` may run. Empty =
+    /// allow any syntactically valid reference (default). When non-empty, a
+    /// `container:` image outside this list (and outside the toolchain
+    /// catalog) is rejected at plan time and the job falls back to the
+    /// default image with a notice. Entries support a trailing `*` prefix
+    /// glob (e.g. `catthehacker/*`, `node:*`).
+    pub image_allowlist: Vec<String>,
     pub job_timeout_seconds: i32,
     pub pipeline_timeout_seconds: i32,
     pub max_log_bytes_per_job: i64,
@@ -277,6 +284,12 @@ impl Config {
         // no toolchains, so real workflows die on `npm: not found`.
         let default_job_image = optional("DEFAULT_JOB_IMAGE", "catthehacker/ubuntu:act-latest");
 
+        // Optional hardening: restrict which images a job `container:` may run.
+        // Unset = allow any valid reference (the historical behavior). Parsed
+        // with the same caps as the prepull list so a malformed deployment
+        // fails loudly at startup.
+        let image_allowlist = parse_image_list("RUNNER_IMAGE_ALLOWLIST")?;
+
         // Hosted-runner provisioning is opt-in: the server needs Docker
         // access and a URL that provisioned containers can reach it on.
         let runner_provisioner = match optional("RUNNER_PROVISIONER", "").as_str() {
@@ -431,6 +444,7 @@ impl Config {
                 .context("GITHUB_CHECKS_ENABLED must be true or false")?,
             runner_job_signing_key,
             default_job_image,
+            image_allowlist,
             job_timeout_seconds: optional("JOB_TIMEOUT_SECONDS", "3600")
                 .parse()
                 .context("JOB_TIMEOUT_SECONDS must be an integer")?,
@@ -554,6 +568,30 @@ fn validate_minio_endpoint(endpoint: &str) -> anyhow::Result<()> {
 
 fn optional(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+/// Parse a comma-separated image-reference env var (unset/empty = empty list),
+/// applying the same caps as the prepull list. Entries may end in `*` for a
+/// prefix glob, so the length cap is generous enough for a registry path.
+fn parse_image_list(key: &str) -> anyhow::Result<Vec<String>> {
+    let raw = optional(key, "");
+    let mut images: Vec<String> = Vec::new();
+    for entry in raw.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        if entry.len() > 256 {
+            anyhow::bail!("{key} entries must be at most 256 characters (got one of {} characters)", entry.len());
+        }
+        if !images.iter().any(|existing| existing == entry) {
+            images.push(entry.to_string());
+        }
+    }
+    if images.len() > 50 {
+        anyhow::bail!("{key} supports at most 50 entries (got {})", images.len());
+    }
+    Ok(images)
 }
 
 /// Parse the comma-separated RUNNER_PREPULL_IMAGES value: trim entries, drop

@@ -18,8 +18,8 @@ use crate::error::AppError;
 use crate::handlers::{
     activity, artifacts, auth, browser_ws, dashboard, dashboard_ws, environments,
     github_installations, github_webhooks, health, jobs, me, notification_ws, notifications,
-    pipelines, repositories, runner_ws, runners, search, secrets, sessions, workflows,
-    workspaces, ws_tickets,
+    pipelines, repositories, runner_ws, runners, search, secrets, sessions, toolchains,
+    workflows, workspaces, ws_tickets,
 };
 use crate::middleware::{csrf, security_headers};
 use crate::services::session;
@@ -370,6 +370,10 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
             get(environments::detail)
                 .patch(environments::update)
                 .delete(environments::remove),
+        )
+        .route(
+            "/workspaces/{workspace_id}/toolchains",
+            get(toolchains::list),
         )
         .route(
             "/workspaces/{workspace_id}/runners",
