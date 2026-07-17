@@ -53,10 +53,9 @@ async fn main() -> anyhow::Result<()> {
     // its reconnect loop owns the Docker connection, so a daemon outage (at
     // boot or later) degrades to a clean 409 on the hosted-runner endpoint
     // and recovers automatically — never a permanently disabled feature.
-    state.runner_provisioner = config
-        .runner_provisioner
-        .clone()
-        .map(services::runner_provisioner::RunnerProvisioner::new);
+    state.runner_provisioner = config.runner_provisioner.clone().map(|cfg| {
+        services::runner_provisioner::RunnerProvisioner::new(cfg, state.pool.clone())
+    });
     if let Some(provisioner) = state.runner_provisioner.clone() {
         tokio::spawn(provisioner.run_reconnect_loop());
     }

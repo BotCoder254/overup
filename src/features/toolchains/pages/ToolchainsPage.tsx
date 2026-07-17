@@ -44,7 +44,11 @@ export function ToolchainsPage() {
           ) : (
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               {toolchains.map((toolchain) => (
-                <ToolchainCard key={toolchain.key} toolchain={toolchain} />
+                <ToolchainCard
+                  key={toolchain.key}
+                  toolchain={toolchain}
+                  installSupported={query.data?.installSupported ?? false}
+                />
               ))}
             </div>
           )}
@@ -82,6 +86,16 @@ export function ToolchainsPage() {
                     Prewarmed images are pulled onto runners ahead of time via{' '}
                     <code className="font-mono text-charcoal">RUNNER_PREPULL_IMAGES</code>; others
                     pull on first use.
+                  </span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <Info size={14} aria-hidden="true" className="mt-0.5 shrink-0 text-primary" />
+                  <span>
+                    <strong className="font-medium text-charcoal">Install</strong> a toolchain to
+                    pull it onto the runner daemon now and keep it warmed — no env editing.{' '}
+                    <strong className="font-medium text-charcoal">Uninstall</strong> removes the
+                    image and stops warming it. Requires hosted runners (
+                    <code className="font-mono text-charcoal">RUNNER_PROVISIONER=docker</code>).
                   </span>
                 </li>
                 {query.data?.allowlistEnabled && (

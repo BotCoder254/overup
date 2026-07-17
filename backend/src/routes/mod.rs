@@ -376,6 +376,14 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
             get(toolchains::list),
         )
         .route(
+            "/workspaces/{workspace_id}/toolchains/{key}/install",
+            post(toolchains::install),
+        )
+        .route(
+            "/workspaces/{workspace_id}/toolchains/{key}",
+            delete(toolchains::uninstall),
+        )
+        .route(
             "/workspaces/{workspace_id}/runners",
             get(runners::list).post(runners::create),
         )

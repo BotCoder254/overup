@@ -11,8 +11,12 @@ export interface Toolchain {
   image2404: string;
   /** Very large image (`full-*`) — prewarming is discouraged. */
   large: boolean;
-  /** The `-latest` image is in RUNNER_PREPULL_IMAGES (warmed on connect). */
+  /** The `-latest` image is warmed on runner connect (env prepull OR install). */
   prewarmed: boolean;
+  /** Install lifecycle on the hosted-runner daemon. */
+  installStatus: 'none' | 'pending' | 'installed' | 'failed';
+  /** Static failure category when installStatus === 'failed'. */
+  installError?: string;
 }
 
 export interface ToolchainsResponse {
@@ -21,4 +25,6 @@ export interface ToolchainsResponse {
   defaultImage: string;
   /** Whether RUNNER_IMAGE_ALLOWLIST restricts which images may run. */
   allowlistEnabled: boolean;
+  /** Whether install/uninstall is possible now (hosted provisioner reachable). */
+  installSupported: boolean;
 }

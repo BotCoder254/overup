@@ -27,13 +27,15 @@ use bollard::models::{
 };
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, InspectNetworkOptions,
-    ListContainersOptionsBuilder, RemoveContainerOptionsBuilder, RemoveVolumeOptions,
-    StartContainerOptions, StopContainerOptionsBuilder,
+    ListContainersOptionsBuilder, RemoveContainerOptionsBuilder, RemoveImageOptions,
+    RemoveVolumeOptions, StartContainerOptions, StopContainerOptionsBuilder,
 };
 use futures_util::StreamExt;
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::config::RunnerProvisionerConfig;
+use crate::db;
 use crate::services::runner_profiles::ResourceLimits;
 
 pub struct RunnerProvisioner {
@@ -48,6 +50,10 @@ pub struct RunnerProvisioner {
     /// concurrent pulls of the same list.
     prepull_running: std::sync::atomic::AtomicBool,
     cfg: RunnerProvisionerConfig,
+    /// DB pool: the warm-up unions the env `prepull_images` with the toolchains
+    /// a user installed from the UI (`installed_toolchain_images`), so those
+    /// re-warm on every reconnect too.
+    pool: PgPool,
 }
 
 /// One `overup.managed=true` container as seen on the Docker host.
@@ -315,12 +321,13 @@ impl RunnerProvisioner {
     /// [`Self::run_reconnect_loop`], so a Docker outage at boot (or any time
     /// after) degrades cleanly to "hosted runners unavailable" instead of
     /// disabling the feature for the process lifetime.
-    pub fn new(cfg: RunnerProvisionerConfig) -> std::sync::Arc<Self> {
+    pub fn new(cfg: RunnerProvisionerConfig, pool: PgPool) -> std::sync::Arc<Self> {
         std::sync::Arc::new(Self {
             docker: tokio::sync::RwLock::new(None),
             network: tokio::sync::RwLock::new(cfg.network.clone()),
             prepull_running: std::sync::atomic::AtomicBool::new(false),
             cfg,
+            pool,
         })
     }
 
@@ -516,6 +523,43 @@ impl RunnerProvisioner {
         }
     }
 
+    /// Pull an arbitrary image on demand (the UI "install toolchain" action).
+    /// Same local-copy fallback as [`Self::ensure_image`]: a registry failure
+    /// is tolerated when the tag is already present locally.
+    pub async fn pull(&self, image: &str) -> Result<(), ProvisionError> {
+        let Some(docker) = self.handle().await else {
+            return Err(ProvisionError::DockerUnavailable);
+        };
+        match pull_image(&docker, image).await {
+            Ok(()) => Ok(()),
+            Err(error) if image_present(&docker, image).await => {
+                tracing::warn!(
+                    %image,
+                    error = ?error,
+                    "toolchain pull: registry failed — using the locally present image"
+                );
+                Ok(())
+            }
+            Err(error) => Err(ProvisionError::ImagePull(error)),
+        }
+    }
+
+    /// Best-effort image removal (the UI "uninstall toolchain" action). Ignores
+    /// "not found" and "image in use" — the intent is to stop warming it and
+    /// reclaim disk when possible, never to fail because a job holds it.
+    pub async fn remove_image(&self, image: &str) -> anyhow::Result<()> {
+        let Some(docker) = self.handle().await else {
+            anyhow::bail!("docker daemon unavailable");
+        };
+        if let Err(error) = docker
+            .remove_image(image, None::<RemoveImageOptions>, None)
+            .await
+        {
+            tracing::warn!(%image, error = ?error, "toolchain image removal failed (ignored)");
+        }
+        Ok(())
+    }
+
     /// Warm the daemon's image cache after a successful (re)connect: the
     /// runner image plus every RUNNER_PREPULL_IMAGES entry, so the runner's
     /// `pulling_image` stage (and the first hosted-runner create) resolves
@@ -532,17 +576,32 @@ impl RunnerProvisioner {
         }
         let this = self;
         tokio::spawn(async move {
-            let mut images: Vec<&str> = vec![this.cfg.image.as_str()];
+            // Runner image + env prepull list + toolchains installed from the
+            // UI (best-effort: a DB hiccup just warms the env set this round).
+            let mut images: Vec<String> = vec![this.cfg.image.clone()];
             for image in &this.cfg.prepull_images {
-                if !images.contains(&image.as_str()) {
-                    images.push(image);
+                if !images.contains(image) {
+                    images.push(image.clone());
                 }
             }
-            for image in images {
+            match db::toolchain_images::list_active_images(&this.pool).await {
+                Ok(installed) => {
+                    for image in installed {
+                        if !images.contains(&image) {
+                            images.push(image);
+                        }
+                    }
+                }
+                Err(error) => tracing::warn!(
+                    error = ?error,
+                    "could not read installed toolchains for prewarm — warming env set only"
+                ),
+            }
+            for image in &images {
                 let started = std::time::Instant::now();
                 match pull_image(&docker, image).await {
                     Ok(()) => tracing::info!(
-                        image = %image,
+                        %image,
                         elapsed_ms = started.elapsed().as_millis() as u64,
                         "pre-pulled image into the docker daemon"
                     ),
@@ -550,12 +609,12 @@ impl RunnerProvisioner {
                     // failed registry check isn't worth a warning on every
                     // reconnect.
                     Err(error) if image_present(&docker, image).await => tracing::info!(
-                        image = %image,
+                        %image,
                         error = ?error,
                         "image already present locally — registry pull failed, skipping"
                     ),
                     Err(error) => tracing::warn!(
-                        image = %image,
+                        %image,
                         error = ?error,
                         "image pre-pull failed — jobs needing it will pull on demand"
                     ),
