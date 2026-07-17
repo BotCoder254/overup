@@ -54,6 +54,36 @@ const WORKSPACE_DIR: &str = "/workspace";
 const ARTIFACTS_SUBDIR: &str = ".overup/artifacts";
 /// Log chunks are split to stay comfortably under the server frame cap.
 const LOG_CHUNK_BYTES: usize = 32 * 1024;
+/// Where the `sudo` shim is installed. Precedes /usr/bin in the default
+/// Debian/Ubuntu PATH, so it shadows the real setuid binary.
+const SUDO_SHIM_DIR: &str = "/usr/local/bin";
+/// The `sudo` shim installed into root job containers.
+///
+/// Job containers already run as uid 0, and no-new-privileges makes the
+/// kernel ignore the setuid bit — so the real `sudo` can never work here,
+/// while the privilege it would grant is already held. Workflows carry
+/// `sudo` because GitHub's hosted runners execute as a non-root user; this
+/// strips the options and runs the command as-is. It escalates nothing.
+const SUDO_SHIM: &str = r#"#!/bin/sh
+# Installed by the overup runner. This container already runs as root and
+# real sudo cannot work under no-new-privileges (the kernel ignores the
+# setuid bit), so strip sudo's options and exec the command directly.
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --) shift; break ;;
+    # Options taking a separate argument. `-h` is deliberately absent: sudo
+    # overloads it as both --help and --host=host, so its arity is ambiguous.
+    -u|-g|-p|-C|-D|-R|-T)
+      if [ $# -ge 2 ]; then shift 2; else shift; fi ;;
+    -*) shift ;;
+    *) break ;;
+  esac
+done
+# Nothing left to run (`sudo -s`, `sudo -u` with no command). Never start a
+# shell here: with stdin open it would block until the job times out.
+[ $# -eq 0 ] && exit 0
+exec env "$@"
+"#;
 
 /// Sequenced log emitter for one job. Carries the current section
 /// attribution (execution phase + plan step index) so every chunk tells the
@@ -464,6 +494,21 @@ async fn execute(
         None,
     )
     .await;
+
+    // --- sudo shim ----------------------------------------------------------
+    // GitHub's hosted runners execute as a non-root user with passwordless
+    // sudo, so workflows are written with `sudo`. Our containers run as root
+    // already AND set no-new-privileges (which makes the kernel ignore the
+    // setuid bit), so the real sudo fails while its privilege is redundant.
+    // Shim it rather than weaken the container: root -> root grants nothing.
+    if isolation.sudo_shim {
+        if isolation.readonly_rootfs {
+            log.system("read-only rootfs: skipping the sudo shim; `sudo` steps will not work")
+                .await;
+        } else if container_uid(&docker, &container).await == Some(0) {
+            install_sudo_shim(&docker, &container, log).await;
+        }
+    }
 
     // --- checkout (upload source into the container) ------------------------
     // Now that /workspace exists inside the container, stream the repackaged
@@ -1031,6 +1076,96 @@ fn repackage_stripped(tar_path: &Path) -> anyhow::Result<RepackagedSource> {
     Ok(RepackagedSource { tar, files })
 }
 
+/// Build the one-entry tar carrying the `sudo` shim, mode 0755.
+///
+/// `exec env "$@"` covers both plain commands (`sudo apt-get install -y x`)
+/// and the env-prefix form (`sudo FOO=bar cmd`) in a single path. Options
+/// that take a separate argument consume two slots; the rest are dropped.
+fn sudo_shim_tar() -> anyhow::Result<Vec<u8>> {
+    let mut header = tar::Header::new_gnu();
+    header.set_size(SUDO_SHIM.len() as u64);
+    header.set_mode(0o755);
+    header.set_mtime(0);
+    header.set_entry_type(tar::EntryType::Regular);
+    header.set_cksum();
+
+    let mut builder = tar::Builder::new(Vec::new());
+    builder
+        .append_data(&mut header, "sudo", SUDO_SHIM.as_bytes())
+        .context("building the sudo shim tar failed")?;
+    builder.into_inner().context("finalizing the sudo shim tar failed")
+}
+
+/// The container's numeric uid, via argv-form `id -u`. Any failure reads as
+/// `None` — callers treat that as "not known to be root" and skip the shim,
+/// so a probe failure can never install it where it does not belong.
+async fn container_uid(docker: &Docker, container: &str) -> Option<u32> {
+    let exec = docker
+        .create_exec(
+            container,
+            ExecConfig {
+                cmd: Some(vec!["id".to_string(), "-u".to_string()]),
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .ok()?;
+    let mut stdout = String::new();
+    if let bollard::exec::StartExecResults::Attached { mut output, .. } =
+        docker.start_exec(&exec.id, None).await.ok()?
+    {
+        while let Some(Ok(chunk)) = output.next().await {
+            if let bollard::container::LogOutput::StdOut { message } = chunk {
+                stdout.push_str(&String::from_utf8_lossy(&message));
+            }
+        }
+    }
+    if docker.inspect_exec(&exec.id).await.ok()?.exit_code != Some(0) {
+        return None;
+    }
+    stdout.trim().parse().ok()
+}
+
+/// Install the `sudo` shim into a root job container over the archive API.
+///
+/// `/usr/local/bin` precedes `/usr/bin` in the default Debian/Ubuntu PATH,
+/// so the shim shadows the real setuid binary without replacing it. Purely
+/// best-effort: a job that does not use sudo must never fail because this
+/// did not install.
+async fn install_sudo_shim(docker: &Docker, container: &str, log: &mut JobLog) {
+    let tar = match sudo_shim_tar() {
+        Ok(tar) => tar,
+        Err(error) => {
+            tracing::warn!(%error, "building the sudo shim failed");
+            return;
+        }
+    };
+    match docker
+        .upload_to_container(
+            container,
+            Some(
+                UploadToContainerOptionsBuilder::default()
+                    .path(SUDO_SHIM_DIR)
+                    .build(),
+            ),
+            bollard::body_full(bytes::Bytes::from(tar)),
+        )
+        .await
+    {
+        Ok(()) => {
+            log.system("sudo shim installed (container runs as root)").await;
+        }
+        Err(error) => {
+            log.system(&format!(
+                "sudo shim installation failed ({error}); `sudo` steps will not work"
+            ))
+            .await;
+        }
+    }
+}
+
 /// Stream a repackaged source tar into the container's /workspace over the
 /// Docker archive API (`PUT /containers/{id}/archive`).
 async fn upload_source(docker: &Docker, container: &str, tar: Vec<u8>) -> anyhow::Result<()> {
@@ -1133,6 +1268,40 @@ mod tests {
             .unwrap();
         builder.into_inner().unwrap().finish().unwrap();
         tmp
+    }
+
+    #[test]
+    fn sudo_shim_tar_carries_one_executable_entry() {
+        let tar = sudo_shim_tar().unwrap();
+        let mut archive = tar::Archive::new(&tar[..]);
+        let entries: Vec<_> = archive
+            .entries()
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                let path = entry.path().unwrap().to_string_lossy().into_owned();
+                (path, entry.header().mode().unwrap())
+            })
+            .collect();
+
+        // Unpacked at /usr/local/bin, this lands on /usr/local/bin/sudo —
+        // ahead of the real /usr/bin/sudo on the default PATH — and must be
+        // executable to shadow it at all.
+        assert_eq!(entries, vec![("sudo".to_string(), 0o755)]);
+    }
+
+    #[test]
+    fn sudo_shim_execs_the_command_without_escalating() {
+        // The shim's whole safety argument: it never invokes the real setuid
+        // sudo and never changes user — it execs what it was handed.
+        assert!(SUDO_SHIM.starts_with("#!/bin/sh\n"));
+        assert!(SUDO_SHIM.contains(r#"exec env "$@""#));
+        assert!(!SUDO_SHIM.contains("/usr/bin/sudo"));
+        // An interactive shell here would block until the job timed out.
+        assert!(!SUDO_SHIM.contains("exec /bin/sh"));
+        // Options taking a separate argument must consume both slots, or the
+        // shim would exec the argument (`sudo -u root apt-get` -> `root …`).
+        assert!(SUDO_SHIM.contains("-u|-g|-p|-C|-D|-R|-T)"));
     }
 
     #[test]

@@ -182,6 +182,7 @@ runner reads:
 | `RUNNER_JOB_NETWORK` | no | `bridge` | `bridge` \| `none` \| `isolated` (throwaway per-job network). |
 | `RUNNER_JOB_USER` | no | *(image user)* | Run job containers as e.g. `1000:1000`. |
 | `RUNNER_JOB_READONLY_ROOTFS` | no | `false` | Read-only rootfs + tmpfs `/tmp` for job containers. |
+| `RUNNER_SUDO_SHIM` | no | `true` | Install a `sudo` shim in root job containers so GitHub-authored `sudo …` steps work (see §8). |
 | `DOCKER_HOST` | no | local socket/pipe | Remote daemon, e.g. `tcp://host:2376` (see §7). |
 | `DOCKER_TLS_VERIFY` | with remote | — | Set `1` for TLS-verified remote daemons. |
 | `DOCKER_CERT_PATH` | with remote | — | Directory with `ca.pem`/`cert.pem`/`key.pem`. |
@@ -396,6 +397,16 @@ own host) or are best avoided until you're comfortable with the mount semantics.
   `RUNNER_JOB_NETWORK=isolated` (per-job throwaway network) and `RUNNER_JOB_USER` +
   `RUNNER_JOB_READONLY_ROOTFS=true` for stricter setups; loosen limits only when a
   workload demands it.
+- **`sudo` in workflows is shimmed, not enabled.** `no-new-privileges` makes the kernel
+  ignore the setuid bit, so the real `sudo` can never run — it fails with
+  `setresuid(…): Operation not permitted`. But job containers already run as root, so
+  the privilege `sudo` asks for is one the step already holds (workflows carry `sudo`
+  only because GitHub's hosted runners execute as a non-root user). The runner therefore
+  installs `/usr/local/bin/sudo`, a shim that strips sudo's options and execs the command
+  as-is. It is installed **only** when the container is uid 0, so it can never grant a
+  privilege that was not already there; a non-root container (`RUNNER_JOB_USER`) is left
+  alone and its `sudo` fails honestly. `RUNNER_SUDO_SHIM=false` disables it. The
+  hardening itself is unchanged — `no-new-privileges` stays on and unconditional.
 - **Secrets:** `RUNNER_TOKEN` (and `RUNNER_JOB_SIGNING_KEY`, if you pin it) live only
   in the env file (root-owned, `chmod 600`) or Dokploy's Environment tab — never in
   git (`.gitignore`/`.dockerignore` exclude `.env*` as a backstop). The token is

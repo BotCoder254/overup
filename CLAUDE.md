@@ -759,6 +759,20 @@ into a traversal-safe tar streamed into the container via the Docker archive API
   throwaway per-job bridge network removed on every exit path), optional non-root
   `RUNNER_JOB_USER` and `RUNNER_JOB_READONLY_ROOTFS` (tmpfs /tmp), SIGKILL on
   cancel/timeout, containers force-removed afterwards
+- **`sudo` is shimmed, never enabled** (`RUNNER_SUDO_SHIM`, default true): the
+  unconditional `no-new-privileges` makes the kernel ignore the setuid bit, so the real
+  setuid `sudo` structurally cannot run (`setresuid: Operation not permitted`) — while
+  the privilege it requests is already held, because job containers run as root.
+  Workflows carry `sudo` only because GitHub's hosted runners are non-root. So the
+  runner uploads `/usr/local/bin/sudo` (ahead of `/usr/bin` on PATH) — a shim that
+  strips sudo's options and `exec env "$@"`s the command, covering both the plain and
+  `VAR=val` forms. It is a COMPATIBILITY shim, not a relaxation: installed ONLY when
+  `id -u` returns 0 (root->root escalates nothing), skipped under a read-only rootfs and
+  for non-root `RUNNER_JOB_USER` containers (whose `sudo` then fails honestly rather
+  than being lied to), and best-effort — an install failure warns into the job log and
+  never fails the job. It never invokes the real binary, never changes user, and never
+  starts a shell when no command remains (that would block until the job timed out).
+  `no-new-privileges` and cap-drop are unchanged and stay hardcoded/default-on
 - Remote Docker daemons are TLS-only in practice: the runner honors `DOCKER_HOST` with
   `DOCKER_TLS_VERIFY=1` + `DOCKER_CERT_PATH` (rustls; bollard `ssl` feature) — never expose
   an unauthenticated tcp://2375 daemon
@@ -956,6 +970,10 @@ RUNNER_LABELS=self-hosted,linux,x64,ubuntu-latest cargo run
 #   RUNNER_JOB_NETWORK=bridge            bridge | none | isolated (per-job network)
 #   RUNNER_JOB_USER=                     e.g. 1000:1000 for non-root execution
 #   RUNNER_JOB_READONLY_ROOTFS=false     read-only rootfs + tmpfs /tmp
+#   RUNNER_SUDO_SHIM=true                install /usr/local/bin/sudo in ROOT job
+#                                        containers so GitHub-authored `sudo …`
+#                                        steps run (root->root grants nothing;
+#                                        no-new-privileges stays unconditional)
 #
 # Remote Docker (server daemon): the runner honors DOCKER_HOST. For a
 # TLS-secured daemon on tcp://host:2376 also set DOCKER_TLS_VERIFY=1 and

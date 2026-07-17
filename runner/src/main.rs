@@ -36,6 +36,9 @@
 //!                               isolated = throwaway per-job bridge network)
 //!   RUNNER_JOB_USER             container user, e.g. 1000:1000 (default: image user)
 //!   RUNNER_JOB_READONLY_ROOTFS  read-only root filesystem + tmpfs /tmp (default false)
+//!   RUNNER_SUDO_SHIM            install a `sudo` shim in root job containers so
+//!                               GitHub-authored `sudo …` steps run (default true;
+//!                               see JobIsolation::sudo_shim)
 //!
 //! Docker connection: honors DOCKER_HOST (unix://, npipe://, tcp://…) plus
 //! DOCKER_TLS_VERIFY=1 and DOCKER_CERT_PATH (ca.pem/cert.pem/key.pem) for
@@ -79,6 +82,12 @@ pub struct JobIsolation {
     pub network: JobNetwork,
     pub user: Option<String>,
     pub readonly_rootfs: bool,
+    /// Install a `sudo` shim into job containers that already run as root.
+    /// no-new-privileges makes the kernel ignore the setuid bit, so the real
+    /// setuid `sudo` can never work here; the shim strips sudo's options and
+    /// execs the command directly. Compatibility only — the job is already
+    /// uid 0, so this grants nothing. Skipped for non-root containers.
+    pub sudo_shim: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -211,6 +220,9 @@ async fn main() -> anyhow::Result<()> {
             network,
             user: std::env::var("RUNNER_JOB_USER").ok().filter(|u| !u.is_empty()),
             readonly_rootfs: optional("RUNNER_JOB_READONLY_ROOTFS", "false") == "true",
+            // On by default so GitHub-authored `sudo …` steps work; opting
+            // OUT requires an explicit RUNNER_SUDO_SHIM=false.
+            sudo_shim: optional("RUNNER_SUDO_SHIM", "true") != "false",
         },
     };
 
