@@ -717,8 +717,18 @@ into a traversal-safe tar streamed into the container via the Docker archive API
   the socket; broadcast lag emits `log_gap` (client resyncs over REST). Runner WS
   (`/runner/ws`): `Authorization: Bearer` token → SHA-256 hash lookup against non-revoked
   runners (tokens are 32 OS-RNG bytes shown once, only hashes stored); auth failures carry
-  a static category (`invalid_token`/`bootstrap_expired`/`missing_token`) the runner logs
-  with remediation guidance; 128 KB frame cap; dedicated governors on both endpoints
+  a static category (`missing_token`/`empty_token`/`invalid_token`/`bootstrap_expired`)
+  that `runner/src/ws.rs::auth_failure_help` maps to per-cause remediation. The scheme is
+  matched case-insensitively (RFC 9110 §11.1) and the credential parsed by the pure,
+  DB-free `bearer_credential` — deliberately NOT `strip_prefix("Bearer ")`: HTTP strips
+  trailing OWS (RFC 9110 §5.5), so a blank token arrives as `Bearer` and used to report
+  `missing_token`, whose message then wrongly asserted the token was "revoked, rotated".
+  Each arm must describe ONLY its own category, and the catch-all must stay neutral so a
+  category added by a newer control plane can't make an older runner print a lie.
+  `empty_token` exists to point at an empty env var instead of hiding inside
+  `invalid_token`; the runner itself now fails at boot on a blank `RUNNER_TOKEN`
+  (`token_from_env`) rather than looping forever on an unrecoverable 401;
+  128 KB frame cap; dedicated governors on both endpoints
 - **Job payload integrity:** every `job_assign` is HMAC-SHA256-signed over the exact
   transmitted JSON (`RUNNER_JOB_SIGNING_KEY`, ≥32 bytes); payloads embed the target
   `runner_id` and a 5-minute validity window; runners verify constant-time BEFORE parsing —
