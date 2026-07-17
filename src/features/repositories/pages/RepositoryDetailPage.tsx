@@ -222,7 +222,9 @@ export function RepositoryDetailPage() {
           </Table>
         ))}
 
-      {tab === 'events' && repoId && <RepositoryEventsList repositoryId={repoId} slug={slug} />}
+      {tab === 'events' && repoId && (
+        <RepositoryEventsList repositoryId={repoId} slug={slug} health={health} />
+      )}
 
       {tab === 'history' && <SyncHistoryList runs={syncRuns} />}
 

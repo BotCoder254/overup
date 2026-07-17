@@ -27,6 +27,7 @@ pub mod secrets_crypto;
 pub mod session;
 pub mod trigger_eval;
 pub mod webhook_processor;
+pub mod webhook_stats;
 pub mod workflow_parse;
 pub mod workspace;
 pub mod workspace_hub;

@@ -27,17 +27,32 @@ pub struct NewPipeline<'a> {
     pub timeout_seconds: i32,
     pub job_timeout_seconds: i32,
     pub request_id: Option<&'a str>,
+    /// Webhook delivery that triggered this pipeline (None for manual
+    /// dispatch/rerun). One pipeline per (delivery, workflow) — a retried
+    /// delivery returns the existing row instead of creating a duplicate.
+    pub webhook_delivery_id: Option<&'a str>,
 }
 
 /// Create the pipeline, its jobs, the creation ledger entry, and the audit
 /// row in one transaction. The per-repository number is claimed race-free
-/// through pipeline_counters.
+/// through pipeline_counters. Returns `(pipeline, jobs, newly_created)`:
+/// when `webhook_delivery_id` is set and a pipeline for that
+/// (delivery, workflow) already exists — a retried delivery — the existing
+/// row comes back with `newly_created = false` and an empty jobs vec.
 pub async fn create(
     pool: &PgPool,
     new: &NewPipeline<'_>,
     jobs: &[PlannedJob],
-) -> sqlx::Result<(Pipeline, Vec<PipelineJob>)> {
+) -> sqlx::Result<(Pipeline, Vec<PipelineJob>, bool)> {
     let mut tx = pool.begin().await?;
+
+    // Idempotency guard BEFORE the counter bump so retries never burn
+    // pipeline numbers.
+    if let Some(delivery_id) = new.webhook_delivery_id
+        && let Some(existing) = find_by_delivery(&mut tx, delivery_id, new.workflow_id).await?
+    {
+        return Ok((existing, Vec::new(), false));
+    }
 
     let (number,): (i32,) = sqlx::query_as(
         r#"
@@ -52,14 +67,15 @@ pub async fn create(
     .fetch_one(&mut *tx)
     .await?;
 
-    let pipeline = sqlx::query_as::<_, Pipeline>(
+    let inserted = sqlx::query_as::<_, Pipeline>(
         r#"
         INSERT INTO pipelines
             (workspace_id, repository_id, workflow_id, workflow_name, workflow_path,
              number, trigger, triggered_by, commit_sha, commit_message, commit_author,
              actor_login, actor_avatar_url, git_ref, trigger_inputs, pr_number,
-             timeout_seconds)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+             timeout_seconds, webhook_delivery_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+                $17, $18)
         RETURNING *
         "#,
     )
@@ -80,8 +96,31 @@ pub async fn create(
     .bind(new.trigger_inputs)
     .bind(new.pr_number)
     .bind(new.timeout_seconds)
+    .bind(new.webhook_delivery_id)
     .fetch_one(&mut *tx)
-    .await?;
+    .await;
+
+    let pipeline = match inserted {
+        Ok(pipeline) => pipeline,
+        // A concurrent processor won the (delivery, workflow) race: the tx
+        // (including the counter bump) rolls back and the winner's row is
+        // returned instead.
+        Err(error) if is_delivery_conflict(&error) => {
+            drop(tx);
+            let delivery_id = new
+                .webhook_delivery_id
+                .expect("delivery conflict requires a delivery id");
+            let existing = sqlx::query_as::<_, Pipeline>(
+                "SELECT * FROM pipelines WHERE webhook_delivery_id = $1 AND workflow_id = $2",
+            )
+            .bind(delivery_id)
+            .bind(new.workflow_id)
+            .fetch_one(pool)
+            .await?;
+            return Ok((existing, Vec::new(), false));
+        }
+        Err(error) => return Err(error),
+    };
 
     let mut job_rows = Vec::with_capacity(jobs.len());
     for job in jobs {
@@ -142,7 +181,32 @@ pub async fn create(
     .await?;
 
     tx.commit().await?;
-    Ok((pipeline, job_rows))
+    Ok((pipeline, job_rows, true))
+}
+
+/// Existing pipeline for a (webhook delivery, workflow) pair, if any.
+async fn find_by_delivery(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    delivery_id: &str,
+    workflow_id: Uuid,
+) -> sqlx::Result<Option<Pipeline>> {
+    sqlx::query_as::<_, Pipeline>(
+        "SELECT * FROM pipelines WHERE webhook_delivery_id = $1 AND workflow_id = $2",
+    )
+    .bind(delivery_id)
+    .bind(workflow_id)
+    .fetch_optional(&mut **tx)
+    .await
+}
+
+/// True when an insert failed on the pipelines_delivery_workflow_uq partial
+/// unique index (concurrent creation for the same delivery + workflow).
+fn is_delivery_conflict(error: &sqlx::Error) -> bool {
+    matches!(
+        error,
+        sqlx::Error::Database(db_err)
+            if db_err.constraint() == Some("pipelines_delivery_workflow_uq")
+    )
 }
 
 pub struct ListFilter {

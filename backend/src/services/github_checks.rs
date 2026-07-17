@@ -119,9 +119,12 @@ async fn report(state: &AppState, pipeline_id: Uuid, phase: Phase) {
         return;
     }
     // Defense-in-depth before URL interpolation: owner/name are our own
-    // synced metadata, but they still must pass the segment allow-list.
+    // synced metadata (and the workspace slug our own generated value), but
+    // all three still must pass the segment allow-list — owner/name land in
+    // the GitHub API path, the slug in the details_url sent to GitHub.
     if !github_app::is_safe_name_segment(&ctx.repo_owner)
         || !github_app::is_safe_name_segment(&ctx.repo_name)
+        || !github_app::is_safe_name_segment(&ctx.workspace_slug)
     {
         return;
     }

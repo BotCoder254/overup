@@ -638,8 +638,9 @@ into a traversal-safe tar streamed into the container via the Docker archive API
   hop the proxy appended, so per-client fairness survives a proxy without becoming
   spoofable (same trust model as the session display IP)
 - **Per-scope body limits** (not global): 64 KB on `/auth` + `/api`, 1 MiB on
-  `/webhooks/github` and `POST …/workflows/validate` — an outer global limit would cap
-  webhook payloads, so don't reintroduce one
+  `POST …/workflows/validate`, and 25 MiB on `/webhooks/github` (GitHub documents
+  payloads up to 25 MB; a tighter cap 413s large pushes and permanently loses the
+  event) — an outer global limit would cap webhook payloads, so don't reintroduce one
 - Errors are sanitized: clients get stable codes, details stay in tracing logs;
   `sync_error` values are static category strings, never upstream response bodies
 - Every `/api/*` endpoint authenticates via the `CurrentUser` extractor (401 without a

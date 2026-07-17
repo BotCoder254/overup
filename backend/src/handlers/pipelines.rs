@@ -263,6 +263,7 @@ pub async fn rerun(
         // A rerun of a PR pipeline keeps its PR association visible.
         pr_number: original.pr_number,
         request_id,
+        webhook_delivery_id: None,
     };
     let pipeline = pipeline_run::create_pipeline(
         &state,
@@ -273,7 +274,8 @@ pub async fn rerun(
         &workflow.raw_content,
         &ctx,
     )
-    .await?;
+    .await?
+    .pipeline;
 
     pipeline_run::record_event(
         &state,
@@ -496,6 +498,7 @@ pub async fn dispatch(
         inputs: inputs.as_ref(),
         pr_number: None,
         request_id,
+        webhook_delivery_id: None,
     };
     let pipeline = pipeline_run::create_pipeline(
         &state,
@@ -506,7 +509,8 @@ pub async fn dispatch(
         &workflow.raw_content,
         &ctx,
     )
-    .await?;
+    .await?
+    .pipeline;
 
     let row = db::pipelines::find_row_for_workspace(&state.pool, workspace_id, pipeline.id)
         .await?

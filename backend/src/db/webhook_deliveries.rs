@@ -3,6 +3,8 @@
 //! `services/webhook_processor.rs` claims rows one at a time and processes
 //! them asynchronously. `delivery_id` (GitHub's `X-GitHub-Delivery`) is the
 //! idempotency key — redeliveries keep the original id, so replays collapse.
+//! Per-repo event ordering holds only under a SINGLE consumer process
+//! (deployment runs `replicas: 1`); see `claim_next` below.
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -58,9 +60,11 @@ pub async fn insert(
 }
 
 /// Claim the oldest pending delivery for processing. `FOR UPDATE SKIP
-/// LOCKED` keeps concurrent claimers (multiple backend instances) from
-/// blocking each other; the single in-process consumer drains sequentially,
-/// which preserves per-repo event ordering.
+/// LOCKED` keeps concurrent claimers (accidental multiple backend
+/// instances) from blocking each other, but it does NOT preserve ordering
+/// across instances — per-repo event ordering is guaranteed only by the
+/// single sequential in-process consumer (deployment mandates
+/// `replicas: 1`; see docs/deploy-backend-dokploy.md).
 pub async fn claim_next(pool: &PgPool) -> sqlx::Result<Option<ClaimedDelivery>> {
     sqlx::query_as::<_, ClaimedDelivery>(
         r#"

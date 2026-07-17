@@ -27,9 +27,14 @@ use crate::state::AppState;
 
 /// Browser-facing surfaces: JSON API calls and OAuth redirects are small.
 const MAX_BODY_BYTES: usize = 64 * 1024;
-/// Webhook payloads (push events especially) and editor validation content
-/// legitimately exceed the browser budget.
+/// Editor validation content legitimately exceeds the browser budget.
 const LARGE_BODY_BYTES: usize = 1024 * 1024;
+/// GitHub webhook bodies: GitHub documents payloads up to 25 MB (large
+/// pushes carry hundreds of commit objects). A tighter cap would 413 those
+/// deliveries BEFORE the handler — GitHub retries into the same wall and the
+/// event is permanently lost. HMAC verification (one pass over the body)
+/// remains the real gate.
+const WEBHOOK_BODY_BYTES: usize = 25 * 1024 * 1024;
 /// Workspace logo uploads: raw image bytes through the backend (magic-byte
 /// verification happens server-side). Slightly above the 2 MiB image cap so
 /// the handler — not the transport layer — produces the friendly error.
@@ -471,19 +476,24 @@ pub fn build_router(state: AppState) -> anyhow::Result<Router> {
         .layer(GovernorLayer::new(api_governor));
 
     // GitHub webhooks: server-to-server, authenticated by HMAC signature —
-    // deliberately outside the CSRF layer and under the large body budget.
+    // deliberately outside the CSRF layer and under the webhook body budget.
+    // The limiter is only a DoS floor, sized generously: GitHub delivers
+    // from a small shared egress-IP pool, so a per-IP key is effectively a
+    // GLOBAL cap across every installation — a busy org must not be able to
+    // 429 unrelated deliveries. HMAC verification is the real gate and a
+    // rejection costs one hash pass.
     let webhook_governor = Arc::new(
         GovernorConfigBuilder::default()
             .key_extractor(rate_key)
-            .per_second(10)
-            .burst_size(20)
+            .per_second(100)
+            .burst_size(500)
             .finish()
             .expect("valid governor configuration"),
     );
     let webhook_routes = Router::new()
         .route("/github", post(github_webhooks::receive))
         .layer(GovernorLayer::new(webhook_governor))
-        .layer(RequestBodyLimitLayer::new(LARGE_BODY_BYTES));
+        .layer(RequestBodyLimitLayer::new(WEBHOOK_BODY_BYTES));
 
     // WebSocket surfaces live OUTSIDE the CSRF layer: native WebSockets
     // cannot send the X-Requested-With header. Each endpoint authenticates

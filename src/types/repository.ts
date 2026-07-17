@@ -103,6 +103,25 @@ export interface RepositoryEventsPage {
   nextCursor: string | null;
 }
 
+/** Static webhook signature-rejection categories (server vocabulary). */
+export type WebhookRejectionCause =
+  | 'missing_header'
+  | 'malformed_header'
+  | 'bad_prefix'
+  | 'invalid_hex'
+  | 'mismatch';
+
+/**
+ * Deployment-global webhook signature-rejection gauge. A wrong
+ * GITHUB_WEBHOOK_SECRET rejects every delivery before persistence, so this
+ * is not scoped to one repository; it resets when the backend restarts.
+ */
+export interface WebhookAuthHealth {
+  rejections24h: number;
+  lastRejectedAt: string | null;
+  lastCause: WebhookRejectionCause | null;
+}
+
 /** Webhook/sync health figures for the repository sync status panel. */
 export interface RepositoryHealth {
   lastEventAt: string | null;
@@ -110,4 +129,5 @@ export interface RepositoryHealth {
   failedEvents24h: number;
   pendingDeliveries: number;
   checksEnabled: boolean;
+  webhookAuth: WebhookAuthHealth;
 }

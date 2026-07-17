@@ -19,6 +19,7 @@ use sha2::Sha256;
 
 use crate::db;
 use crate::services::github_app;
+use crate::services::webhook_stats::SignatureError;
 use crate::state::AppState;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -152,6 +153,11 @@ pub async fn receive(
 
     // 1. Authenticate the delivery before touching the payload.
     if let Err(cause) = verify_signature(&state.config.github_webhook_secret, &headers, &body) {
+        // Rejections never persist (unauthenticated input must not reach
+        // Postgres), but the static cause feeds the in-memory gauge so the
+        // repository health panel can show "deliveries are being rejected"
+        // instead of a silently empty timeline.
+        state.webhook_auth.record(cause);
         // Static cause only — never the signature, the expected digest, the
         // secret, or any body bytes. `cause=mismatch` means the configured
         // secret differs from the App's; `cause=missing_header` means the App
@@ -357,36 +363,8 @@ fn header_str(headers: &HeaderMap, name: &str) -> Option<String> {
     Some(value.to_string())
 }
 
-/// Why a delivery failed verification. Static category strings only — the
-/// house rule for every operator-facing failure label (`sync_error`,
-/// `error_category`). The cause is logged, never returned to the caller: it
-/// distinguishes a misconfiguration from an attack for the operator without
-/// telling an attacker which of their guesses got closer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SignatureError {
-    /// No `X-Hub-Signature-256` at all → the App has no webhook secret set.
-    MissingHeader,
-    /// Header present but not readable as ASCII.
-    MalformedHeader,
-    /// Not `sha256=…` — e.g. a sha1-only sender.
-    BadPrefix,
-    /// The digest after `sha256=` isn't hex.
-    InvalidHex,
-    /// A real HMAC mismatch → the configured secret differs from GitHub's.
-    Mismatch,
-}
-
-impl SignatureError {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::MissingHeader => "missing_header",
-            Self::MalformedHeader => "malformed_header",
-            Self::BadPrefix => "bad_prefix",
-            Self::InvalidHex => "invalid_hex",
-            Self::Mismatch => "mismatch",
-        }
-    }
-}
+// `SignatureError` (the static rejection-cause vocabulary) lives in
+// `services/webhook_stats.rs` next to the rejection gauge it feeds.
 
 /// HMAC-SHA256 over the raw body with the configured secret, compared in
 /// constant time against `X-Hub-Signature-256: sha256=<hex>`.
