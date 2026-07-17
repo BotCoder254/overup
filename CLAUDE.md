@@ -631,8 +631,17 @@ into a traversal-safe tar streamed into the container via the Docker archive API
 - Webhooks: constant-time HMAC-SHA256 over the raw body (`X-Hub-Signature-256`) before any
   parsing; `X-GitHub-Delivery` primary key makes redeliveries no-ops (a redelivery only
   revives a terminally FAILED row for another processing round); payloads are parsed
-  into minimal typed envelopes and never logged; `GITHUB_WEBHOOK_SECRET` must be ≥ 16
-  bytes at boot (signing-key parity — a guessable secret would let anyone forge deliveries)
+  into minimal typed envelopes and never logged. Shared HMAC secrets whose bytes must
+  match a counterparty's exactly (`GITHUB_WEBHOOK_SECRET`, `RUNNER_JOB_SIGNING_KEY`) load
+  through `config.rs::shared_secret`: **trimmed FIRST, then length-checked** (≥16 / ≥32
+  bytes) — measuring the untrimmed value would let a padded weak secret pass the entropy
+  floor, and surrounding whitespace is invisible in an env panel while changing every MAC
+  (it caused a total webhook outage: every delivery 401'd). Quote-wrapped values are
+  warned about, never stripped — a secret may legitimately contain a quote. A rejected
+  delivery logs a static `cause=` (`missing_header`/`malformed_header`/`bad_prefix`/
+  `invalid_hex`/`mismatch`) plus the delivery id, so a misconfiguration is diagnosable
+  from one line; the response stays a flat 401 and the signature/digest/secret are never
+  logged
 - **Webhook processing is async and durable**: the HTTP handler only verifies, validates,
   persists a NORMALIZED server-built payload (strings ≤512 B, changed paths deduped/capped
   at 300 with a truncation flag, avatars sanitized — never the raw body), and acks 2xx;

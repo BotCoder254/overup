@@ -192,19 +192,17 @@ impl Config {
             }
         };
 
-        let runner_job_signing_key = required("RUNNER_JOB_SIGNING_KEY")?.into_bytes();
-        if runner_job_signing_key.len() < 32 {
-            anyhow::bail!("RUNNER_JOB_SIGNING_KEY must be at least 32 bytes");
-        }
+        let runner_job_signing_key =
+            shared_secret("RUNNER_JOB_SIGNING_KEY", required("RUNNER_JOB_SIGNING_KEY")?, 32)?
+                .into_bytes();
 
         // Parity with the signing-key rule: a guessable webhook secret would
         // let anyone forge GitHub deliveries, so a weak one fails at boot.
-        let github_webhook_secret = required("GITHUB_WEBHOOK_SECRET")?;
-        if github_webhook_secret.len() < 16 {
-            anyhow::bail!(
-                "GITHUB_WEBHOOK_SECRET must be at least 16 bytes (generate one with `openssl rand -hex 32` and set it on the GitHub App too)"
-            );
-        }
+        let github_webhook_secret = shared_secret(
+            "GITHUB_WEBHOOK_SECRET",
+            required("GITHUB_WEBHOOK_SECRET")?,
+            16,
+        )?;
 
         let session_idle_timeout_hours: i64 = optional("SESSION_IDLE_TIMEOUT_HOURS", "72")
             .parse()
@@ -466,6 +464,46 @@ fn required(key: &str) -> anyhow::Result<String> {
     std::env::var(key).with_context(|| format!("missing required environment variable {key}"))
 }
 
+/// Load rule for a shared HMAC secret whose bytes must match a counterparty's
+/// exactly (GitHub's webhook secret, the runner job signing key).
+///
+/// Trims BEFORE measuring: surrounding whitespace is invisible in an env panel
+/// but changes every MAC, and measuring the untrimmed value would let a padded
+/// weak key pass the entropy floor. Same rule as SECRETS_MASTER_KEY.
+///
+/// The value is never logged, and never appears in the error.
+fn shared_secret(key: &str, raw: String, min_len: usize) -> anyhow::Result<String> {
+    let value = raw.trim().to_string();
+    if value.len() < min_len {
+        anyhow::bail!(
+            "{key} must be at least {min_len} bytes after trimming surrounding \
+             whitespace (generate one with `openssl rand -hex 32`; the webhook \
+             secret must also be set to the same value on the GitHub App)"
+        );
+    }
+
+    // A secret that both starts and ends with the same quote character is
+    // almost always an env panel or compose file passing quotes through
+    // literally: dotenvy strips matched quotes from `.env` files, the real
+    // process environment does not. Warn rather than strip — a secret may
+    // legitimately contain a quote, and silently mutating it would trade one
+    // invisible mismatch for another.
+    let bytes = value.as_bytes();
+    if bytes.len() >= 2
+        && (bytes[0] == b'"' || bytes[0] == b'\'')
+        && bytes[0] == bytes[bytes.len() - 1]
+    {
+        tracing::warn!(
+            "{key} starts and ends with a quote character — if your deployment's \
+             environment panel does not strip quotes, those quotes are part of the \
+             secret and every signature check will fail. Set the value unquoted \
+             unless the quotes are genuinely part of it."
+        );
+    }
+
+    Ok(value)
+}
+
 /// MINIO_ENDPOINT must be a syntactically sane http(s) URL. Plain http is
 /// allowed (the standard local `docker compose` shape) but draws a loud
 /// warning on non-loopback hosts: S3 credentials would cross the network in
@@ -550,7 +588,54 @@ fn parse_prepull_list(raw: &str) -> anyhow::Result<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_prepull_list, validate_minio_endpoint};
+    use super::{parse_prepull_list, shared_secret, validate_minio_endpoint};
+
+    /// The 401-storm regression: a secret pasted with a trailing newline used
+    /// to reach the HMAC verbatim and mismatch every delivery. It must now be
+    /// trimmed at load. See handlers::github_webhooks `untrimmed_secret_does_not_verify`.
+    #[test]
+    fn shared_secret_trims_surrounding_whitespace() {
+        let expected = "0123456789abcdef0123456789abcdef";
+        for raw in [
+            format!("{expected}\n"),
+            format!("{expected}\r\n"),
+            format!("  {expected}  "),
+            format!("\t{expected}\n\n"),
+        ] {
+            assert_eq!(shared_secret("K", raw, 16).unwrap(), expected);
+        }
+    }
+
+    /// Length is measured AFTER trimming, so padding can no longer smuggle a
+    /// weak secret past the entropy floor. This deliberately fails boot for a
+    /// deployment that previously started.
+    #[test]
+    fn shared_secret_measures_length_after_trimming() {
+        // 5 real bytes padded out to 17 — passed the old untrimmed check.
+        assert!(shared_secret("K", "      short      ".to_string(), 16).is_err());
+        // Exactly at the floor passes.
+        assert!(shared_secret("K", " 0123456789abcdef \n".to_string(), 16).is_ok());
+        // One under it does not.
+        assert!(shared_secret("K", " 0123456789abcde \n".to_string(), 16).is_err());
+    }
+
+    /// The failure message must guide remediation without echoing the secret.
+    #[test]
+    fn shared_secret_error_never_leaks_the_value() {
+        let error = shared_secret("MY_KEY", "  hunter2  ".to_string(), 16)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("MY_KEY"));
+        assert!(!error.contains("hunter2"));
+    }
+
+    /// Quotes are reported, never stripped: a secret may legitimately contain
+    /// one, and mutating it would trade one invisible mismatch for another.
+    #[test]
+    fn shared_secret_preserves_quotes() {
+        let quoted = "\"0123456789abcdef0123456789abcdef\"";
+        assert_eq!(shared_secret("K", quoted.to_string(), 16).unwrap(), quoted);
+    }
 
     #[test]
     fn minio_endpoint_accepts_http_and_https_urls() {
