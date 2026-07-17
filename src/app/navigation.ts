@@ -2,6 +2,7 @@ import type { LucideIcon } from 'lucide-react';
 import {
   Activity,
   Boxes,
+  Container,
   FolderGit2,
   KeyRound,
   LayoutDashboard,
@@ -94,6 +95,13 @@ export const NAV_GROUPS: NavGroup[] = [
         icon: Server,
         description:
           'Register self-hosted runners, watch their health, and control which pipelines they pick up.',
+      },
+      {
+        label: 'Toolchains',
+        segment: 'toolchains',
+        icon: Container,
+        description:
+          'Pre-built language images your jobs can run against — reference one from a job with `container: <name>`.',
       },
       {
         label: 'Artifacts',

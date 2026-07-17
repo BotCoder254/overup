@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 
 use serde_yaml_ng::Value;
 
-use crate::services::workflow_parse;
+use crate::services::{toolchain_images, workflow_parse};
 
 /// Everything the scheduler persists per job at pipeline creation.
 pub struct PlannedJob {
@@ -52,7 +52,15 @@ pub fn truncate_utf8(value: &mut String, max_bytes: usize) {
 }
 
 /// Build executable plans from raw workflow YAML.
-pub fn build_plans(raw_content: &str, default_image: &str) -> Result<Vec<PlannedJob>, PlanError> {
+///
+/// `image_allowlist` (empty = allow any) restricts which explicit `container:`
+/// images may run — see `image_allowed`. Toolchain aliases and the `runs-on`
+/// image map are always permitted.
+pub fn build_plans(
+    raw_content: &str,
+    default_image: &str,
+    image_allowlist: &[String],
+) -> Result<Vec<PlannedJob>, PlanError> {
     let parsed = workflow_parse::parse_and_validate(raw_content);
     if parsed.status() == "errors" {
         return Err(PlanError::Invalid);
@@ -79,18 +87,40 @@ pub fn build_plans(raw_content: &str, default_image: &str) -> Result<Vec<Planned
             notices.push("matrix strategy is not expanded yet; the job runs once".into());
         }
 
-        // `container:` wins, but only when it is a plausible image reference
-        // — the string lands verbatim in the signed job payload, so garbage
-        // (whitespace, control chars, oversized values) is rejected here
-        // with a visible notice rather than shipped to a runner.
+        // `container:` wins, in three tiers:
+        //   1. a short toolchain alias (`rust`, `js`, …) → catalog image;
+        //   2. an explicit valid reference, subject to the optional allow-list;
+        //   3. otherwise a notice and fall back to the `runs-on` image / default.
+        // The resolved string lands verbatim in the signed job payload, so
+        // garbage (whitespace, control chars, oversized values) is rejected
+        // here with a visible notice rather than shipped to a runner.
+        let os_version = runs_on_os(&job.runs_on);
         let image = match container_image(&job_node) {
-            Some(reference) if is_valid_image_reference(&reference) => reference,
             Some(reference) => {
-                notices.push(format!(
-                    "container image `{}` is not a valid image reference; using the image for `runs-on` instead",
-                    sanitize_for_notice(&reference)
-                ));
-                image_for_runs_on(&job.runs_on).unwrap_or_else(|| default_image.to_string())
+                if let Some(resolved) = toolchain_images::resolve_alias(&reference, os_version) {
+                    notices.push(format!(
+                        "toolchain `{}` resolved to image `{resolved}`",
+                        sanitize_for_notice(&reference)
+                    ));
+                    resolved.to_string()
+                } else if is_valid_image_reference(&reference) {
+                    if image_allowed(&reference, image_allowlist) {
+                        reference
+                    } else {
+                        notices.push(format!(
+                            "container image `{}` is not in the allowed image list; using the image for `runs-on` instead",
+                            sanitize_for_notice(&reference)
+                        ));
+                        image_for_runs_on(&job.runs_on)
+                            .unwrap_or_else(|| default_image.to_string())
+                    }
+                } else {
+                    notices.push(format!(
+                        "container image `{}` is not a valid image reference; using the image for `runs-on` instead",
+                        sanitize_for_notice(&reference)
+                    ));
+                    image_for_runs_on(&job.runs_on).unwrap_or_else(|| default_image.to_string())
+                }
             }
             None => image_for_runs_on(&job.runs_on).unwrap_or_else(|| default_image.to_string()),
         };
@@ -266,6 +296,41 @@ fn image_for_runs_on(runs_on: &[String]) -> Option<String> {
     None
 }
 
+/// The Ubuntu version a job targets, derived from its `runs-on` labels, so a
+/// toolchain alias can pair with the requested OS (`container: rust` +
+/// `runs-on: ubuntu-22.04` → the `rust-22.04` image). Only the versions
+/// catthehacker publishes toolchain images for are returned.
+fn runs_on_os(runs_on: &[String]) -> Option<&'static str> {
+    for label in runs_on {
+        match label.trim().to_ascii_lowercase().as_str() {
+            "ubuntu-24.04" => return Some("24.04"),
+            "ubuntu-22.04" => return Some("22.04"),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Whether an explicit `container:` image may run under the optional
+/// allow-list. An empty list allows anything (the historical behavior).
+/// Toolchain-catalog images always pass; otherwise the image must match an
+/// allow-list entry exactly, or match a trailing `*` prefix glob.
+fn image_allowed(image: &str, allowlist: &[String]) -> bool {
+    if allowlist.is_empty() || toolchain_images::is_catalog_image(image) {
+        return true;
+    }
+    allowlist.iter().any(|entry| image_glob_match(entry, image))
+}
+
+/// Match an allow-list entry against an image: exact, or a trailing `*` as a
+/// prefix glob (`catthehacker/*`, `node:*`).
+fn image_glob_match(pattern: &str, image: &str) -> bool {
+    match pattern.strip_suffix('*') {
+        Some(prefix) => image.starts_with(prefix),
+        None => pattern == image,
+    }
+}
+
 /// A plausible Docker image reference: registry/repo/name plus optional
 /// tag/digest. Deliberately conservative — start alphanumeric, then only the
 /// reference charset, hard length cap. Anything else is rejected at plan
@@ -336,16 +401,19 @@ fn is_checkout_action(uses: &str) -> bool {
 /// overup, so the notice points authors at the mechanism that is.
 fn setup_action_hint(uses: &str) -> Option<&'static str> {
     let action = uses.split('@').next().unwrap_or(uses);
+    // Prefer the short toolchain aliases (catthehacker toolchain images with
+    // the language's tools pre-built) where one exists; fall back to an
+    // upstream image for languages without a specialized catthehacker tag.
     match action {
-        "actions/setup-node" => Some("container: node:22"),
+        "actions/setup-node" => Some("container: js"),
+        "actions/setup-go" => Some("container: go"),
+        "actions/setup-java" => Some("container: java"),
+        "actions/setup-dotnet" => Some("container: dotnet"),
         "actions/setup-python" => Some("container: python:3.12"),
-        "actions/setup-go" => Some("container: golang:1.23"),
-        "actions/setup-java" => Some("container: eclipse-temurin:21"),
-        "actions/setup-dotnet" => Some("container: mcr.microsoft.com/dotnet/sdk:8.0"),
         "ruby/setup-ruby" => Some("container: ruby:3.3"),
         "dtolnay/rust-toolchain"
         | "actions-rust-lang/setup-rust-toolchain"
-        | "actions-rs/toolchain" => Some("container: rust:1"),
+        | "actions-rs/toolchain" => Some("container: rust"),
         _ => None,
     }
 }
@@ -379,7 +447,7 @@ jobs:
 
     #[test]
     fn plans_extract_steps_env_and_image() {
-        let plans = build_plans(SIMPLE, "ubuntu:24.04").ok().unwrap();
+        let plans = build_plans(SIMPLE, "ubuntu:24.04", &[]).ok().unwrap();
         assert_eq!(plans.len(), 2);
 
         let build = &plans[0];
@@ -422,7 +490,7 @@ jobs:
     steps:
       - run: echo workflow default
 "#;
-        let plans = build_plans(workflow, "ubuntu:24.04").ok().unwrap();
+        let plans = build_plans(workflow, "ubuntu:24.04", &[]).ok().unwrap();
         let a = plans[0].plan["steps"].as_array().unwrap();
         // Job default (normalized: `./` and trailing `/` stripped).
         assert_eq!(a[0]["workingDirectory"], "job-dir");
@@ -433,7 +501,7 @@ jobs:
 
     #[test]
     fn absent_working_directory_emits_no_key() {
-        let plans = build_plans(SIMPLE, "ubuntu:24.04").ok().unwrap();
+        let plans = build_plans(SIMPLE, "ubuntu:24.04", &[]).ok().unwrap();
         let step = &plans[0].plan["steps"][0];
         assert!(step.get("workingDirectory").is_none());
         // Exact step shape stays pinned for plans without a workdir.
@@ -457,7 +525,7 @@ jobs:
       - run: echo one
       - run: echo two
 "#;
-        let plans = build_plans(workflow, "ubuntu:24.04").ok().unwrap();
+        let plans = build_plans(workflow, "ubuntu:24.04", &[]).ok().unwrap();
         let steps = plans[0].plan["steps"].as_array().unwrap();
         assert!(steps.iter().all(|s| s.get("workingDirectory").is_none()));
         let notices = plans[0].plan["notices"].as_array().unwrap();
@@ -480,7 +548,7 @@ jobs:
       - run: echo hi
         working-directory: ${{ vars.TARGET_DIR }}
 "#;
-        let plans = build_plans(workflow, "ubuntu:24.04").ok().unwrap();
+        let plans = build_plans(workflow, "ubuntu:24.04", &[]).ok().unwrap();
         assert_eq!(
             plans[0].plan["steps"][0]["workingDirectory"],
             "${{ vars.TARGET_DIR }}"
@@ -507,7 +575,7 @@ jobs:
     runs-on: ubuntu-latest
     steps: [{ run: echo plain }]
 "#;
-        let plans = build_plans(with_env, "ubuntu:24.04").ok().unwrap();
+        let plans = build_plans(with_env, "ubuntu:24.04", &[]).ok().unwrap();
         assert_eq!(plans[0].plan["environment"], "production");
         assert_eq!(plans[1].plan["environment"], "staging");
         assert!(plans[2].plan["environment"].is_null());
@@ -524,7 +592,7 @@ jobs:
     steps: [{ run: echo deploy }]
 "#;
         // Still plans (warning severity), with no environment captured.
-        let plans = build_plans(malformed, "ubuntu:24.04").ok().unwrap();
+        let plans = build_plans(malformed, "ubuntu:24.04", &[]).ok().unwrap();
         assert!(plans[0].plan["environment"].is_null());
     }
 
@@ -543,7 +611,7 @@ jobs:
     steps: [{ run: echo b }]
 "#;
         assert!(matches!(
-            build_plans(cyclic, "ubuntu:24.04"),
+            build_plans(cyclic, "ubuntu:24.04", &[]),
             Err(PlanError::Invalid)
         ));
     }
@@ -557,7 +625,7 @@ jobs:
     uses: org/repo/.github/workflows/deploy.yml@main
 "#;
         assert!(matches!(
-            build_plans(uses_only, "ubuntu:24.04"),
+            build_plans(uses_only, "ubuntu:24.04", &[]),
             Err(PlanError::NoRunnableJobs)
         ));
     }
@@ -572,7 +640,7 @@ jobs:
     container: node:22
     steps: [{ run: node --version }]
 "#;
-        let plans = build_plans(with_container, "ubuntu:24.04").ok().unwrap();
+        let plans = build_plans(with_container, "ubuntu:24.04", &[]).ok().unwrap();
         assert_eq!(plans[0].plan["image"], "node:22");
     }
 
@@ -586,7 +654,7 @@ jobs:
     container: "node:22 && rm -rf /"
     steps: [{ run: node --version }]
 "#;
-        let plans = build_plans(bad_container, "ubuntu:24.04").ok().unwrap();
+        let plans = build_plans(bad_container, "ubuntu:24.04", &[]).ok().unwrap();
         assert_eq!(plans[0].plan["image"], "catthehacker/ubuntu:act-latest");
         let notices = plans[0].plan["notices"].as_array().unwrap();
         assert!(
@@ -631,22 +699,112 @@ jobs:
       - uses: actions/setup-node@v4
       - run: npm test
 "#;
-        let plans = build_plans(with_setup, "ubuntu:24.04").ok().unwrap();
+        let plans = build_plans(with_setup, "ubuntu:24.04", &[]).ok().unwrap();
         let notices = plans[0].plan["notices"].as_array().unwrap();
         assert!(
             notices
                 .iter()
-                .any(|n| n.as_str().unwrap().contains("container: node:22"))
+                .any(|n| n.as_str().unwrap().contains("container: js"))
         );
-        assert_eq!(setup_action_hint("dtolnay/rust-toolchain@stable"), Some("container: rust:1"));
+        assert_eq!(
+            setup_action_hint("dtolnay/rust-toolchain@stable"),
+            Some("container: rust")
+        );
         assert_eq!(setup_action_hint("actions/checkout@v4"), None);
+    }
+
+    #[test]
+    fn container_toolchain_alias_resolves() {
+        let with_alias = r#"
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: rust
+    steps: [{ run: cargo build }]
+"#;
+        let plans = build_plans(with_alias, "ubuntu:24.04", &[]).ok().unwrap();
+        assert_eq!(plans[0].plan["image"], "catthehacker/ubuntu:rust-latest");
+        let notices = plans[0].plan["notices"].as_array().unwrap();
+        assert!(notices.iter().any(|n| n.as_str().unwrap().contains("toolchain")));
+    }
+
+    #[test]
+    fn container_alias_pairs_with_runs_on_version() {
+        let with_alias = r#"
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    container: rust
+    steps: [{ run: cargo build }]
+"#;
+        let plans = build_plans(with_alias, "ubuntu:24.04", &[]).ok().unwrap();
+        assert_eq!(plans[0].plan["image"], "catthehacker/ubuntu:rust-22.04");
+    }
+
+    #[test]
+    fn allowlist_rejects_off_list_image_falls_back() {
+        let with_container = r#"
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: node:22
+    steps: [{ run: node --version }]
+"#;
+        let allowlist = vec!["rust:*".to_string()];
+        let plans = build_plans(with_container, "ubuntu:24.04", &allowlist)
+            .ok()
+            .unwrap();
+        // Off-list `container:` falls back to the runs-on image with a notice.
+        assert_eq!(plans[0].plan["image"], "catthehacker/ubuntu:act-latest");
+        let notices = plans[0].plan["notices"].as_array().unwrap();
+        assert!(
+            notices
+                .iter()
+                .any(|n| n.as_str().unwrap().contains("not in the allowed image list"))
+        );
+    }
+
+    #[test]
+    fn allowlist_permits_catalog_and_glob_matches() {
+        // A catalog alias is always allowed even under a restrictive list.
+        let with_alias = r#"
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: rust
+    steps: [{ run: cargo build }]
+"#;
+        let allowlist = vec!["nothing/*".to_string()];
+        let plans = build_plans(with_alias, "ubuntu:24.04", &allowlist)
+            .ok()
+            .unwrap();
+        assert_eq!(plans[0].plan["image"], "catthehacker/ubuntu:rust-latest");
+
+        // A glob-matched explicit reference is allowed.
+        let with_container = r#"
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: node:22
+    steps: [{ run: node --version }]
+"#;
+        let allowlist = vec!["node:*".to_string()];
+        let plans = build_plans(with_container, "ubuntu:24.04", &allowlist)
+            .ok()
+            .unwrap();
+        assert_eq!(plans[0].plan["image"], "node:22");
     }
 
     #[test]
     fn checkout_notice_is_reassuring_not_a_skip_warning() {
         // The SIMPLE workflow uses `actions/checkout@v4`; its notice must say
         // the repo is checked out automatically, NOT "not supported; skipped".
-        let plans = build_plans(SIMPLE, "ubuntu:24.04").ok().unwrap();
+        let plans = build_plans(SIMPLE, "ubuntu:24.04", &[]).ok().unwrap();
         let notices = plans[0].plan["notices"].as_array().unwrap();
         let checkout = notices
             .iter()

@@ -89,8 +89,12 @@ pub async fn create_pipeline(
     raw_content: &str,
     ctx: &TriggerContext<'_>,
 ) -> AppResult<CreatedPipeline> {
-    let mut plans = pipeline_plan::build_plans(raw_content, &state.config.default_job_image)
-        .map_err(|err| match err {
+    let mut plans = pipeline_plan::build_plans(
+        raw_content,
+        &state.config.default_job_image,
+        &state.config.image_allowlist,
+    )
+    .map_err(|err| match err {
             PlanError::Invalid => {
                 AppError::Validation("workflow has validation errors and cannot run".into())
             }

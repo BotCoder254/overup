@@ -19,6 +19,7 @@ import { ArtifactsPage } from '../features/artifacts/pages/ArtifactsPage';
 import { ArtifactDetailPage } from '../features/artifacts/pages/ArtifactDetailPage';
 import { RunnersPage } from '../features/runners/pages/RunnersPage';
 import { RunnerDetailPage } from '../features/runners/pages/RunnerDetailPage';
+import { ToolchainsPage } from '../features/toolchains/pages/ToolchainsPage';
 import { SecretsPage } from '../features/secrets/pages/SecretsPage';
 import { SecretDetailPage } from '../features/secrets/pages/SecretDetailPage';
 import { EnvironmentsPage } from '../features/environments/pages/EnvironmentsPage';
@@ -40,6 +41,7 @@ const IMPLEMENTED_SEGMENTS = new Set([
   'jobs',
   'artifacts',
   'runners',
+  'toolchains',
   'secrets',
   'environments',
   'settings',
@@ -88,6 +90,7 @@ export const router = createBrowserRouter([
               { path: 'artifacts/:artifactId', element: <ArtifactDetailPage /> },
               { path: 'runners', element: <RunnersPage /> },
               { path: 'runners/:runnerId', element: <RunnerDetailPage /> },
+              { path: 'toolchains', element: <ToolchainsPage /> },
               { path: 'secrets', element: <SecretsPage /> },
               { path: 'secrets/:secretId', element: <SecretDetailPage /> },
               { path: 'environments', element: <EnvironmentsPage /> },
