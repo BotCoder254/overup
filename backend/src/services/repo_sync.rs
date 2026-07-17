@@ -8,6 +8,8 @@
 //! Error strings persisted to sync rows are static categories only; upstream
 //! detail stays in tracing.
 
+use std::collections::HashSet;
+
 use uuid::Uuid;
 
 use crate::db;
@@ -159,7 +161,7 @@ async fn run_sync(
         }
         if entry.size as usize > github_app::MAX_WORKFLOW_FILE_BYTES {
             // Oversized files become an errored catalog entry, not a fetch.
-            parsed_files.push((entry, None, None));
+            parsed_files.push((entry, None, None, oversize_placeholder()));
             continue;
         }
         let content = github_app::get_file_content(
@@ -181,7 +183,50 @@ async fn run_sync(
         .await
         .unwrap_or_default();
         fetched += 1;
-        parsed_files.push((entry, Some(content), commit));
+        let parsed = workflow_parse::parse_and_validate(&content);
+        parsed_files.push((entry, Some(content), commit, parsed));
+    }
+
+    // --- fileRefs Git-tree verdicts (advisory; every failure fails OPEN) ----
+    // Detected working directories and script paths get an `exists` verdict
+    // against the default branch's tree — fetched at most once per sync, only
+    // when something actually references files, held transiently, never
+    // persisted. Unavailable/truncated trees leave verdicts as `null`
+    // (unverified); the sync itself is never blocked.
+    let stored_refs = db::workflows::file_refs_for_repo(&state.pool, repository.id)
+        .await
+        .map_err(|e| fail("database error")(e.into()))?;
+    let fresh_paths: HashSet<&str> = parsed_files
+        .iter()
+        .map(|(entry, ..)| entry.path.as_str())
+        .collect();
+    let has_refs = parsed_files.iter().any(|(_, _, _, parsed)| {
+        parsed
+            .metadata
+            .get("fileRefs")
+            .and_then(|r| r.as_array())
+            .is_some_and(|a| !a.is_empty())
+    }) || stored_refs.iter().any(|(_, path, refs)| {
+        !fresh_paths.contains(path.as_str())
+            && refs.as_array().is_some_and(|a| !a.is_empty())
+    });
+    let tree_sets = if has_refs {
+        fetch_tree_sets(
+            state,
+            &token,
+            &remote.owner.login,
+            &remote.name,
+            &branches,
+            &default_branch,
+        )
+        .await
+    } else {
+        None
+    };
+    for (_, _, _, parsed) in parsed_files.iter_mut() {
+        if let Some(refs) = parsed.metadata.get_mut("fileRefs") {
+            annotate_file_refs(refs, tree_sets.as_ref());
+        }
     }
 
     let mut tx = state
@@ -209,13 +254,10 @@ async fn run_sync(
         .await
         .map_err(|e| fail("database error")(e.into()))?;
 
-    for (entry, content, commit) in &parsed_files {
-        // Oversized files were never fetched: store an errored catalog entry
-        // with empty content instead of parsing.
-        let (parsed, raw) = match content {
-            Some(raw) => (workflow_parse::parse_and_validate(raw), raw.as_str()),
-            None => (oversize_placeholder(), ""),
-        };
+    for (entry, content, commit, parsed) in &parsed_files {
+        // Oversized files were never fetched: their errored placeholder
+        // entry persists with empty content.
+        let raw = content.as_deref().unwrap_or("");
         let status = parsed.status();
         let diagnostics = &parsed.diagnostics;
         let name = parsed
@@ -276,6 +318,27 @@ async fn run_sync(
         }
     }
 
+    // Refresh verdicts for UNCHANGED workflows too — a push can delete a
+    // referenced script or directory without touching the workflow file.
+    // Only with a live tree (a transient fetch failure must not wipe stored
+    // verdicts to null), and only when the verdicts actually changed.
+    if tree_sets.is_some() {
+        for (workflow_id, path, refs) in &stored_refs {
+            if fresh_paths.contains(path.as_str())
+                || refs.as_array().is_none_or(|a| a.is_empty())
+            {
+                continue;
+            }
+            let mut updated = refs.clone();
+            annotate_file_refs(&mut updated, tree_sets.as_ref());
+            if updated != *refs {
+                db::workflows::update_file_refs(&mut tx, *workflow_id, &updated)
+                    .await
+                    .map_err(|e| fail("database error")(e.into()))?;
+            }
+        }
+    }
+
     let keep: Vec<String> = eligible.iter().map(|e| e.path.clone()).collect();
     db::workflows::delete_missing(&mut tx, repository.id, &keep)
         .await
@@ -320,6 +383,79 @@ async fn run_sync(
 }
 
 /// Catalog entry for a file too large to fetch: no content, one error.
+/// The default branch's Git tree reduced to (directory, blob) path sets for
+/// fileRefs verdicts. `None` = unavailable — missing head sha, fetch failure,
+/// or a truncated listing — and callers fail OPEN (verdicts stay `null`).
+/// The tree is transient: never persisted, never logged.
+async fn fetch_tree_sets(
+    state: &AppState,
+    token: &str,
+    owner: &str,
+    repo: &str,
+    branches: &[github_app::Branch],
+    default_branch: &str,
+) -> Option<(HashSet<String>, HashSet<String>)> {
+    let head_sha = branches
+        .iter()
+        .find(|b| b.name == default_branch)
+        .map(|b| b.commit.sha.as_str())?;
+    match github_app::get_git_tree(&state.http, token, owner, repo, head_sha).await {
+        Ok(tree) if !tree.truncated => {
+            let mut dirs = HashSet::new();
+            let mut blobs = HashSet::new();
+            for entry in tree.tree {
+                match entry.entry_type.as_str() {
+                    "tree" => {
+                        dirs.insert(entry.path);
+                    }
+                    "blob" => {
+                        blobs.insert(entry.path);
+                    }
+                    _ => {}
+                }
+            }
+            Some((dirs, blobs))
+        }
+        Ok(_) => {
+            tracing::debug!(owner, repo, "git tree truncated; skipping fileRefs verdicts");
+            None
+        }
+        Err(error) => {
+            tracing::debug!(owner, repo, error = ?error, "git tree fetch failed; skipping fileRefs verdicts");
+            None
+        }
+    }
+}
+
+/// Stamp an `exists` verdict onto every fileRefs entry: `workdir` paths must
+/// be tree directories, `script` paths tree blobs; no tree (or a malformed
+/// entry) reads as `null` — unverified, never a failure.
+fn annotate_file_refs(
+    refs: &mut serde_json::Value,
+    tree: Option<&(HashSet<String>, HashSet<String>)>,
+) {
+    let Some(entries) = refs.as_array_mut() else {
+        return;
+    };
+    for entry in entries {
+        let Some(obj) = entry.as_object_mut() else {
+            continue;
+        };
+        let verdict = tree.and_then(|(dirs, blobs)| {
+            let path = obj.get("path")?.as_str()?;
+            match obj.get("kind")?.as_str()? {
+                "workdir" => Some(dirs.contains(path)),
+                "script" => Some(blobs.contains(path)),
+                _ => None,
+            }
+        });
+        obj.insert(
+            "exists".to_string(),
+            verdict.map_or(serde_json::Value::Null, serde_json::Value::Bool),
+        );
+    }
+}
+
 fn oversize_placeholder() -> workflow_parse::ParsedWorkflow {
     workflow_parse::ParsedWorkflow {
         name: None,
@@ -334,5 +470,55 @@ fn oversize_placeholder() -> workflow_parse::ParsedWorkflow {
             path: None,
             line: None,
         }],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sets() -> (HashSet<String>, HashSet<String>) {
+        (
+            HashSet::from(["frontend".to_string(), "scripts".to_string()]),
+            HashSet::from(["scripts/build.sh".to_string()]),
+        )
+    }
+
+    #[test]
+    fn annotate_file_refs_stamps_verdicts_from_the_tree() {
+        let mut refs = serde_json::json!([
+            { "path": "frontend", "kind": "workdir" },
+            { "path": "missing-dir", "kind": "workdir" },
+            { "path": "scripts/build.sh", "kind": "script" },
+            { "path": "scripts/gone.sh", "kind": "script" },
+            // A workdir that exists only as a FILE must not count.
+            { "path": "scripts/build.sh", "kind": "workdir" },
+        ]);
+        annotate_file_refs(&mut refs, Some(&sets()));
+        assert_eq!(refs[0]["exists"], true);
+        assert_eq!(refs[1]["exists"], false);
+        assert_eq!(refs[2]["exists"], true);
+        assert_eq!(refs[3]["exists"], false);
+        assert_eq!(refs[4]["exists"], false);
+    }
+
+    #[test]
+    fn annotate_file_refs_fails_open_without_a_tree() {
+        let mut refs = serde_json::json!([
+            { "path": "frontend", "kind": "workdir", "exists": true },
+        ]);
+        annotate_file_refs(&mut refs, None);
+        assert!(refs[0]["exists"].is_null());
+    }
+
+    #[test]
+    fn annotate_file_refs_ignores_malformed_entries() {
+        let mut refs = serde_json::json!([
+            "not-an-object",
+            { "path": "frontend", "kind": "unknown-kind" },
+        ]);
+        annotate_file_refs(&mut refs, Some(&sets()));
+        assert_eq!(refs[0], "not-an-object");
+        assert!(refs[1]["exists"].is_null());
     }
 }

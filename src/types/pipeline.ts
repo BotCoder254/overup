@@ -45,6 +45,8 @@ export interface PipelineJobPlanStep {
   name: string;
   run: string;
   shell: string;
+  /** Workspace-relative execution directory; absent = workspace root. */
+  workingDirectory?: string;
 }
 
 /** Executable snapshot persisted at pipeline creation (env pre-masked). */

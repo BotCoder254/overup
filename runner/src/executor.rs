@@ -497,7 +497,44 @@ async fn execute(
         log.system(&format!("▶ step {}/{}: {}", index + 1, payload.steps.len(), step.name))
             .await;
         step_progress(out, job_id, index as u32, total_steps, "started", None).await;
-        match run_step(&docker, &container, step, &env, log, cancel, deadline).await {
+
+        // Defense-in-depth: re-validate the payload's working directory with
+        // the shared protocol rules — the runner never trusts the control
+        // plane for path safety — then require it to exist (GitHub fails the
+        // step on a missing working-directory too).
+        let workdir = match resolve_container_workdir(step.working_dir.as_deref()) {
+            Ok(workdir) => workdir,
+            Err(()) => {
+                log.system("working directory failed validation; refusing to run the step")
+                    .await;
+                step_progress(out, job_id, index as u32, total_steps, "failed", None).await;
+                result = (JobConclusion::Failure, None, Some("workdir_missing".to_string()));
+                break;
+            }
+        };
+        if workdir != WORKSPACE_DIR {
+            log.system(&format!("working directory: {workdir}")).await;
+            match dir_exists(&docker, &container, &workdir).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    log.system(&format!(
+                        "working directory `{workdir}` does not exist in the workspace"
+                    ))
+                    .await;
+                    step_progress(out, job_id, index as u32, total_steps, "failed", None).await;
+                    result = (JobConclusion::Failure, None, Some("workdir_missing".to_string()));
+                    break;
+                }
+                Err(error) => {
+                    log.system(&format!("working directory check failed: {error}")).await;
+                    step_progress(out, job_id, index as u32, total_steps, "failed", None).await;
+                    result = (JobConclusion::Failure, None, Some("container_error".to_string()));
+                    break;
+                }
+            }
+        }
+
+        match run_step(&docker, &container, step, &env, &workdir, log, cancel, deadline).await {
             StepOutcome::Done => {
                 step_progress(out, job_id, index as u32, total_steps, "succeeded", None).await;
             }
@@ -683,11 +720,55 @@ async fn sample_stats(docker: Docker, container: String, agg: Arc<Mutex<StatsAgg
     }
 }
 
+/// Resolve a step's workspace-relative working directory onto the container
+/// path. Independent re-validation via the shared `protocol` rules: `..`,
+/// absolute paths, and backslashes are rejected there, so the plain join can
+/// never escape [`WORKSPACE_DIR`].
+fn resolve_container_workdir(step_working_dir: Option<&str>) -> Result<String, ()> {
+    match step_working_dir {
+        None => Ok(WORKSPACE_DIR.to_string()),
+        Some(raw) => match protocol::normalize_relative_path(raw) {
+            Some(path) => Ok(format!("{WORKSPACE_DIR}/{path}")),
+            None => Err(()),
+        },
+    }
+}
+
+/// Whether `path` exists as a directory inside the container. Argv-form
+/// `test -d` (no shell — the path is never interpolated into a command
+/// string); the exit code is the whole answer.
+async fn dir_exists(
+    docker: &Docker,
+    container: &str,
+    path: &str,
+) -> Result<bool, bollard::errors::Error> {
+    let exec = docker
+        .create_exec(
+            container,
+            ExecConfig {
+                cmd: Some(vec!["test".to_string(), "-d".to_string(), path.to_string()]),
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                ..Default::default()
+            },
+        )
+        .await?;
+    if let bollard::exec::StartExecResults::Attached { mut output, .. } =
+        docker.start_exec(&exec.id, None).await?
+    {
+        while output.next().await.is_some() {}
+    }
+    let inspect = docker.inspect_exec(&exec.id).await?;
+    Ok(inspect.exit_code == Some(0))
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn run_step(
     docker: &Docker,
     container: &str,
     step: &JobStep,
     env: &[String],
+    workdir: &str,
     log: &mut JobLog,
     cancel: &mut watch::Receiver<bool>,
     deadline: tokio::time::Instant,
@@ -700,7 +781,7 @@ async fn run_step(
                 env: Some(env.to_vec()),
                 attach_stdout: Some(true),
                 attach_stderr: Some(true),
-                working_dir: Some("/workspace".to_string()),
+                working_dir: Some(workdir.to_string()),
                 ..Default::default()
             },
         )
@@ -1087,6 +1168,32 @@ mod tests {
         );
         assert!(dest.path().join("src/main.rs").is_file());
         assert!(!dest.path().join("evil").exists());
+        // Subdirectories materialize on unpack — the contract the per-step
+        // working-directory existence check (`test -d`) relies on.
+        assert!(dest.path().join("src").is_dir());
+    }
+
+    #[test]
+    fn resolve_container_workdir_stays_inside_the_workspace() {
+        assert_eq!(
+            resolve_container_workdir(None).as_deref(),
+            Ok(WORKSPACE_DIR)
+        );
+        assert_eq!(
+            resolve_container_workdir(Some("scripts/build")).as_deref(),
+            Ok("/workspace/scripts/build")
+        );
+        // Normalization mirrors the control plane's.
+        assert_eq!(
+            resolve_container_workdir(Some("./scripts/")).as_deref(),
+            Ok("/workspace/scripts")
+        );
+        // The runner re-validates independently — a hostile payload never
+        // directs execution outside the workspace volume.
+        for bad in ["../x", "/abs", "a\\b", "a/../b", "", "${{ x }}"] {
+            assert_eq!(resolve_container_workdir(Some(bad)), Err(()), "{bad:?}");
+        }
+        assert_eq!(resolve_container_workdir(Some(&"a".repeat(256))), Err(()));
     }
 
     /// `./`-prefixed entries (`./repo-sha/…`) must strip the wrapper dir, not

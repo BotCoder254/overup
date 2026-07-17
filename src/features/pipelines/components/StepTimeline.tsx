@@ -131,7 +131,11 @@ export function StepTimeline({
     }
     const current = markers.size > 0 ? Math.max(...Array.from(markers.keys())) : 0;
     const finished = job.status === 'completed';
-    const failedRun = job.conclusion === 'failure' && job.errorCategory === 'step_failed';
+    // Step-attributable failures: a step ran and failed, or its working
+    // directory was missing (reported against the step that declared it).
+    const failedRun =
+      job.conclusion === 'failure' &&
+      (job.errorCategory === 'step_failed' || job.errorCategory === 'workdir_missing');
 
     return steps.map((_, index) => {
       const record = structured.get(index);
@@ -296,6 +300,11 @@ export function StepTimeline({
                 <div className="border-x border-b border-steel/20 px-2 py-1.5">
                   <div className="mb-1 flex items-center gap-2 font-mono text-[10px] text-steel">
                     <span>{step.shell}</span>
+                    {step.workingDirectory && (
+                      <span className="truncate" title="Working directory (workspace-relative)">
+                        in {step.workingDirectory}/
+                      </span>
+                    )}
                     {info.startedAt && (
                       <span>
                         started {new Date(info.startedAt).toLocaleTimeString()}

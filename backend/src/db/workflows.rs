@@ -34,6 +34,50 @@ pub async fn sync_states_for_repo(
         .collect())
 }
 
+/// Stored `fileRefs` metadata for every workflow of a repository, keyed for
+/// the sync-time Git-tree verdict refresh. The `jsonb_typeof` guard reads
+/// pre-detection metadata as an empty array, never an error.
+pub async fn file_refs_for_repo(
+    pool: &PgPool,
+    repository_id: Uuid,
+) -> sqlx::Result<Vec<(Uuid, String, serde_json::Value)>> {
+    sqlx::query_as(
+        r#"
+        SELECT id, path,
+               CASE WHEN jsonb_typeof(metadata->'fileRefs') = 'array'
+                    THEN metadata->'fileRefs'
+                    ELSE '[]'::jsonb END
+        FROM workflows
+        WHERE repository_id = $1
+        "#,
+    )
+    .bind(repository_id)
+    .fetch_all(pool)
+    .await
+}
+
+/// Refresh one workflow's `fileRefs` verdicts in place (sync transaction) —
+/// used for workflows whose file did not change but whose referenced paths
+/// gained or lost existence on the default branch.
+pub async fn update_file_refs(
+    tx: &mut Transaction<'_, Postgres>,
+    workflow_id: Uuid,
+    file_refs: &serde_json::Value,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE workflows
+        SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{fileRefs}', $2)
+        WHERE id = $1
+        "#,
+    )
+    .bind(workflow_id)
+    .bind(file_refs)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 /// Upsert one workflow and replace its job rows. Runs inside the sync
 /// transaction so a failed sync leaves the previous snapshot intact.
 #[allow(clippy::too_many_arguments)]

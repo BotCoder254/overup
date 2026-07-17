@@ -18,7 +18,7 @@ use super::github_app::MAX_WORKFLOW_FILE_BYTES;
 /// whose stamped version is older, even when its blob sha is unchanged —
 /// otherwise new metadata (e.g. the detected-requirements ref arrays) would
 /// never materialize for files that don't change on GitHub.
-pub const PARSER_VERSION: i64 = 3;
+pub const PARSER_VERSION: i64 = 4;
 
 /// Resource budgets: a workflow file that exceeds these is hostile or
 /// broken, not "large". They bound both memory and walk time.
@@ -227,6 +227,7 @@ pub fn parse_and_validate(content: &str) -> ParsedWorkflow {
         "environments": distinct_environments(&jobs),
         "dispatchInputs": extract_dispatch_inputs(root, &mut diagnostics),
         "triggerFilters": extract_trigger_filters(root, &mut diagnostics),
+        "fileRefs": detect_file_refs(root, &mut diagnostics),
     });
 
     ParsedWorkflow {
@@ -932,6 +933,205 @@ fn extract_ref_name(after: &str) -> Option<String> {
     is_ref_ident(&name).then_some(name)
 }
 
+// ---------------------------------------------------------------------------
+// Static file-reference detection (working directories + script paths)
+// ---------------------------------------------------------------------------
+
+/// Cap on detected file references per workflow — same budget family as
+/// `scan_context_refs`.
+const MAX_FILE_REFS: usize = 100;
+
+/// A `working-directory` value as read from the document.
+enum WorkdirValue {
+    /// Key absent.
+    None,
+    /// Contains `${{ … }}` — resolved at dispatch, statically unknowable.
+    Dynamic,
+    /// Statically valid, normalized workspace-relative path.
+    Static(String),
+    /// Present but rejected (a warning diagnostic was emitted).
+    Invalid,
+}
+
+impl WorkdirValue {
+    fn static_path(&self) -> Option<&str> {
+        match self {
+            WorkdirValue::Static(path) => Some(path),
+            _ => None,
+        }
+    }
+}
+
+/// The `defaults.run.working-directory` node under a workflow root or job
+/// mapping, if present.
+fn defaults_run_working_directory(node: &Mapping) -> Option<&Value> {
+    get(node, "defaults")
+        .and_then(Value::as_mapping)
+        .and_then(|d| get(d, "run"))
+        .and_then(Value::as_mapping)
+        .and_then(|r| get(r, "working-directory"))
+}
+
+/// Read + validate one `working-directory` value. Invalid values are a
+/// WARNING (the step still runs, at the workspace root — the planner emits a
+/// matching notice), never a parse error.
+fn read_working_directory(
+    value: Option<&Value>,
+    path: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> WorkdirValue {
+    let Some(value) = value else {
+        return WorkdirValue::None;
+    };
+    let Some(raw) = value.as_str() else {
+        diagnostics.push(Diagnostic::warning(
+            "`working-directory` must be a string; the affected steps run at the workspace root",
+            Some(path.to_string()),
+        ));
+        return WorkdirValue::Invalid;
+    };
+    if raw.contains("${{") {
+        return WorkdirValue::Dynamic;
+    }
+    match protocol::normalize_relative_path(raw) {
+        Some(normalized) => WorkdirValue::Static(normalized),
+        None => {
+            diagnostics.push(Diagnostic::warning(
+                format!(
+                    "working-directory `{}` is not a supported workspace-relative path; \
+                     the affected steps run at the workspace root",
+                    sanitize_fragment(raw)
+                ),
+                Some(path.to_string()),
+            ));
+            WorkdirValue::Invalid
+        }
+    }
+}
+
+/// Control-strip + cap a document fragment before echoing it into a
+/// diagnostic message.
+fn sanitize_fragment(value: &str) -> String {
+    value.chars().filter(|c| !c.is_control()).take(100).collect()
+}
+
+/// Detect statically-checkable file references: `working-directory` values
+/// (workflow/job/step level) and plainly-written script paths in `run:`
+/// commands. Entries are `{path, kind: "workdir"|"script"}`; repository sync
+/// annotates each with an `exists` verdict from the Git tree. Advisory only —
+/// runtime execution stays authoritative.
+///
+/// The script heuristic is deliberately conservative: a whitespace-separated
+/// token of a `run:` line counts only when it contains no shell
+/// metacharacters (`$ * ? { } ( ) ` ' " | ; & < >`) AND either starts with
+/// `./` or ends in a well-known script extension, AND passes
+/// `normalize_relative_path`. Tokens are resolved against the step's
+/// effective STATIC working directory; steps with a dynamic (`${{ … }}`)
+/// working directory are skipped — a verdict there would be meaningless.
+fn detect_file_refs(root: &Mapping, diagnostics: &mut Vec<Diagnostic>) -> Vec<serde_json::Value> {
+    let workflow_wd = read_working_directory(
+        defaults_run_working_directory(root),
+        "defaults.run.working-directory",
+        diagnostics,
+    );
+
+    // (path, kind) pairs; BTreeSet gives dedupe + deterministic order.
+    let mut refs: std::collections::BTreeSet<(String, &'static str)> =
+        std::collections::BTreeSet::new();
+    if let Some(path) = workflow_wd.static_path() {
+        refs.insert((path.to_string(), "workdir"));
+    }
+
+    let jobs = get(root, "jobs").and_then(Value::as_mapping);
+    for (key, body) in jobs.into_iter().flatten().take(MAX_JOBS) {
+        let (Some(job_key), Some(job)) = (key_name(key), body.as_mapping()) else {
+            continue;
+        };
+        let job_wd = read_working_directory(
+            defaults_run_working_directory(job),
+            &format!("jobs.{job_key}.defaults.run.working-directory"),
+            diagnostics,
+        );
+        if let Some(path) = job_wd.static_path() {
+            refs.insert((path.to_string(), "workdir"));
+        }
+        let job_default = match &job_wd {
+            WorkdirValue::None => &workflow_wd,
+            other => other,
+        };
+
+        let steps = get(job, "steps").and_then(Value::as_sequence);
+        for (index, step) in steps.into_iter().flatten().enumerate().take(MAX_STEPS_PER_JOB) {
+            let Some(step) = step.as_mapping() else {
+                continue;
+            };
+            let step_wd = read_working_directory(
+                get(step, "working-directory"),
+                &format!("jobs.{job_key}.steps[{index}].working-directory"),
+                diagnostics,
+            );
+            if let Some(path) = step_wd.static_path() {
+                refs.insert((path.to_string(), "workdir"));
+            }
+            let effective = match &step_wd {
+                WorkdirValue::None => job_default,
+                other => other,
+            };
+            // Dynamic workdir ⇒ script paths can't be resolved statically.
+            if matches!(effective, WorkdirValue::Dynamic) {
+                continue;
+            }
+            let base = effective.static_path();
+            if let Some(run) = get(step, "run").and_then(Value::as_str) {
+                for token in run.split_whitespace() {
+                    if refs.len() >= MAX_FILE_REFS * 2 {
+                        break;
+                    }
+                    if let Some(path) = script_ref(token, base) {
+                        refs.insert((path, "script"));
+                    }
+                }
+            }
+        }
+    }
+
+    refs.into_iter()
+        .take(MAX_FILE_REFS)
+        .map(|(path, kind)| serde_json::json!({ "path": path, "kind": kind }))
+        .collect()
+}
+
+/// Script-path candidate check for one `run:` token — see
+/// [`detect_file_refs`] for the full heuristic. Returns the workspace-relative
+/// path (joined onto `base` when the step runs in a subdirectory).
+fn script_ref(token: &str, base: Option<&str>) -> Option<String> {
+    const SCRIPT_EXTENSIONS: &[&str] = &[
+        ".sh", ".bash", ".ps1", ".py", ".js", ".ts", ".mjs", ".cjs", ".rb", ".pl",
+    ];
+    if token.chars().any(|c| {
+        matches!(
+            c,
+            '$' | '*' | '?' | '{' | '}' | '(' | ')' | '`' | '\'' | '"' | '|' | ';' | '&' | '<'
+                | '>'
+        )
+    }) {
+        return None;
+    }
+    let candidate = token.starts_with("./")
+        || SCRIPT_EXTENSIONS
+            .iter()
+            .any(|ext| token.len() > ext.len() && token.ends_with(ext));
+    if !candidate {
+        return None;
+    }
+    let normalized = protocol::normalize_relative_path(token)?;
+    let joined = match base {
+        Some(base) => format!("{base}/{normalized}"),
+        None => normalized,
+    };
+    (joined.len() <= protocol::MAX_RELATIVE_PATH_BYTES).then_some(joined)
+}
+
 /// A trimmed expression that is EXACTLY one `secrets.NAME` / `vars.NAME`
 /// reference (dot or bracket form, nothing before or after) — the only
 /// shape `substitute_context_refs` will resolve. Compound expressions are
@@ -1118,6 +1318,131 @@ jobs:
         assert_eq!(parsed.jobs.len(), 2);
         assert_eq!(parsed.jobs[1].needs, vec!["build"]);
         assert_eq!(parsed.metadata["secretRefs"][0], "DEPLOY_KEY");
+    }
+
+    fn file_refs(parsed: &ParsedWorkflow) -> Vec<(String, String)> {
+        parsed.metadata["fileRefs"]
+            .as_array()
+            .expect("fileRefs must be an array")
+            .iter()
+            .map(|r| {
+                (
+                    r["path"].as_str().unwrap().to_string(),
+                    r["kind"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn working_directories_land_in_file_refs() {
+        let parsed = parse_and_validate(
+            r#"
+on: push
+defaults:
+  run:
+    working-directory: packages
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./cloudflare/knowledge-ai-worker/
+    steps:
+      - run: npx tsc -p tsconfig.json
+      - working-directory: frontend
+        run: npm ci
+"#,
+        );
+        assert_eq!(parsed.status(), "valid");
+        let refs = file_refs(&parsed);
+        assert!(refs.contains(&("packages".into(), "workdir".into())));
+        // Normalized: leading `./` and trailing `/` stripped.
+        assert!(refs.contains(&("cloudflare/knowledge-ai-worker".into(), "workdir".into())));
+        assert!(refs.contains(&("frontend".into(), "workdir".into())));
+    }
+
+    #[test]
+    fn invalid_working_directory_warns_and_is_excluded() {
+        let parsed = parse_and_validate(
+            "on: push\njobs:\n  a:\n    steps:\n      - working-directory: ../escape\n        run: ls\n",
+        );
+        assert_eq!(parsed.status(), "warnings");
+        assert!(
+            parsed
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("not a supported workspace-relative path"))
+        );
+        assert!(file_refs(&parsed).iter().all(|(_, kind)| kind != "workdir"));
+    }
+
+    #[test]
+    fn dynamic_working_directory_is_silently_excluded() {
+        let parsed = parse_and_validate(
+            "on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - working-directory: ${{ vars.DIR }}\n        run: ./build.sh\n",
+        );
+        assert_eq!(parsed.status(), "valid");
+        // Dynamic workdir also suppresses script detection for the step.
+        assert!(file_refs(&parsed).is_empty());
+    }
+
+    #[test]
+    fn non_string_working_directory_warns() {
+        let parsed = parse_and_validate(
+            "on: push\njobs:\n  a:\n    defaults:\n      run:\n        working-directory: [x]\n    steps:\n      - run: ls\n",
+        );
+        assert_eq!(parsed.status(), "warnings");
+        assert!(
+            parsed
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("`working-directory` must be a string"))
+        );
+    }
+
+    #[test]
+    fn script_refs_are_detected_conservatively() {
+        let parsed = parse_and_validate(
+            r#"
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: ./scripts/build.sh
+      - run: bash scripts/test.sh
+      - run: curl https://example.com/x.sh
+      - run: ./$DIR/x.sh
+      - run: echo "quoted.sh"
+"#,
+        );
+        let refs = file_refs(&parsed);
+        assert!(refs.contains(&("scripts/build.sh".into(), "script".into())));
+        assert!(refs.contains(&("scripts/test.sh".into(), "script".into())));
+        assert_eq!(
+            refs.iter().filter(|(_, kind)| kind == "script").count(),
+            2,
+            "URLs, dynamic tokens, and quoted strings must not match: {refs:?}"
+        );
+    }
+
+    #[test]
+    fn script_refs_resolve_against_the_static_workdir() {
+        let parsed = parse_and_validate(
+            "on: push\njobs:\n  a:\n    defaults:\n      run:\n        working-directory: pkg\n    steps:\n      - run: ./build.sh\n",
+        );
+        let refs = file_refs(&parsed);
+        assert!(refs.contains(&("pkg/build.sh".into(), "script".into())));
+    }
+
+    #[test]
+    fn file_refs_are_capped() {
+        let steps: String = (0..150)
+            .map(|i| format!("      - run: ./script-{i}.sh\n"))
+            .collect();
+        let parsed = parse_and_validate(&format!("on: push\njobs:\n  a:\n    steps:\n{steps}"));
+        assert!(file_refs(&parsed).len() <= 100);
     }
 
     #[test]

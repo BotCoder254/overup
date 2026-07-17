@@ -144,8 +144,49 @@ pub struct WorkflowDetailResponse {
     pub jobs: Vec<WorkflowJobResponse>,
 }
 
+/// Read-time re-filter for `metadata.fileRefs` (the detected-requirements
+/// defense-in-depth pattern): only well-formed entries — object shape, kind
+/// allow-list, path re-validated against the shared relative-path rules,
+/// `exists` bool-or-null — reach the browser, capped at 100. Hand-edited or
+/// pre-detection metadata reads as an empty list.
+fn sanitize_file_refs(metadata: &mut serde_json::Value) {
+    let Some(object) = metadata.as_object_mut() else {
+        return;
+    };
+    let Some(refs) = object.get_mut("fileRefs") else {
+        return;
+    };
+    let sanitized: Vec<serde_json::Value> = refs
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| {
+                    let obj = entry.as_object()?;
+                    let path = obj.get("path")?.as_str()?;
+                    let kind = obj.get("kind")?.as_str()?;
+                    if !matches!(kind, "workdir" | "script")
+                        || protocol::normalize_relative_path(path).as_deref() != Some(path)
+                    {
+                        return None;
+                    }
+                    let exists = match obj.get("exists") {
+                        Some(serde_json::Value::Bool(b)) => serde_json::Value::Bool(*b),
+                        _ => serde_json::Value::Null,
+                    };
+                    Some(serde_json::json!({ "path": path, "kind": kind, "exists": exists }))
+                })
+                .take(100)
+                .collect()
+        })
+        .unwrap_or_default();
+    *refs = serde_json::Value::Array(sanitized);
+}
+
 impl WorkflowDetailResponse {
     pub fn from_rows(row: WorkflowDetailRow, jobs: Vec<WorkflowJobRow>) -> Self {
+        let mut metadata = row.metadata;
+        sanitize_file_refs(&mut metadata);
         Self {
             id: row.id,
             repository_id: row.repository_id,
@@ -158,7 +199,7 @@ impl WorkflowDetailResponse {
             file_size: row.file_size,
             raw_content: row.raw_content,
             triggers: row.triggers,
-            metadata: row.metadata,
+            metadata,
             job_count: row.job_count,
             validation_status: row.validation_status,
             validation_errors: row.validation_errors,

@@ -248,6 +248,43 @@ always masks, so a substituted-into-run secret still masks in logs. Secrets also
 continue to inject as env vars under their own names (precedence: plan env <
 workspace < repository < environment).
 
+**Working directories + detected file references (execution contexts).** Every job already
+executes against a complete immutable repository snapshot (commit-SHA tarball streamed
+into `/workspace`); this layer adds GitHub-style **`working-directory`** on top: workflow
+`defaults.run.working-directory` < job `defaults.run.working-directory` < step
+`working-directory` (most specific wins), resolved in `pipeline_plan.rs` into a per-step
+plan field `workingDirectory` (present only when set). Paths are validated by ONE shared
+rule — `protocol::normalize_relative_path` (strips `./`+trailing `/`; ≤255 B, ≤32
+segments, per-segment `[A-Za-z0-9._-]+`, rejects `..`/absolute/`\`/control chars) — used
+by the parser (warning diagnostics), planner (invalid → notice + step runs at workspace
+root, never a parse error), scheduler (post-`${{ }}`-substitution re-validation; failure
+fails the job closed with server-written static `workdir_invalid`, the
+checkout_unavailable pattern — never silently run at the root), and the runner
+(independent re-check; a hostile payload can't escape `/workspace`). The runner resolves
+the dir onto `/workspace/<path>`, verifies existence with an argv-form `test -d` exec
+(no shell interpolation) before the step, and fails the step with runner-reported
+`workdir_missing` (in the runner_ws allow-list) when absent — GitHub semantics.
+Expressions in `working-directory` ship verbatim in the plan and substitute at dispatch.
+`JobStep.working_dir` is `#[serde(default)]` (no protocol version bump), but an OLD
+runner ignores it and runs at `/workspace` — update runners when adopting the feature.
+**Static file-reference analysis**: parser v4 (`PARSER_VERSION = 4` — bump forces the
+one-time re-parse) detects `fileRefs` into `workflows.metadata` — every static workdir
+plus conservative script tokens in `run:` (no shell metacharacters, `./`-prefixed or
+known script extension, resolved against the step's static workdir; dynamic workdirs
+skip detection) — capped 100 entries/255 B, deduped, sorted. At sync time
+(`repo_sync.rs::fetch_tree_sets`), when any workflow has refs, ONE recursive Git-tree
+fetch of the default branch head (`github_app::get_git_tree`, segments +
+`is_safe_commit_ref` validated pre-interpolation, GitHub's `truncated` honored, tree
+transient — never persisted/logged) stamps `exists: true|false|null` per ref
+(`annotate_file_refs`; workdirs must be tree dirs, scripts blobs); every failure mode
+fails OPEN to `null` (unverified) and unchanged workflows get compare-before-write
+verdict refreshes in the sync transaction (`db::workflows::update_file_refs`) so a push
+deleting a script updates verdicts without a workflow change. Advisory only — runtime is
+authoritative. Read surface: `sanitize_file_refs` re-filters at read time (kind
+allow-list + path re-validation + cap) before `WorkflowDetailResponse` ships metadata;
+the workflow Metadata tab renders a "Files referenced" section (found/not found/
+unverified badges), and the pipeline step timeline shows `in <dir>/` per step.
+
 **Notification Center (operational inbox).** Notifications are a per-user, actionable
 PROJECTION of the immutable `audit_logs` ledger — the Activity Feed keeps the complete
 history, notifications hold only what a user should act on (OWASP's audit-vs-messaging
@@ -710,7 +747,19 @@ into a traversal-safe tar streamed into the container via the Docker archive API
   ceilings) and dropped whole on any violation — the upload itself still succeeds
 - Pipeline conclusions and `sync_error`-style fields hold static category strings only
   (`runner_lost`, `timeout`, `step_failed`, `checkout_unavailable`,
-  `secrets_unavailable`, ...) — never upstream/runner text
+  `secrets_unavailable`, `workdir_invalid`, `workdir_missing`, ...) — never
+  upstream/runner text
+- **Working-directory paths are validated by one shared rule at every boundary**:
+  `protocol::normalize_relative_path` runs in the parser, the planner, the scheduler
+  (again AFTER `${{ }}` substitution — a secret resolving into `../` fails the job
+  closed with `workdir_invalid`, never a silent workspace-root run), the workflow-detail
+  read sanitizer, and independently in the runner before joining onto `/workspace`
+  (traversal, absolute paths, backslashes, control chars rejected); the runner checks
+  existence with an argv-form `test -d` (path never interpolated into a shell string).
+  `fileRefs` metadata is re-filtered at read time; the sync-time Git-tree fetch
+  validates owner/repo/commit segments before URL interpolation, honors GitHub's
+  `truncated` flag by failing open, and holds the tree transiently — never persisted,
+  never logged
 - **Secrets are write-only and envelope-encrypted**: AES-256-GCM under a fresh per-secret
   DEK, DEK wrapped by `SECRETS_MASTER_KEY` (32 bytes, validated at startup), row UUID as
   AEAD associated data; Postgres holds ciphertext only, there is no retrieval endpoint,

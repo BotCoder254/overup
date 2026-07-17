@@ -202,6 +202,26 @@ async fn assign_eligible(state: &AppState) -> anyhow::Result<()> {
                     pipeline_run::on_job_finished(state, &finished).await?;
                 }
             }
+            Ok(DispatchOutcome::WorkdirInvalid) => {
+                // A step's working-directory failed validation after
+                // expression substitution. Re-dispatching would re-fail
+                // identically, and running the step at the workspace root
+                // instead could execute commands against the wrong
+                // directory — fail closed with a static category.
+                state.log_hub.clear_masks(claimed.id);
+                db::runners::release(&state.pool, runner.id).await?;
+                used.remove(&runner.id);
+                if let Some(finished) = db::pipeline_jobs::force_finish(
+                    &state.pool,
+                    claimed.id,
+                    "failure",
+                    Some("workdir_invalid"),
+                )
+                .await?
+                {
+                    pipeline_run::on_job_finished(state, &finished).await?;
+                }
+            }
             Ok(DispatchOutcome::Unreachable) | Err(_) => {
                 // Couldn't build or deliver the payload: undo the claim.
                 state.log_hub.clear_masks(claimed.id);
@@ -229,12 +249,6 @@ pub(crate) fn labels_satisfy(runs_on: &[String], runner_labels: &[String]) -> bo
     })
 }
 
-/// Commit refs are interpolated into the tarball URL; only plain hex-ish
-/// revision identifiers pass.
-fn is_safe_commit_ref(value: &str) -> bool {
-    (7..=64).contains(&value.len()) && value.chars().all(|c| c.is_ascii_alphanumeric())
-}
-
 /// How one dispatch attempt ended.
 enum DispatchOutcome {
     /// Payload signed and delivered to the runner's connection.
@@ -249,6 +263,35 @@ enum DispatchOutcome {
     /// without the credentials the workflow depends on would be worse
     /// than failing.
     SecretsUnavailable,
+    /// A step's `working-directory` failed validation after expression
+    /// substitution (e.g. a secret resolved into a traversal). Running the
+    /// step at the workspace root instead would execute commands in an
+    /// unintended directory — the exact failure this feature prevents — so
+    /// the job fails closed with a static category.
+    WorkdirInvalid,
+}
+
+/// Resolve one plan step's `workingDirectory` for dispatch: substitute
+/// `${{ secrets/vars }}` expressions (same lookup as env/run), then ALWAYS
+/// re-validate the final string — the plan JSONB is data, not trusted, and
+/// an expression may have resolved into a traversal. `Err` means the value
+/// is unsafe and the job must fail closed.
+fn resolve_step_workdir(
+    raw: Option<&str>,
+    lookup: &dyn Fn(&str, &str) -> Option<String>,
+) -> Result<Option<String>, ()> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let resolved = if raw.contains("${{") {
+        workflow_parse::substitute_context_refs(raw, lookup)
+    } else {
+        raw.to_string()
+    };
+    match protocol::normalize_relative_path(&resolved) {
+        Some(normalized) => Ok(Some(normalized)),
+        None => Err(()),
+    }
 }
 
 /// Build, sign, and send the job payload.
@@ -413,32 +456,50 @@ async fn dispatch(
         env.insert(name.clone(), value.clone());
     }
 
-    let steps: Vec<protocol::JobStep> = job
+    let plan_steps = job
         .plan
         .get("steps")
         .and_then(|s| s.as_array())
-        .map(|steps| {
-            steps
-                .iter()
-                .filter_map(|step| {
-                    let run = step.get("run")?.as_str()?;
-                    Some(protocol::JobStep {
-                        name: step.get("name")?.as_str()?.to_string(),
-                        run: if run.contains("${{") {
-                            workflow_parse::substitute_context_refs(run, &lookup)
-                        } else {
-                            run.to_string()
-                        },
-                        shell: step
-                            .get("shell")
-                            .and_then(|s| s.as_str())
-                            .unwrap_or("sh")
-                            .to_string(),
-                    })
-                })
-                .collect()
-        })
+        .cloned()
         .unwrap_or_default();
+    let mut steps: Vec<protocol::JobStep> = Vec::with_capacity(plan_steps.len());
+    for step in &plan_steps {
+        let (Some(run), Some(name)) = (
+            step.get("run").and_then(|r| r.as_str()),
+            step.get("name").and_then(|n| n.as_str()),
+        ) else {
+            continue;
+        };
+        let working_dir = match resolve_step_workdir(
+            step.get("workingDirectory").and_then(|w| w.as_str()),
+            &lookup,
+        ) {
+            Ok(working_dir) => working_dir,
+            Err(()) => {
+                // Job id only — the substituted value may embed secret
+                // material and must never reach the logs.
+                tracing::warn!(
+                    job_id = %job.id,
+                    "step working-directory failed validation after substitution; failing the job closed"
+                );
+                return Ok(DispatchOutcome::WorkdirInvalid);
+            }
+        };
+        steps.push(protocol::JobStep {
+            name: name.to_string(),
+            run: if run.contains("${{") {
+                workflow_parse::substitute_context_refs(run, &lookup)
+            } else {
+                run.to_string()
+            },
+            shell: step
+                .get("shell")
+                .and_then(|s| s.as_str())
+                .unwrap_or("sh")
+                .to_string(),
+            working_dir,
+        });
+    }
 
     // Everything that must never surface in logs is registered before the
     // payload leaves the process. Managed secrets are masked
@@ -502,7 +563,7 @@ async fn build_checkout(
 
     if !github_app::is_safe_name_segment(&repository.owner)
         || !github_app::is_safe_name_segment(&repository.name)
-        || !is_safe_commit_ref(commit_sha)
+        || !github_app::is_safe_commit_ref(commit_sha)
     {
         anyhow::bail!("repository identity or commit ref failed validation");
     }
@@ -536,10 +597,37 @@ async fn build_checkout(
 
 #[cfg(test)]
 mod tests {
-    use super::labels_satisfy;
+    use super::{labels_satisfy, resolve_step_workdir};
 
     fn v(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn resolve_step_workdir_validates_after_substitution() {
+        let lookup = |context: &str, name: &str| -> Option<String> {
+            match (context, name) {
+                ("vars", "GOOD") => Some("sub/dir".into()),
+                ("vars", "EVIL") => Some("../escape".into()),
+                ("vars", _) => Some(String::new()),
+                _ => None,
+            }
+        };
+        assert_eq!(resolve_step_workdir(None, &lookup), Ok(None));
+        assert_eq!(
+            resolve_step_workdir(Some("scripts"), &lookup),
+            Ok(Some("scripts".into()))
+        );
+        assert_eq!(
+            resolve_step_workdir(Some("${{ vars.GOOD }}"), &lookup),
+            Ok(Some("sub/dir".into()))
+        );
+        // An expression resolving into a traversal fails closed.
+        assert_eq!(resolve_step_workdir(Some("${{ vars.EVIL }}"), &lookup), Err(()));
+        // Unset vars resolve to "" — empty is invalid, never workspace root.
+        assert_eq!(resolve_step_workdir(Some("${{ vars.UNSET }}"), &lookup), Err(()));
+        // Static garbage in the plan JSONB (data, not trusted) also fails.
+        assert_eq!(resolve_step_workdir(Some("../x"), &lookup), Err(()));
     }
 
     #[test]

@@ -61,6 +61,17 @@ export interface WorkflowDetail extends WorkflowSummary {
     environments?: string[];
     /** Absent on workflows synced before dispatch-input parsing shipped. */
     dispatchInputs?: WorkflowDispatchInput[];
+    /**
+     * Detected file references (working directories + script paths), each
+     * verified against the default branch's Git tree at sync time.
+     * `exists: null` = unverified (tree unavailable/truncated — advisory
+     * only, runtime stays authoritative). Absent on pre-detection parses.
+     */
+    fileRefs?: Array<{
+      path: string;
+      kind: 'workdir' | 'script';
+      exists: boolean | null;
+    }>;
   };
   validationErrors: Diagnostic[];
   lastCommitMessage: string | null;
