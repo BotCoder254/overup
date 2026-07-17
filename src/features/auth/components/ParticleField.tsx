@@ -11,8 +11,8 @@ import { cn } from '../../../lib/cn';
  */
 
 const PARTICLE_COUNT = 50;
-const PARTICLE_SIZE = 5;
-const ROAM_OPACITY = 0.5;
+const PARTICLE_SIZE = 12;
+const ROAM_OPACITY = 0.85;
 const REPULSION_FORCE = 10;
 const REPULSION_RADIUS = 50;
 const TRANSITION_MS = 800;
@@ -286,9 +286,9 @@ export function ParticleField({ className }: ParticleFieldProps) {
             const ix = px0 + dx;
             if (ix < 0 || ix >= PW) continue;
             const i = (row + ix) * 4;
-            buf[i] = 255;
-            buf[i + 1] = 255;
-            buf[i + 2] = 255;
+            buf[i] = 0;
+            buf[i + 1] = 0;
+            buf[i + 2] = 0;
             buf[i + 3] = alpha;
           }
         }

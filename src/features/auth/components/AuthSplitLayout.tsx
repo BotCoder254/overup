@@ -9,10 +9,9 @@ interface AuthSplitLayoutProps {
 /**
  * The single layout shared by every authentication and onboarding page: a
  * full-height 50/50 split with no floating card and no divider between the
- * halves. Left half is the interaction panel with its content centered;
- * right half is a solid navy branding panel (hidden below `lg`) with an
- * interactive particle backdrop, the logo top-right, and the copyright
- * bottom-right.
+ * halves. Left half is the interaction panel with its content centered
+ * (logo top-left); right half is a white branding panel (hidden below `lg`)
+ * with an interactive black-particle backdrop and the copyright bottom-right.
  */
 export function AuthSplitLayout({ children }: AuthSplitLayoutProps) {
   const year = new Date().getFullYear();
@@ -28,16 +27,13 @@ export function AuthSplitLayout({ children }: AuthSplitLayoutProps) {
         </main>
       </section>
 
-      <aside className="relative hidden overflow-hidden bg-navy text-white lg:block">
+      <aside className="relative hidden overflow-hidden bg-canvas text-charcoal lg:block">
         <ParticleField className="absolute inset-0 h-full w-full" />
 
         {/* Overlay chrome must not swallow the canvas hover interaction. */}
-        <div className="pointer-events-none relative z-10 flex h-full flex-col justify-between">
-          <header className="flex justify-end p-10">
-            <Logo size="md" />
-          </header>
+        <div className="pointer-events-none relative z-10 flex h-full flex-col justify-end">
           <footer className="flex justify-end p-10">
-            <p className="text-sm text-white/60">&copy; {year} overup. All rights reserved.</p>
+            <p className="text-sm text-steel">&copy; {year} overup. All rights reserved.</p>
           </footer>
         </div>
       </aside>
