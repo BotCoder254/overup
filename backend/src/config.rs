@@ -472,7 +472,7 @@ fn required(key: &str) -> anyhow::Result<String> {
 /// weak key pass the entropy floor. Same rule as SECRETS_MASTER_KEY.
 ///
 /// The value is never logged, and never appears in the error.
-fn shared_secret(key: &str, raw: String, min_len: usize) -> anyhow::Result<String> {
+pub(crate) fn shared_secret(key: &str, raw: String, min_len: usize) -> anyhow::Result<String> {
     let value = raw.trim().to_string();
     if value.len() < min_len {
         anyhow::bail!(

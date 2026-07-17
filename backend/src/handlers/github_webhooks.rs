@@ -545,6 +545,36 @@ mod tests {
         );
     }
 
+    /// The seam the outage actually lived at: a real env var carrying a
+    /// trailing newline, loaded the way boot loads it, verified against a
+    /// signature GitHub computed from the clean secret. Chains
+    /// config::shared_secret → verify_signature so neither side can regress
+    /// alone. Uses a uniquely-named var (env is process-global and tests run
+    /// in parallel).
+    #[test]
+    fn env_secret_with_trailing_newline_verifies_after_config_load() {
+        const VAR: &str = "OVERUP_TEST_WEBHOOK_SECRET_SEAM";
+        let clean = "0123456789abcdef0123456789abcdef";
+        // What GitHub signs with — the secret as configured on the App.
+        let signature = sign(clean, DOC_BODY);
+
+        // What the env panel actually hands the process.
+        unsafe { std::env::set_var(VAR, format!("{clean}\n")) };
+        let raw = std::env::var(VAR).unwrap();
+
+        // Before the fix this raw value reached the MAC and 401'd everything.
+        assert_eq!(
+            verify_signature(&raw, &signed(&signature), DOC_BODY),
+            Err(SignatureError::Mismatch)
+        );
+
+        // Through the real load path, it verifies.
+        let loaded = crate::config::shared_secret(VAR, raw, 16).unwrap();
+        assert_eq!(verify_signature(&loaded, &signed(&signature), DOC_BODY), Ok(()));
+
+        unsafe { std::env::remove_var(VAR) };
+    }
+
     /// Causes are static, log-safe labels — no secret or digest material.
     #[test]
     fn cause_labels_are_static_categories() {
