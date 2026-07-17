@@ -285,6 +285,27 @@ allow-list + path re-validation + cap) before `WorkflowDetailResponse` ships met
 the workflow Metadata tab renders a "Files referenced" section (found/not found/
 unverified badges), and the pipeline step timeline shows `in <dir>/` per step.
 
+**Checkout model + its known limits.** The execution context is the complete repository
+at an immutable commit — `scheduler.rs::build_checkout` pins the tarball URL to
+`pipeline.commit_sha` (never a branch ref, so a push racing a job cannot change what
+builds), and the runner reconstructs the tree into `/workspace` BEFORE any container
+starts. Execution never reads repository content from Postgres: sync exists for workflow
+discovery, trigger evaluation, and UI only, so a script added moments before a push is
+present at runtime. Deliberate non-goals, all consequences of tarball-over-API rather
+than git (`git2` stays rejected — heavy native dep on Windows, and the API needs no
+cloning):
+- **No `.git` directory.** `/workspace` is a plain snapshot, so `git describe`,
+  `git rev-parse HEAD`, `git diff HEAD~1`, and version tools that read git metadata
+  (`setuptools-scm`, nbgv, changelog generators) fail. The largest gap vs
+  `actions/checkout`. Pass the SHA through env instead.
+- **Symlinks and hardlinks are dropped**, not just escaping ones — a link target can't be
+  validated by path checks. A repo that legitimately contains symlinks materializes
+  incompletely, and today this surfaces only as a runner-side `tracing::warn`, not in the
+  job log the user reads.
+- **No submodules, sparse checkout, shallow/`fetch-depth`, or LFS.**
+- **No repository cache** — every job re-downloads the full tarball (1 GiB compressed
+  cap; the repackaged tar is buffered in memory, so the decompressed size is unbounded).
+
 **Notification Center (operational inbox).** Notifications are a per-user, actionable
 PROJECTION of the immutable `audit_logs` ledger — the Activity Feed keeps the complete
 history, notifications hold only what a user should act on (OWASP's audit-vs-messaging
@@ -631,8 +652,17 @@ into a traversal-safe tar streamed into the container via the Docker archive API
 - Webhooks: constant-time HMAC-SHA256 over the raw body (`X-Hub-Signature-256`) before any
   parsing; `X-GitHub-Delivery` primary key makes redeliveries no-ops (a redelivery only
   revives a terminally FAILED row for another processing round); payloads are parsed
-  into minimal typed envelopes and never logged; `GITHUB_WEBHOOK_SECRET` must be ≥ 16
-  bytes at boot (signing-key parity — a guessable secret would let anyone forge deliveries)
+  into minimal typed envelopes and never logged. Shared HMAC secrets whose bytes must
+  match a counterparty's exactly (`GITHUB_WEBHOOK_SECRET`, `RUNNER_JOB_SIGNING_KEY`) load
+  through `config.rs::shared_secret`: **trimmed FIRST, then length-checked** (≥16 / ≥32
+  bytes) — measuring the untrimmed value would let a padded weak secret pass the entropy
+  floor, and surrounding whitespace is invisible in an env panel while changing every MAC
+  (it caused a total webhook outage: every delivery 401'd). Quote-wrapped values are
+  warned about, never stripped — a secret may legitimately contain a quote. A rejected
+  delivery logs a static `cause=` (`missing_header`/`malformed_header`/`bad_prefix`/
+  `invalid_hex`/`mismatch`) plus the delivery id, so a misconfiguration is diagnosable
+  from one line; the response stays a flat 401 and the signature/digest/secret are never
+  logged
 - **Webhook processing is async and durable**: the HTTP handler only verifies, validates,
   persists a NORMALIZED server-built payload (strings ≤512 B, changed paths deduped/capped
   at 300 with a truncation flag, avatars sanitized — never the raw body), and acks 2xx;

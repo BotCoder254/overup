@@ -141,17 +141,34 @@ pub async fn receive(
     headers: HeaderMap,
     body: Bytes,
 ) -> StatusCode {
+    // Read the identifying headers first so a rejection can name the delivery.
+    // Both are UNAUTHENTICATED at this point: `header_str` caps them at
+    // MAX_HEADER_LEN and they are only ever emitted as tracing fields (which
+    // escape their values), never interpolated into a message or a query. The
+    // BAD_REQUEST gates for absent headers stay below verification so an
+    // unauthenticated caller can't tell the two rejections apart.
+    let event = header_str(&headers, "x-github-event");
+    let delivery_id = header_str(&headers, "x-github-delivery");
+
     // 1. Authenticate the delivery before touching the payload.
-    if !verify_signature(&state.config.github_webhook_secret, &headers, &body) {
-        // Generic 401; nothing about the payload or signature is logged.
-        tracing::warn!("webhook delivery failed signature verification");
+    if let Err(cause) = verify_signature(&state.config.github_webhook_secret, &headers, &body) {
+        // Static cause only — never the signature, the expected digest, the
+        // secret, or any body bytes. `cause=mismatch` means the configured
+        // secret differs from the App's; `cause=missing_header` means the App
+        // has no secret set at all.
+        tracing::warn!(
+            cause = cause.as_str(),
+            event = event.as_deref().unwrap_or("unknown"),
+            delivery_id = delivery_id.as_deref().unwrap_or("unknown"),
+            "webhook delivery failed signature verification"
+        );
         return StatusCode::UNAUTHORIZED;
     }
 
-    let Some(event) = header_str(&headers, "x-github-event") else {
+    let Some(event) = event else {
         return StatusCode::BAD_REQUEST;
     };
-    let Some(delivery_id) = header_str(&headers, "x-github-delivery") else {
+    let Some(delivery_id) = delivery_id else {
         return StatusCode::BAD_REQUEST;
     };
 
@@ -340,32 +357,237 @@ fn header_str(headers: &HeaderMap, name: &str) -> Option<String> {
     Some(value.to_string())
 }
 
+/// Why a delivery failed verification. Static category strings only — the
+/// house rule for every operator-facing failure label (`sync_error`,
+/// `error_category`). The cause is logged, never returned to the caller: it
+/// distinguishes a misconfiguration from an attack for the operator without
+/// telling an attacker which of their guesses got closer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SignatureError {
+    /// No `X-Hub-Signature-256` at all → the App has no webhook secret set.
+    MissingHeader,
+    /// Header present but not readable as ASCII.
+    MalformedHeader,
+    /// Not `sha256=…` — e.g. a sha1-only sender.
+    BadPrefix,
+    /// The digest after `sha256=` isn't hex.
+    InvalidHex,
+    /// A real HMAC mismatch → the configured secret differs from GitHub's.
+    Mismatch,
+}
+
+impl SignatureError {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::MissingHeader => "missing_header",
+            Self::MalformedHeader => "malformed_header",
+            Self::BadPrefix => "bad_prefix",
+            Self::InvalidHex => "invalid_hex",
+            Self::Mismatch => "mismatch",
+        }
+    }
+}
+
 /// HMAC-SHA256 over the raw body with the configured secret, compared in
 /// constant time against `X-Hub-Signature-256: sha256=<hex>`.
-fn verify_signature(secret: &str, headers: &HeaderMap, body: &[u8]) -> bool {
-    let Some(signature) = headers
-        .get("x-hub-signature-256")
-        .and_then(|v| v.to_str().ok())
-    else {
-        return false;
+fn verify_signature(
+    secret: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<(), SignatureError> {
+    let Some(raw) = headers.get("x-hub-signature-256") else {
+        return Err(SignatureError::MissingHeader);
+    };
+    let Ok(signature) = raw.to_str() else {
+        return Err(SignatureError::MalformedHeader);
     };
     let Some(hex_digest) = signature.strip_prefix("sha256=") else {
-        return false;
+        return Err(SignatureError::BadPrefix);
     };
     let Ok(expected) = hex::decode(hex_digest) else {
-        return false;
+        return Err(SignatureError::InvalidHex);
     };
     let Ok(mut mac) = HmacSha256::new_from_slice(secret.as_bytes()) else {
-        return false;
+        // Unreachable: HMAC accepts any key length. Treated as a mismatch
+        // rather than unwrapped so a future key-type change can't panic the
+        // receiver.
+        return Err(SignatureError::Mismatch);
     };
     mac.update(body);
-    // verify_slice is constant-time.
-    mac.verify_slice(&expected).is_ok()
+    // verify_slice is constant-time and length-checks, so a truncated digest
+    // fails cleanly rather than matching a prefix.
+    mac.verify_slice(&expected)
+        .map_err(|_| SignatureError::Mismatch)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The vector published in GitHub's "Validating webhook deliveries" docs.
+    /// Pins the wire format (raw body bytes, secret as raw UTF-8, lowercase
+    /// hex) rather than merely proving we agree with ourselves.
+    const DOC_SECRET: &str = "It's a Secret to Everybody";
+    const DOC_BODY: &[u8] = b"Hello, World!";
+    const DOC_SIGNATURE: &str =
+        "sha256=757107ea0eb2509fc211221cce984b8a37570b6d7586c22c46f4379c8b043e17";
+
+    fn signed(signature: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-hub-signature-256", signature.parse().unwrap());
+        headers
+    }
+
+    fn sign(secret: &str, body: &[u8]) -> String {
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body);
+        format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
+    }
+
+    #[test]
+    fn accepts_githubs_documented_vector() {
+        assert_eq!(
+            verify_signature(DOC_SECRET, &signed(DOC_SIGNATURE), DOC_BODY),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn rejects_tampered_body() {
+        assert_eq!(
+            verify_signature(DOC_SECRET, &signed(DOC_SIGNATURE), b"Hello, World?"),
+            Err(SignatureError::Mismatch)
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_secret() {
+        assert_eq!(
+            verify_signature("some other secret entirely", &signed(DOC_SIGNATURE), DOC_BODY),
+            Err(SignatureError::Mismatch)
+        );
+    }
+
+    /// Regression test for the 401 storm: a secret carrying a trailing newline
+    /// (pasted into an env panel, or read from a file) computes a different MAC
+    /// from the same secret trimmed. Config trims at load; this proves why it
+    /// must. See config.rs `github_webhook_secret`.
+    #[test]
+    fn untrimmed_secret_does_not_verify() {
+        let signature = sign(DOC_SECRET, DOC_BODY);
+        // GitHub signs with the real secret; we'd verify with the padded one.
+        for padded in [
+            format!("{DOC_SECRET}\n"),
+            format!("{DOC_SECRET} "),
+            format!(" {DOC_SECRET}"),
+            format!("{DOC_SECRET}\r\n"),
+        ] {
+            assert_eq!(
+                verify_signature(&padded, &signed(&signature), DOC_BODY),
+                Err(SignatureError::Mismatch),
+                "padded secret must not verify — trimming at load is what fixes this"
+            );
+            // ...and trimming is exactly what recovers it.
+            assert_eq!(
+                verify_signature(padded.trim(), &signed(&signature), DOC_BODY),
+                Ok(())
+            );
+        }
+    }
+
+    /// Quotes surviving from an env panel are a distinct silent failure: they
+    /// pass the length check and fail every MAC. config.rs warns about this.
+    #[test]
+    fn quote_wrapped_secret_does_not_verify() {
+        let signature = sign(DOC_SECRET, DOC_BODY);
+        assert_eq!(
+            verify_signature(&format!("\"{DOC_SECRET}\""), &signed(&signature), DOC_BODY),
+            Err(SignatureError::Mismatch)
+        );
+    }
+
+    #[test]
+    fn distinguishes_header_failure_causes() {
+        // Absent header — the App has no webhook secret configured.
+        assert_eq!(
+            verify_signature(DOC_SECRET, &HeaderMap::new(), DOC_BODY),
+            Err(SignatureError::MissingHeader)
+        );
+        // A sha1-only sender.
+        assert_eq!(
+            verify_signature(DOC_SECRET, &signed("sha1=abcdef"), DOC_BODY),
+            Err(SignatureError::BadPrefix)
+        );
+        // Prefix matching is case-sensitive by design; GitHub sends lowercase.
+        assert_eq!(
+            verify_signature(DOC_SECRET, &signed("SHA256=abcdef"), DOC_BODY),
+            Err(SignatureError::BadPrefix)
+        );
+        assert_eq!(
+            verify_signature(DOC_SECRET, &signed("sha256=nothexatall"), DOC_BODY),
+            Err(SignatureError::InvalidHex)
+        );
+    }
+
+    /// A truncated digest must fail cleanly, not match on a prefix and not
+    /// panic — verify_slice length-checks.
+    #[test]
+    fn rejects_truncated_digest() {
+        let full = sign(DOC_SECRET, DOC_BODY);
+        let truncated = &full[..full.len() - 8];
+        assert_eq!(
+            verify_signature(DOC_SECRET, &signed(truncated), DOC_BODY),
+            Err(SignatureError::Mismatch)
+        );
+        assert_eq!(
+            verify_signature(DOC_SECRET, &signed("sha256="), DOC_BODY),
+            Err(SignatureError::Mismatch)
+        );
+    }
+
+    /// The seam the outage actually lived at: a real env var carrying a
+    /// trailing newline, loaded the way boot loads it, verified against a
+    /// signature GitHub computed from the clean secret. Chains
+    /// config::shared_secret → verify_signature so neither side can regress
+    /// alone. Uses a uniquely-named var (env is process-global and tests run
+    /// in parallel).
+    #[test]
+    fn env_secret_with_trailing_newline_verifies_after_config_load() {
+        const VAR: &str = "OVERUP_TEST_WEBHOOK_SECRET_SEAM";
+        let clean = "0123456789abcdef0123456789abcdef";
+        // What GitHub signs with — the secret as configured on the App.
+        let signature = sign(clean, DOC_BODY);
+
+        // What the env panel actually hands the process.
+        unsafe { std::env::set_var(VAR, format!("{clean}\n")) };
+        let raw = std::env::var(VAR).unwrap();
+
+        // Before the fix this raw value reached the MAC and 401'd everything.
+        assert_eq!(
+            verify_signature(&raw, &signed(&signature), DOC_BODY),
+            Err(SignatureError::Mismatch)
+        );
+
+        // Through the real load path, it verifies.
+        let loaded = crate::config::shared_secret(VAR, raw, 16).unwrap();
+        assert_eq!(verify_signature(&loaded, &signed(&signature), DOC_BODY), Ok(()));
+
+        unsafe { std::env::remove_var(VAR) };
+    }
+
+    /// Causes are static, log-safe labels — no secret or digest material.
+    #[test]
+    fn cause_labels_are_static_categories() {
+        for (cause, label) in [
+            (SignatureError::MissingHeader, "missing_header"),
+            (SignatureError::MalformedHeader, "malformed_header"),
+            (SignatureError::BadPrefix, "bad_prefix"),
+            (SignatureError::InvalidHex, "invalid_hex"),
+            (SignatureError::Mismatch, "mismatch"),
+        ] {
+            assert_eq!(cause.as_str(), label);
+        }
+    }
 
     #[test]
     fn event_routing_table() {
