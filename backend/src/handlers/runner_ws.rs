@@ -162,21 +162,47 @@ pub async fn connect(
         .on_upgrade(move |socket| handle(state, runner, is_bootstrap, socket))
 }
 
+/// Extract the bearer credential from an `Authorization` header, or the static
+/// category explaining why it isn't usable.
+///
+/// Deliberately does NOT use `strip_prefix("Bearer ")`: HTTP strips trailing
+/// optional whitespace from field values (RFC 9110 §5.5), so an empty token
+/// sent as `Bearer ` arrives as `Bearer` and would fail a literal-space prefix
+/// match — reporting `missing_token` for what is actually a blank credential,
+/// the single most common misconfiguration. The scheme is matched
+/// case-insensitively per RFC 9110 §11.1.
+///
+/// Pure and DB-free so the category table is unit-testable.
+fn bearer_credential(headers: &HeaderMap) -> Result<&str, &'static str> {
+    let Some(value) = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return Err("missing_token");
+    };
+    let (scheme, credential) = value.split_once(' ').unwrap_or((value, ""));
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return Err("missing_token");
+    }
+    let credential = credential.trim();
+    if credential.is_empty() {
+        // Distinct from missing_token: the runner IS configured to authenticate
+        // but RUNNER_TOKEN resolved to an empty string. Points at the env var
+        // instead of hiding inside invalid_token.
+        return Err("empty_token");
+    }
+    if credential.len() > 128 {
+        return Err("invalid_token");
+    }
+    Ok(credential)
+}
+
 /// Bearer token -> SHA-256 -> non-revoked runner row. Tries the permanent
 /// credential first, then falls back to a still-valid bootstrap credential
 /// (the guided-wizard registration flow) — the returned bool marks which.
 /// Failures carry a static 401 category for the runner's logs.
 async fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<(Runner, bool), &'static str> {
-    let Some(token) = headers
-        .get("authorization")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-    else {
-        return Err("missing_token");
-    };
-    if token.is_empty() || token.len() > 128 {
-        return Err("invalid_token");
-    }
+    let token = bearer_credential(headers)?;
     let hash = session::hash_token(token);
     if let Some(runner) = db::runners::find_by_token_hash(&state.pool, &hash).await.ok().flatten() {
         return Ok((runner, false));
@@ -877,4 +903,88 @@ async fn handle_artifact_done(
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn auth(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", value.parse().unwrap());
+        headers
+    }
+
+    #[test]
+    fn accepts_a_well_formed_bearer_credential() {
+        assert_eq!(bearer_credential(&auth("Bearer abc123")), Ok("abc123"));
+    }
+
+    /// RFC 9110 §11.1: auth schemes are case-insensitive. The old
+    /// strip_prefix("Bearer ") rejected these as missing_token.
+    #[test]
+    fn scheme_match_is_case_insensitive() {
+        for header in ["bearer abc123", "BEARER abc123", "BeArEr abc123"] {
+            assert_eq!(bearer_credential(&auth(header)), Ok("abc123"), "{header}");
+        }
+    }
+
+    #[test]
+    fn absent_or_foreign_scheme_is_missing_token() {
+        assert_eq!(bearer_credential(&HeaderMap::new()), Err("missing_token"));
+        assert_eq!(bearer_credential(&auth("Basic abc123")), Err("missing_token"));
+        assert_eq!(bearer_credential(&auth("abc123")), Err("missing_token"));
+        assert_eq!(bearer_credential(&auth("")), Err("missing_token"));
+    }
+
+    /// The outage regression. An empty RUNNER_TOKEN sends `Bearer `; HTTP
+    /// strips the trailing OWS, so the server receives `Bearer`. That used to
+    /// fail strip_prefix("Bearer ") and report missing_token — sending
+    /// operators to regenerate a token that was never the problem.
+    #[test]
+    fn blank_credential_is_empty_token_not_missing_token() {
+        // What actually arrives after OWS stripping.
+        assert_eq!(bearer_credential(&auth("Bearer")), Err("empty_token"));
+        // And if a proxy preserved the space, or the value is all whitespace.
+        assert_eq!(bearer_credential(&auth("Bearer  ")), Err("empty_token"));
+        assert_eq!(bearer_credential(&auth("bearer \t ")), Err("empty_token"));
+    }
+
+    #[test]
+    fn oversize_credential_is_invalid_token() {
+        let long = "a".repeat(129);
+        assert_eq!(
+            bearer_credential(&auth(&format!("Bearer {long}"))),
+            Err("invalid_token")
+        );
+        // Exactly at the cap still parses; the hash lookup decides from there.
+        let at_cap = "a".repeat(128);
+        assert_eq!(
+            bearer_credential(&auth(&format!("Bearer {at_cap}"))),
+            Ok(at_cap.as_str())
+        );
+    }
+
+    /// Surrounding whitespace must not change the credential: the runner trims
+    /// too, and a token that hashes differently would 401 inexplicably.
+    #[test]
+    fn credential_is_trimmed() {
+        assert_eq!(bearer_credential(&auth("Bearer  abc123  ")), Ok("abc123"));
+    }
+
+    /// Every category is a static string safe to return in a 401 body — no
+    /// token material, no dynamic detail.
+    #[test]
+    fn categories_are_static_and_leak_nothing() {
+        let secret = "supersecrettokenvalue";
+        for header in [format!("Bearer {}", "a".repeat(200)), format!("Basic {secret}")] {
+            if let Err(category) = bearer_credential(&auth(&header)) {
+                assert!(!category.contains(secret));
+                assert!(matches!(
+                    category,
+                    "missing_token" | "empty_token" | "invalid_token"
+                ));
+            }
+        }
+    }
 }

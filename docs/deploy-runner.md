@@ -46,6 +46,14 @@ Docker daemon with your control plane.
 
 ## 2. Register the runner and get its token
 
+> **Hosted runners need no token — skip to [§2.1](#21-hosted-runners-zero-install).**
+> There is no token to copy and no container for you to start. The control plane mints a
+> bootstrap credential just-in-time, injects it into the container it creates, and never
+> returns it to the browser. Everything in this section is the **self-hosted** path (you
+> run the container on your own machine). Starting a runner container by hand *expecting*
+> it to be hosted is the usual cause of `reason=missing_token` (see
+> [§9 Troubleshooting](#9-troubleshooting)).
+
 Runners belong to a workspace. Creating one returns the registration token
 **exactly once** (only its SHA-256 hash is stored — it cannot be shown again).
 
@@ -439,7 +447,10 @@ own host) or are best avoided until you're comfortable with the mount semantics.
 | Runner exits: `missing required environment variable …` | `RUNNER_TOKEN` unset in the env file / Environment tab (and no persisted token at `RUNNER_TOKEN_FILE`). |
 | Runner exits: `RUNNER_JOB_SIGNING_KEY must be at least 32 bytes` | Only possible with a locally pinned key — use the full `openssl rand -hex 32` output (64 hex chars), or unset it to use the delivered key. |
 | `invalid peer certificate: UnknownIssuer` on every connect attempt | The API domain is serving **Traefik's default self-signed certificate**, not a real one — the runner (rustls + webpki roots) correctly refuses it. Causes: the Dokploy domain's Certificate is set to "none", or Let's Encrypt could never issue because **ports 80/443 are closed** in the VPS/provider firewall. Fix: open 80+443, set Certificate = Let's Encrypt in Dokploy's Domains tab, then check `curl -v https://<api-domain>/healthz` from another machine — the issuer must be Let's Encrypt (`R1x`/`E5`-style), not `TRAEFIK DEFAULT CERT`. The runner reconnects by itself (≤ 60 s backoff) once the cert is real. Never work around this by disabling verification. |
-| Connection rejected / immediately closed at connect | Wrong or **revoked** `RUNNER_TOKEN` (only the hash is stored — if you lost the token, revoke the runner and create a new one). |
+| Connection rejected / immediately closed at connect | Wrong or **revoked** `RUNNER_TOKEN` (only the hash is stored — if you lost the token, revoke the runner and create a new one). Read the `reason=` field on the 401 — the rows below name each category. |
+| 401 with `reason=missing_token` or `reason=empty_token` | **No token was sent at all** — `RUNNER_TOKEN` is empty or unset. Nothing was wrong with any token, so regenerating one will not help; a set-but-blank value looks identical to none on the wire. Most often this is a container started **by hand that was meant to be hosted**: hosted runners are created *by the control plane*, which injects the token itself. Delete the container and set `RUNNER_PROVISIONER=docker` + `RUNNER_PROVISIONER_OVERUP_URL` on the backend instead (§2.1). Runners from v0.1.0+ exit at boot on a blank token rather than retrying forever. |
+| 401 with `reason=invalid_token` | The genuine revoked/rotated/already-exchanged case: the token was sent and rejected. Regenerate it in the UI, update `RUNNER_TOKEN`, and set `RUNNER_TOKEN_FILE` so the exchanged permanent token survives restarts (without it, a restart replays the consumed one-time bootstrap token and lands here). |
+| 401 with `reason=bootstrap_expired` | The registration token expired before first use (1-hour limit). Register again and use the fresh token. |
 | `this runner was revoked by the control plane; exiting` | Expected after `DELETE …/runners/{id}` — the process exits permanently; deploy a new runner with a new token. |
 | Connects fine, but every job fails instantly around payload verification | A locally pinned `RUNNER_JOB_SIGNING_KEY` differs from the backend's — signed payloads fail constant-time verification and are never executed. Unset it (the delivered key always matches) or fix stray whitespace/quotes in the env file. |
 | `docker engine unreachable; jobs will fail` | Socket not mounted, socket group not granted (`--group-add`), or `DOCKER_HOST` wrong. The runner stays connected but jobs fail cleanly until Docker is reachable. |

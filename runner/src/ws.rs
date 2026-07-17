@@ -29,6 +29,46 @@ pub enum Disconnect {
     Revoked,
 }
 
+/// Remediation text for a 401's static category.
+///
+/// Every arm must describe ONLY what its category actually means. This was
+/// previously a single catch-all asserting the token "was revoked, rotated,
+/// or already exchanged" for every cause — including `missing_token`, which
+/// means the opposite (no credential was ever sent), sending operators off to
+/// regenerate a token that was never the problem. An unrecognized category
+/// must stay neutral rather than speculate: a newer control plane can add
+/// categories an older runner has never heard of.
+fn auth_failure_help(reason: &str) -> &'static str {
+    match reason {
+        "missing_token" | "empty_token" => {
+            "control plane rejected the connection (401): no token was sent — RUNNER_TOKEN \
+             is empty or unset (a set-but-blank value looks the same as none on the wire). \
+             Nothing was wrong with any token; issuing a new one will not help. Set \
+             RUNNER_TOKEN to the value shown when you registered the runner. If you meant \
+             to use a HOSTED runner, do not start this container by hand at all — set \
+             RUNNER_PROVISIONER=docker on the control plane and create the runner from the \
+             Runners page; hosted runners are injected a token automatically and you never \
+             copy one. Retrying cannot fix this."
+        }
+        "invalid_token" => {
+            "control plane rejected the token (401): it was revoked, rotated, or was a \
+             one-time bootstrap token that has already been exchanged. Regenerate the token \
+             in the UI and update RUNNER_TOKEN — and set RUNNER_TOKEN_FILE so the exchanged \
+             permanent token survives restarts. Retrying cannot fix this."
+        }
+        "bootstrap_expired" => {
+            "control plane rejected the token (401 bootstrap_expired): the registration \
+             token expired before its first use (1 hour limit) — register the runner again \
+             and use the fresh token. Retrying cannot fix this."
+        }
+        _ => {
+            "control plane rejected the connection (401). Check RUNNER_TOKEN against the \
+             runner's registration, and OVERUP_URL against the control plane. Retrying \
+             cannot fix this."
+        }
+    }
+}
+
 pub async fn run_connection(
     config: &RunnerConfig,
     docker: Option<bollard::Docker>,
@@ -50,29 +90,17 @@ pub async fn run_connection(
         Ok(connected) => connected,
         Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
             let status = response.status();
-            // The control plane attaches a static category ("invalid_token",
-            // "bootstrap_expired", "missing_token") to auth rejections.
+            // The control plane attaches a static category to auth rejections
+            // ("missing_token", "empty_token", "invalid_token",
+            // "bootstrap_expired"); auth_failure_help turns it into
+            // remediation, and tolerates categories added by a newer server.
             let reason = response
                 .body()
                 .as_deref()
                 .map(|body| String::from_utf8_lossy(body).trim().to_string())
                 .unwrap_or_default();
             if status.as_u16() == 401 {
-                if reason == "bootstrap_expired" {
-                    tracing::error!(
-                        "control plane rejected the token (401 bootstrap_expired): the \
-                         registration token expired before its first use (1 hour limit) — \
-                         register the runner again and use the fresh token"
-                    );
-                } else {
-                    tracing::error!(
-                        reason = %reason,
-                        "control plane rejected the token (401): it was revoked, rotated, \
-                         or was a one-time bootstrap token that has already been exchanged. \
-                         Regenerate the token in the UI and update RUNNER_TOKEN — and set \
-                         RUNNER_TOKEN_FILE so the exchanged permanent token survives restarts"
-                    );
-                }
+                tracing::error!(reason = %reason, "{}", auth_failure_help(&reason));
             }
             anyhow::bail!("websocket connect rejected: HTTP {status} {reason}");
         }
@@ -339,4 +367,81 @@ async fn send(
     sink.send(Message::Text(json.into()))
         .await
         .map_err(|_| anyhow::anyhow!("websocket send failed"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::auth_failure_help;
+
+    /// The regression this whole change exists for: `missing_token` means no
+    /// credential was sent. It used to fall into a catch-all asserting the
+    /// token "was revoked, rotated, or already exchanged" — the opposite of
+    /// the truth — which sends operators to regenerate a working token.
+    #[test]
+    fn missing_token_never_claims_the_token_was_revoked() {
+        for reason in ["missing_token", "empty_token"] {
+            let help = auth_failure_help(reason).to_lowercase();
+            assert!(!help.contains("revoked"), "{reason} must not say revoked");
+            assert!(!help.contains("rotated"), "{reason} must not say rotated");
+            assert!(!help.contains("exchanged"), "{reason} must not say exchanged");
+            // It must name the real cause and the real remedy.
+            assert!(help.contains("runner_token"));
+            assert!(help.contains("empty or unset"));
+        }
+    }
+
+    /// The revoked/rotated text is correct — for the one category it
+    /// describes, and only that one.
+    #[test]
+    fn invalid_token_keeps_the_revoked_guidance() {
+        let help = auth_failure_help("invalid_token").to_lowercase();
+        assert!(help.contains("revoked"));
+        assert!(help.contains("rotated"));
+    }
+
+    #[test]
+    fn bootstrap_expired_explains_the_one_hour_limit() {
+        let help = auth_failure_help("bootstrap_expired").to_lowercase();
+        assert!(help.contains("expired"));
+        assert!(help.contains("1 hour"));
+        assert!(!help.contains("revoked"));
+    }
+
+    /// A newer control plane may add categories this runner has never heard
+    /// of. The catch-all must stay neutral rather than guess a cause.
+    #[test]
+    fn unknown_reason_does_not_speculate() {
+        for reason in ["", "some_future_category", "garbage"] {
+            let help = auth_failure_help(reason).to_lowercase();
+            assert!(!help.contains("revoked"), "{reason} must not guess");
+            assert!(!help.contains("expired"), "{reason} must not guess");
+        }
+    }
+
+    /// Every arm must say retrying is futile: a 401 is unrecoverable, and the
+    /// reconnect loop otherwise backs off silently forever.
+    #[test]
+    fn every_arm_states_that_retrying_cannot_help() {
+        for reason in [
+            "missing_token",
+            "empty_token",
+            "invalid_token",
+            "bootstrap_expired",
+            "unknown",
+        ] {
+            assert!(
+                auth_failure_help(reason).to_lowercase().contains("retrying cannot"),
+                "{reason} must tell the operator retrying is futile"
+            );
+        }
+    }
+
+    /// Hosted runners never take a hand-set token; the no-credential arms must
+    /// point there, since that is the misconfiguration that produces them.
+    #[test]
+    fn no_credential_arms_point_at_the_hosted_path() {
+        let help = auth_failure_help("missing_token");
+        assert!(help.contains("RUNNER_PROVISIONER=docker"));
+        assert!(help.to_lowercase().contains("hosted"));
+    }
 }

@@ -126,6 +126,30 @@ fn optional(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
+/// Read a credential from the environment, treating set-but-blank exactly like
+/// unset.
+///
+/// `std::env::var` returns `Ok("")` for `RUNNER_TOKEN=`, so without this guard
+/// the runner starts, sends `Authorization: Bearer `, and loops forever on a
+/// 401 it can never recover from — while the control plane reports
+/// `missing_token`. Failing at boot turns an unbounded retry storm into one
+/// actionable line. Trimming matters for the same reason: a trailing
+/// newline (heredocs, secret files pasted into env) hashes to a different
+/// token and earns a baffling 401.
+fn token_from_env(key: &str) -> anyhow::Result<String> {
+    let value = required(key)?.trim().to_string();
+    if value.is_empty() {
+        anyhow::bail!(
+            "{key} is set but empty. Set it to the token shown when you registered the \
+             runner, or point RUNNER_TOKEN_FILE at a file holding one. Hosted runners need \
+             neither: the control plane provisions them and injects the token itself — set \
+             RUNNER_PROVISIONER=docker there and create the runner from the Runners page \
+             instead of starting this container by hand."
+        );
+    }
+    Ok(value)
+}
+
 /// Write a freshly-issued permanent token to disk, restricted to the owner
 /// (same convention as the `.env` file holding RUNNER_TOKEN today).
 fn persist_token(path: &str, token: &str) -> anyhow::Result<()> {
@@ -196,10 +220,7 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|path| std::fs::read_to_string(path).ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        // Trim the env-var path too: a trailing newline/space (heredocs,
-        // secret files pasted into env) hashes to a different token and
-        // gets a baffling 401 from the control plane.
-        .map_or_else(|| required("RUNNER_TOKEN").map(|t| t.trim().to_string()), Ok)?;
+        .map_or_else(|| token_from_env("RUNNER_TOKEN"), Ok)?;
 
     // RUNNER_LABELS set-but-blank must not produce an empty label set: an
     // empty set can never satisfy a labeled runs-on, so the runner would sit
@@ -322,5 +343,51 @@ mod tests {
         let (pkg, build_ref) = version.split_once('+').expect("version must carry a build ref");
         assert_eq!(pkg, env!("CARGO_PKG_VERSION"));
         assert!(!build_ref.is_empty());
+    }
+
+    /// The outage regression: `RUNNER_TOKEN=` (set, blank) must fail at boot
+    /// rather than start and loop forever on an unrecoverable 401. Uses a
+    /// uniquely-named var — env is process-global and tests run in parallel.
+    #[test]
+    fn blank_env_token_is_an_error_not_an_empty_string() {
+        const VAR: &str = "OVERUP_TEST_RUNNER_TOKEN_BLANK";
+        for blank in ["", "   ", "\n", "\t \r\n"] {
+            unsafe { std::env::set_var(VAR, blank) };
+            let error = token_from_env(VAR)
+                .expect_err("a blank token must not resolve to an empty credential")
+                .to_string();
+            assert!(error.contains(VAR), "error must name the variable: {error}");
+        }
+        unsafe { std::env::remove_var(VAR) };
+    }
+
+    /// Unset is the same failure class as blank — both mean "no credential".
+    #[test]
+    fn unset_env_token_is_an_error() {
+        const VAR: &str = "OVERUP_TEST_RUNNER_TOKEN_UNSET";
+        unsafe { std::env::remove_var(VAR) };
+        assert!(token_from_env(VAR).is_err());
+    }
+
+    /// A trailing newline hashes to a different token and earns a baffling
+    /// 401, so the value is trimmed on the way in.
+    #[test]
+    fn env_token_is_trimmed() {
+        const VAR: &str = "OVERUP_TEST_RUNNER_TOKEN_TRIM";
+        unsafe { std::env::set_var(VAR, "  abc123\n") };
+        assert_eq!(token_from_env(VAR).unwrap(), "abc123");
+        unsafe { std::env::remove_var(VAR) };
+    }
+
+    /// The blank-token guidance must point at the hosted path, since that is
+    /// the misconfiguration behind a hand-started container with no token.
+    #[test]
+    fn blank_token_error_mentions_the_hosted_alternative() {
+        const VAR: &str = "OVERUP_TEST_RUNNER_TOKEN_HOSTED_HINT";
+        unsafe { std::env::set_var(VAR, "") };
+        let error = token_from_env(VAR).unwrap_err().to_string();
+        assert!(error.contains("RUNNER_PROVISIONER=docker"));
+        assert!(error.contains("RUNNER_TOKEN_FILE"));
+        unsafe { std::env::remove_var(VAR) };
     }
 }
