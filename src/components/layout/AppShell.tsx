@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Outlet, useLocation } from 'react-router-dom';
 import { NotificationStreamProvider } from '../../features/notifications/hooks/useNotificationStream';
 import { cn } from '../../lib/cn';
+import { AnnouncementBanner } from './AnnouncementBanner';
 import { CommandPalette } from './CommandPalette';
 import { MobileTopBar } from './MobileTopBar';
 import { Sidebar } from './Sidebar';
@@ -47,7 +48,11 @@ export function AppShell() {
     // The notification socket lives at the shell level so the bell is live
     // on every page; the bell and the history page share its `connected`.
     <NotificationStreamProvider>
-    <div className="flex h-dvh overflow-hidden bg-surface text-charcoal">
+    <div className="flex h-dvh flex-col overflow-hidden bg-surface text-charcoal">
+      {/* Full-width system announcement, above the shell on the surface band. */}
+      <AnnouncementBanner />
+
+      <div className="flex min-h-0 flex-1">
       {/* Desktop sidebar */}
       <div className="hidden w-[272px] shrink-0 lg:block">
         <Sidebar onSearch={openSearch} />
@@ -104,6 +109,7 @@ export function AppShell() {
             </div>
           </main>
         </div>
+      </div>
       </div>
 
       <CommandPalette
