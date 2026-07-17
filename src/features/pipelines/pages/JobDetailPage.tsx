@@ -170,7 +170,7 @@ export function JobDetailPage() {
       <JobIdentityBar slug={slug} pipeline={pipeline} job={job} runner={runner} />
 
       {isDesktop ? (
-        <div className="h-[72vh] min-h-[520px] overflow-hidden rounded border border-steel/20 bg-canvas">
+        <div className="h-[80vh] min-h-[620px] overflow-hidden rounded border border-steel/20 bg-canvas">
           <Group orientation="horizontal" className="h-full">
             <Panel defaultSize="24%" minSize="16%" className="flex flex-col">
               <div className="min-h-0 flex-1 overflow-y-auto p-3">{stepList}</div>
@@ -189,7 +189,7 @@ export function JobDetailPage() {
         // Below lg: no resizable panels — a natural page-scroll stack.
         <div className="space-y-4">
           <div className="rounded border border-steel/20 bg-canvas p-3">{stepList}</div>
-          <div className="h-[60vh] min-h-[320px] overflow-hidden rounded border border-steel/20 bg-canvas">
+          <div className="h-[68vh] min-h-[420px] overflow-hidden rounded border border-steel/20 bg-canvas">
             {logView}
           </div>
           <div className="rounded border border-steel/20 bg-canvas p-3">
