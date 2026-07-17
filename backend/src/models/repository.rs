@@ -216,4 +216,19 @@ pub struct RepositoryHealthResponse {
     pub failed_events_24h: i64,
     pub pending_deliveries: i64,
     pub checks_enabled: bool,
+    pub webhook_auth: WebhookAuthHealth,
+}
+
+/// DEPLOYMENT-GLOBAL webhook signature-rejection gauge (a bad
+/// GITHUB_WEBHOOK_SECRET rejects every delivery, so this is not scoped to
+/// one repository). In-memory — resets on restart, which is the point: it
+/// answers "is the CURRENT deployment's secret wrong?".
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebhookAuthHealth {
+    pub rejections_24h: u64,
+    pub last_rejected_at: Option<DateTime<Utc>>,
+    /// Static category only:
+    /// missing_header|malformed_header|bad_prefix|invalid_hex|mismatch.
+    pub last_cause: Option<&'static str>,
 }

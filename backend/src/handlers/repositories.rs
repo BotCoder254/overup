@@ -13,7 +13,7 @@ use crate::error::{AppError, AppResult};
 use crate::middleware::auth::CurrentUser;
 use crate::models::repository::{
     AvailableRepoResponse, BranchResponse, RepositoryEventResponse, RepositoryHealthResponse,
-    RepositoryResponse, SyncRunResponse,
+    RepositoryResponse, SyncRunResponse, WebhookAuthHealth,
 };
 use crate::models::workflow::WorkflowSummaryResponse;
 use crate::services::workspace_hub::WorkspaceEvent;
@@ -224,12 +224,21 @@ pub async fn detail(
     let pending_deliveries =
         db::webhook_deliveries::pending_count_for_repo(&state.pool, repository.github_repo_id)
             .await?;
+    // Deployment-global signature-rejection gauge: a wrong webhook secret
+    // rejects EVERY delivery before persistence, so without this the panel
+    // could not distinguish "no pushes" from "all deliveries rejected".
+    let rejections = state.webhook_auth.snapshot();
     let health = RepositoryHealthResponse {
         last_event_at: overview.last_event_at,
         last_event_outcome: overview.last_event_outcome,
         failed_events_24h: overview.failed_events_24h,
         pending_deliveries,
         checks_enabled: state.config.github_checks_enabled,
+        webhook_auth: WebhookAuthHealth {
+            rejections_24h: rejections.rejections_24h,
+            last_rejected_at: rejections.last_rejected_at,
+            last_cause: rejections.last_cause,
+        },
     };
 
     let workflow_count = workflows.len() as i64;

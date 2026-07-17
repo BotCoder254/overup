@@ -1,5 +1,5 @@
 import { format, formatDistanceToNow } from 'date-fns';
-import { GitBranch, GitPullRequest, Tag } from 'lucide-react';
+import { GitBranch, GitPullRequest, ShieldAlert, Tag } from 'lucide-react';
 import { useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { workspacePath } from '../../../app/navigation';
@@ -8,7 +8,11 @@ import { Badge } from '../../../components/ui/Badge';
 import { Button } from '../../../components/ui/Button';
 import { Card } from '../../../components/ui/Card';
 import { Spinner } from '../../../components/ui/Spinner';
-import type { RepositoryEvent, RepositoryEventOutcome } from '../../../types/repository';
+import type {
+  RepositoryEvent,
+  RepositoryEventOutcome,
+  RepositoryHealth,
+} from '../../../types/repository';
 import { useRepositoryEvents } from '../hooks/useRepositories';
 
 const OUTCOME_BADGES: Record<
@@ -144,9 +148,56 @@ function EventRow({ event, slug }: { event: RepositoryEvent; slug: string }) {
   );
 }
 
+/**
+ * Themed remediation card shown instead of the quiet empty state when the
+ * backend is actively rejecting webhook deliveries (or nothing has ever
+ * landed but rejections were seen): an empty timeline then means a
+ * misconfigured secret, not a lack of pushes. All copy is static.
+ */
+function WebhookAuthWarning({ webhookAuth }: { webhookAuth: RepositoryHealth['webhookAuth'] }) {
+  return (
+    <Card className="p-6">
+      <div className="flex items-start gap-3">
+        <ShieldAlert size={20} aria-hidden="true" className="mt-0.5 shrink-0 text-danger" />
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="text-sm font-semibold text-charcoal">
+              Webhook deliveries are being rejected
+            </h3>
+            <Badge variant="danger">
+              {webhookAuth.rejections24h > 0
+                ? `${webhookAuth.rejections24h} in 24 h`
+                : 'signature rejected'}
+            </Badge>
+          </div>
+          <p className="mt-1 text-sm text-steel">
+            GitHub is sending events, but their signatures fail verification, so nothing
+            reaches this timeline. This almost always means the backend&apos;s webhook secret
+            does not match the GitHub App&apos;s.
+          </p>
+          <ol className="mt-3 list-decimal space-y-1.5 pl-5 text-sm text-charcoal">
+            <li>
+              Set <code className="rounded bg-surface px-1 py-0.5 font-mono text-xs">GITHUB_WEBHOOK_SECRET</code>{' '}
+              in the backend deployment environment to the App&apos;s webhook secret exactly —
+              no surrounding quotes or whitespace.
+            </li>
+            <li>Redeploy the backend so the new value loads.</li>
+            <li>
+              In GitHub: App settings → Advanced → Recent Deliveries → <em>Redeliver</em> a
+              failed delivery.
+            </li>
+            <li>A 202 response — and a row appearing here — confirms the fix.</li>
+          </ol>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
 interface RepositoryEventsListProps {
   repositoryId: string;
   slug: string;
+  health: RepositoryHealth;
 }
 
 /**
@@ -155,7 +206,7 @@ interface RepositoryEventsListProps {
  * with what it caused — created pipelines, scheduled syncs — or the static
  * reason it was ignored. Keyset infinite scroll with a Load-more fallback.
  */
-export function RepositoryEventsList({ repositoryId, slug }: RepositoryEventsListProps) {
+export function RepositoryEventsList({ repositoryId, slug, health }: RepositoryEventsListProps) {
   const query = useRepositoryEvents(repositoryId);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const { hasNextPage, isFetchingNextPage, fetchNextPage } = query;
@@ -192,6 +243,17 @@ export function RepositoryEventsList({ repositoryId, slug }: RepositoryEventsLis
 
   const events = query.data?.pages.flatMap((page) => page.events) ?? [];
   if (events.length === 0) {
+    // Rejections happening now, or nothing ever landed while rejections
+    // were seen: the empty timeline is a configuration problem, not quiet.
+    const { webhookAuth } = health;
+    const rejecting =
+      webhookAuth.rejections24h > 0 ||
+      (health.lastEventAt === null &&
+        health.pendingDeliveries === 0 &&
+        webhookAuth.lastRejectedAt !== null);
+    if (rejecting) {
+      return <WebhookAuthWarning webhookAuth={webhookAuth} />;
+    }
     return (
       <Card className="p-8 text-center text-sm text-steel">
         No repository events processed yet. Push a commit or open a pull request — deliveries

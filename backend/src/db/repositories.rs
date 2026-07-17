@@ -120,14 +120,22 @@ pub async fn find_for_workspace(
     .await
 }
 
-pub async fn find_by_github_id(
+/// Every workspace connection of a GitHub repository. `github_repo_id` is
+/// only unique per (workspace_id, github_repo_id) — the same repo can be
+/// connected in several workspaces, and webhook processing must fan out to
+/// ALL of them (a single-row lookup would nondeterministically feed one
+/// workspace's timeline/pipelines and starve the others). Deterministic
+/// order for stable processing.
+pub async fn find_all_by_github_id(
     pool: &PgPool,
     github_repo_id: i64,
-) -> sqlx::Result<Option<Repository>> {
-    sqlx::query_as::<_, Repository>("SELECT * FROM repositories WHERE github_repo_id = $1")
-        .bind(github_repo_id)
-        .fetch_optional(pool)
-        .await
+) -> sqlx::Result<Vec<Repository>> {
+    sqlx::query_as::<_, Repository>(
+        "SELECT * FROM repositories WHERE github_repo_id = $1 ORDER BY created_at, id",
+    )
+    .bind(github_repo_id)
+    .fetch_all(pool)
+    .await
 }
 
 pub async fn delete_for_workspace(

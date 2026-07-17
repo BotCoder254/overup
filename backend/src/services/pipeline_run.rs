@@ -37,6 +37,18 @@ pub struct TriggerContext<'a> {
     /// Pull request number (pull_request trigger; reruns copy the original's).
     pub pr_number: Option<i32>,
     pub request_id: Option<&'a str>,
+    /// Webhook delivery id for event-triggered pipelines (None for manual
+    /// dispatch/rerun). Makes creation idempotent per (delivery, workflow),
+    /// so a retried delivery can never create duplicate pipelines.
+    pub webhook_delivery_id: Option<&'a str>,
+}
+
+/// Result of `create_pipeline`. `newly_created = false` means a retried
+/// webhook delivery hit the idempotency guard and `pipeline` is the row the
+/// earlier attempt created (already published + scheduled).
+pub struct CreatedPipeline {
+    pub pipeline: Pipeline,
+    pub newly_created: bool,
 }
 
 /// `INPUT_<NAME>` env var name for a dispatch input, GitHub-actions style:
@@ -76,7 +88,7 @@ pub async fn create_pipeline(
     workflow_path: &str,
     raw_content: &str,
     ctx: &TriggerContext<'_>,
-) -> AppResult<Pipeline> {
+) -> AppResult<CreatedPipeline> {
     let mut plans = pipeline_plan::build_plans(raw_content, &state.config.default_job_image)
         .map_err(|err| match err {
             PlanError::Invalid => {
@@ -144,25 +156,32 @@ pub async fn create_pipeline(
         timeout_seconds: state.config.pipeline_timeout_seconds,
         job_timeout_seconds: state.config.job_timeout_seconds,
         request_id: ctx.request_id,
+        webhook_delivery_id: ctx.webhook_delivery_id,
     };
-    let (pipeline, _jobs) = db::pipelines::create(&state.pool, &new, &plans).await?;
+    let (pipeline, _jobs, newly_created) = db::pipelines::create(&state.pool, &new, &plans).await?;
 
-    // publish_pipeline only fires on later transitions (started/finished);
-    // the Dashboard's KPI strip and timeline need to see brand-new pipelines
-    // immediately too.
-    state.workspace_hub.publish(
-        pipeline.workspace_id,
-        WorkspaceEvent::PipelineUpdate {
-            id: pipeline.id,
-            status: pipeline.status.clone(),
-            conclusion: pipeline.conclusion.clone(),
-            started_at: pipeline.started_at,
-            finished_at: pipeline.finished_at,
-        },
-    );
-
-    state.scheduler.poke();
-    Ok(pipeline)
+    // A retried delivery returning an existing pipeline was already
+    // published and scheduled on the first attempt — don't repeat either.
+    if newly_created {
+        // publish_pipeline only fires on later transitions (started/finished);
+        // the Dashboard's KPI strip and timeline need to see brand-new
+        // pipelines immediately too.
+        state.workspace_hub.publish(
+            pipeline.workspace_id,
+            WorkspaceEvent::PipelineUpdate {
+                id: pipeline.id,
+                status: pipeline.status.clone(),
+                conclusion: pipeline.conclusion.clone(),
+                started_at: pipeline.started_at,
+                finished_at: pipeline.finished_at,
+            },
+        );
+        state.scheduler.poke();
+    }
+    Ok(CreatedPipeline {
+        pipeline,
+        newly_created,
+    })
 }
 
 fn publish_job(state: &AppState, job: &PipelineJob) {

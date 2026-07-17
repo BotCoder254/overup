@@ -19,6 +19,7 @@ use crate::services::scheduler::Scheduler;
 use crate::services::search_indexer::SearchIndexer;
 use crate::services::secrets_crypto::SecretsCrypto;
 use crate::services::webhook_processor::WebhookProcessor;
+use crate::services::webhook_stats::WebhookAuthStats;
 use crate::services::workspace_hub::WorkspaceHub;
 use crate::services::ws_ticket::WsTicketStore;
 
@@ -52,6 +53,10 @@ pub struct AppState {
     pub notification_projector: Arc<NotificationProjector>,
     /// Wake handle for the async webhook-delivery processor loop.
     pub webhook_processor: Arc<WebhookProcessor>,
+    /// Deployment-global webhook signature-rejection gauge (in-memory;
+    /// surfaced on repository health so a bad GITHUB_WEBHOOK_SECRET is
+    /// visible in the UI instead of only in GitHub's Recent Deliveries).
+    pub webhook_auth: Arc<WebhookAuthStats>,
     /// Per-installation availability cache for GitHub Checks reporting.
     pub github_checks: Arc<GithubChecks>,
     /// Object storage router (MinIO primary / R2 fallback when both are
@@ -140,6 +145,7 @@ impl AppState {
             notification_hub: Arc::new(NotificationHub::default()),
             notification_projector,
             webhook_processor: Arc::new(WebhookProcessor::default()),
+            webhook_auth: Arc::new(WebhookAuthStats::default()),
             github_checks: Arc::new(GithubChecks::default()),
             storage,
             ws_tickets: Arc::new(WsTicketStore::default()),

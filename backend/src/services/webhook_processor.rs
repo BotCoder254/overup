@@ -6,13 +6,21 @@
 //! notification projector (Notify poke + tick backstop) but claims queue
 //! rows individually with guarded status UPDATEs: a single sequential
 //! consumer per process, so two pushes to the same repository can never be
-//! processed out of order. Failures retry up to `MAX_RETRIES`, stuck
-//! 'processing' rows revert on the tick (crash recovery), and every
-//! completion commits the repository-event timeline row and the delivery
-//! status flip in ONE transaction.
+//! processed out of order. NOTE: that per-repo ordering guarantee holds only
+//! under a SINGLE consumer process — deployment docs mandate `replicas: 1`.
+//! `FOR UPDATE SKIP LOCKED` in the claim keeps accidental concurrent
+//! instances from blocking each other, but it does NOT preserve ordering
+//! across instances. Failures retry up to `MAX_RETRIES`, stuck 'processing'
+//! rows revert on the tick (crash recovery), and every completion commits
+//! the repository-event timeline row(s) and the delivery status flip in ONE
+//! transaction. Pipeline creation is idempotent per (delivery, workflow), so
+//! a retried delivery re-running its side effects never duplicates pipelines.
 //!
-//! Everything persisted here is a static category string or server-built
-//! JSON — never upstream text.
+//! Outcomes, ignored reasons, and skip reasons are static category strings.
+//! Upstream-derived text (commit-message first line, PR title, sender login)
+//! DOES flow into pipeline metadata and event summaries as data — always
+//! length-capped by the receiver's normalizer, never raw payload bodies, and
+//! rendered client-side as text (never markup or URLs).
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -223,42 +231,49 @@ async fn commit_completion(
     Ok(())
 }
 
-/// Best-effort 'failed' timeline row for a terminally failed delivery.
+/// Best-effort 'failed' timeline row(s) for a terminally failed delivery —
+/// one per workspace connection of the repository.
 async fn record_failed_event(state: &AppState, delivery: &ClaimedDelivery) {
     let Some(github_repo_id) = delivery.github_repo_id else {
         return;
     };
-    let Ok(Some(repo)) = db::repositories::find_by_github_id(&state.pool, github_repo_id).await
+    let Ok(repos) = db::repositories::find_all_by_github_id(&state.pool, github_repo_id).await
     else {
         return;
     };
+    if repos.is_empty() {
+        return;
+    }
     let mut tx = match state.pool.begin().await {
         Ok(tx) => tx,
         Err(_) => return,
     };
-    let inserted = db::repository_events::insert(
-        &mut tx,
-        &db::repository_events::NewRepositoryEvent {
-            repository_id: repo.id,
-            delivery_id: &delivery.delivery_id,
-            event: &delivery.event,
-            action: delivery.action.as_deref(),
-            git_ref: payload_str(delivery, "ref"),
-            head_sha: payload_str(delivery, "after"),
-            actor_login: payload_str(delivery, "senderLogin"),
-            actor_avatar_url: payload_str(delivery, "senderAvatarUrl"),
-            outcome: OUTCOME_FAILED,
-            ignored_reason: None,
-            pipeline_ids: &[],
-            sync_run_id: None,
-            summary: &serde_json::json!({}),
-            received_at: delivery.received_at,
-        },
-    )
-    .await;
-    if inserted.is_ok() {
-        let _ = tx.commit().await;
+    for repo in &repos {
+        let inserted = db::repository_events::insert(
+            &mut tx,
+            &db::repository_events::NewRepositoryEvent {
+                repository_id: repo.id,
+                delivery_id: &delivery.delivery_id,
+                event: &delivery.event,
+                action: delivery.action.as_deref(),
+                git_ref: payload_str(delivery, "ref"),
+                head_sha: payload_str(delivery, "after"),
+                actor_login: payload_str(delivery, "senderLogin"),
+                actor_avatar_url: payload_str(delivery, "senderAvatarUrl"),
+                outcome: OUTCOME_FAILED,
+                ignored_reason: None,
+                pipeline_ids: &[],
+                sync_run_id: None,
+                summary: &serde_json::json!({}),
+                received_at: delivery.received_at,
+            },
+        )
+        .await;
+        if inserted.is_err() {
+            return;
+        }
     }
+    let _ = tx.commit().await;
 }
 
 fn payload_str<'a>(delivery: &'a ClaimedDelivery, key: &str) -> Option<&'a str> {
@@ -296,11 +311,13 @@ async fn process_push(
     let Some(github_repo_id) = delivery.github_repo_id else {
         return Ok(Completion::ignored());
     };
-    let Some(repo) = db::repositories::find_by_github_id(&state.pool, github_repo_id).await?
-    else {
+    // The same GitHub repository can be connected in several workspaces —
+    // fan out so every connection gets its timeline row and pipelines.
+    let repos = db::repositories::find_all_by_github_id(&state.pool, github_repo_id).await?;
+    if repos.is_empty() {
         // Not connected to any workspace: discard before further processing.
         return Ok(Completion::ignored());
-    };
+    }
     let Some(git_ref) = payload_str(delivery, "ref").map(str::to_string) else {
         return Ok(Completion::ignored());
     };
@@ -310,6 +327,58 @@ async fn process_push(
         .unwrap_or("")
         .to_string();
 
+    // Changed paths for filter evaluation (shared across repo rows); a
+    // truncated set fails open.
+    let truncated = delivery
+        .payload
+        .as_ref()
+        .and_then(|p| p.get("pathsTruncated"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
+    let changed_paths: Option<Vec<String>> = if truncated {
+        None
+    } else {
+        delivery
+            .payload
+            .as_ref()
+            .and_then(|p| p.get("changedPaths"))
+            .and_then(serde_json::Value::as_array)
+            .map(|paths| {
+                paths
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+    };
+
+    let mut events = Vec::with_capacity(repos.len());
+    for repo in &repos {
+        events.push(
+            push_event_for_repo(
+                state,
+                delivery,
+                repo,
+                &git_ref,
+                &commit_sha,
+                changed_paths.as_deref(),
+            )
+            .await?,
+        );
+    }
+    Ok(Completion::processed(events))
+}
+
+/// One workspace connection's share of a push delivery: sync scheduling,
+/// trigger evaluation, pipeline creation, and its timeline row.
+async fn push_event_for_repo(
+    state: &AppState,
+    delivery: &ClaimedDelivery,
+    repo: &Repository,
+    git_ref: &str,
+    commit_sha: &str,
+    changed_paths: Option<&[String]>,
+) -> anyhow::Result<EventRow> {
     if let Some(branch) = git_ref.strip_prefix("refs/heads/") {
         // A push to the default branch re-syncs the repository (the sync
         // diffs blob shas, so this stays cheap when nothing changed).
@@ -325,49 +394,25 @@ async fn process_push(
         let synced = sync_run_id.is_some() || sync_collapsed;
 
         // Branch deletions push an all-zero SHA; nothing to build.
-        if is_zero_sha(&commit_sha) {
-            return Ok(Completion::processed(vec![EventRow {
+        if is_zero_sha(commit_sha) {
+            return Ok(EventRow {
                 repository_id: repo.id,
-                git_ref: Some(git_ref),
+                git_ref: Some(git_ref.to_string()),
                 head_sha: None,
                 outcome: if synced { OUTCOME_SYNC } else { OUTCOME_IGNORED },
                 ignored_reason: (!synced).then_some(REASON_BRANCH_DELETED),
                 pipeline_ids: Vec::new(),
                 sync_run_id,
                 summary: serde_json::json!({ "branchDeleted": true }),
-            }]));
+            });
         }
-
-        // Changed paths for filter evaluation; a truncated set fails open.
-        let truncated = delivery
-            .payload
-            .as_ref()
-            .and_then(|p| p.get("pathsTruncated"))
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(true);
-        let changed_paths: Option<Vec<String>> = if truncated {
-            None
-        } else {
-            delivery
-                .payload
-                .as_ref()
-                .and_then(|p| p.get("changedPaths"))
-                .and_then(serde_json::Value::as_array)
-                .map(|paths| {
-                    paths
-                        .iter()
-                        .filter_map(serde_json::Value::as_str)
-                        .map(str::to_string)
-                        .collect()
-                })
-        };
 
         let ctx = trigger_eval::EventContext {
             kind: trigger_eval::EventKind::Push { branch },
-            changed_paths: changed_paths.as_deref(),
+            changed_paths,
         };
         let (pipeline_ids, skipped, considered) =
-            run_matching_workflows(state, delivery, &repo, "push", &commit_sha, &git_ref, None, &ctx)
+            run_matching_workflows(state, delivery, repo, "push", commit_sha, git_ref, None, &ctx)
                 .await?;
 
         let mut summary = serde_json::json!({ "skipped": skipped });
@@ -375,30 +420,30 @@ async fn process_push(
             summary["syncCollapsed"] = serde_json::json!(true);
         }
         let (outcome, reason) = push_outcome(&pipeline_ids, synced, considered);
-        return Ok(Completion::processed(vec![EventRow {
+        return Ok(EventRow {
             repository_id: repo.id,
-            git_ref: Some(git_ref),
-            head_sha: Some(commit_sha),
+            git_ref: Some(git_ref.to_string()),
+            head_sha: Some(commit_sha.to_string()),
             outcome,
             ignored_reason: reason,
             pipeline_ids,
             sync_run_id,
             summary,
-        }]));
+        });
     }
 
     if let Some(tag) = git_ref.strip_prefix("refs/tags/") {
-        if is_zero_sha(&commit_sha) {
-            return Ok(Completion::processed(vec![EventRow {
+        if is_zero_sha(commit_sha) {
+            return Ok(EventRow {
                 repository_id: repo.id,
-                git_ref: Some(git_ref),
+                git_ref: Some(git_ref.to_string()),
                 head_sha: None,
                 outcome: OUTCOME_IGNORED,
                 ignored_reason: Some(REASON_TAG_DELETED),
                 pipeline_ids: Vec::new(),
                 sync_run_id: None,
                 summary: serde_json::json!({ "tagDeleted": true }),
-            }]));
+            });
         }
 
         // Path filters deliberately never apply to tag pushes.
@@ -407,33 +452,33 @@ async fn process_push(
             changed_paths: None,
         };
         let (pipeline_ids, skipped, considered) =
-            run_matching_workflows(state, delivery, &repo, "tag", &commit_sha, &git_ref, None, &ctx)
+            run_matching_workflows(state, delivery, repo, "tag", commit_sha, git_ref, None, &ctx)
                 .await?;
 
         let (outcome, reason) = push_outcome(&pipeline_ids, false, considered);
-        return Ok(Completion::processed(vec![EventRow {
+        return Ok(EventRow {
             repository_id: repo.id,
-            git_ref: Some(git_ref),
-            head_sha: Some(commit_sha),
+            git_ref: Some(git_ref.to_string()),
+            head_sha: Some(commit_sha.to_string()),
             outcome,
             ignored_reason: reason,
             pipeline_ids,
             sync_run_id: None,
             summary: serde_json::json!({ "skipped": skipped }),
-        }]));
+        });
     }
 
     // Neither a branch nor a tag ref — record it, run nothing.
-    Ok(Completion::processed(vec![EventRow {
+    Ok(EventRow {
         repository_id: repo.id,
-        git_ref: Some(git_ref),
+        git_ref: Some(git_ref.to_string()),
         head_sha: None,
         outcome: OUTCOME_IGNORED,
         ignored_reason: Some(REASON_EVENT_NOT_SUPPORTED),
         pipeline_ids: Vec::new(),
         sync_run_id: None,
         summary: serde_json::json!({}),
-    }]))
+    })
 }
 
 fn push_outcome(
@@ -514,6 +559,9 @@ async fn run_matching_workflows(
                     inputs: None,
                     pr_number: pr.map(|pr| pr.number),
                     request_id: None,
+                    // Idempotency key: a retried delivery re-running this
+                    // side effect gets the existing pipeline back.
+                    webhook_delivery_id: Some(&delivery.delivery_id),
                 };
                 match pipeline_run::create_pipeline(
                     state,
@@ -526,10 +574,14 @@ async fn run_matching_workflows(
                 )
                 .await
                 {
-                    Ok(pipeline) => {
-                        // Report a queued check run to GitHub (best-effort).
-                        github_checks::spawn_create(state, pipeline.id);
-                        pipeline_ids.push(pipeline.id);
+                    Ok(created) => {
+                        // Report a queued check run to GitHub (best-effort) —
+                        // only for genuinely new pipelines, so a retried
+                        // delivery never posts a duplicate check run.
+                        if created.newly_created {
+                            github_checks::spawn_create(state, created.pipeline.id);
+                        }
+                        pipeline_ids.push(created.pipeline.id);
                     }
                     Err(error) => {
                         // Validation failures (e.g. uses:-only workflows) are
@@ -562,10 +614,11 @@ async fn process_pull_request(
     let Some(github_repo_id) = delivery.github_repo_id else {
         return Ok(Completion::ignored());
     };
-    let Some(repo) = db::repositories::find_by_github_id(&state.pool, github_repo_id).await?
-    else {
+    // Fan out to every workspace connection of this repository.
+    let repos = db::repositories::find_all_by_github_id(&state.pool, github_repo_id).await?;
+    if repos.is_empty() {
         return Ok(Completion::ignored());
-    };
+    }
     let Some(pr) = delivery.payload.as_ref().and_then(|p| p.get("pullRequest")) else {
         return Ok(Completion::ignored());
     };
@@ -580,7 +633,8 @@ async fn process_pull_request(
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
 
-    let event_row = |outcome: &'static str,
+    let event_row = |repository_id: Uuid,
+                     outcome: &'static str,
                      reason: Option<&'static str>,
                      pipeline_ids: Vec<Uuid>,
                      skipped: Vec<serde_json::Value>| {
@@ -592,7 +646,7 @@ async fn process_pull_request(
             summary["merged"] = serde_json::json!(true);
         }
         EventRow {
-            repository_id: repo.id,
+            repository_id,
             git_ref: number.map(|n| format!("refs/pull/{n}/head")),
             head_sha: head_sha.map(str::to_string),
             outcome,
@@ -602,24 +656,27 @@ async fn process_pull_request(
             summary,
         }
     };
+    // The same terminal outcome, stamped onto every workspace connection.
+    let rows_for_all = |outcome: &'static str, reason: Option<&'static str>| {
+        repos
+            .iter()
+            .map(|repo| event_row(repo.id, outcome, reason, Vec::new(), Vec::new()))
+            .collect::<Vec<_>>()
+    };
 
     // A closed PR never creates a pipeline here: a merge produces a push
     // event for the merge commit, which flows through push triggers.
     if action == "closed" {
-        return Ok(Completion::processed(vec![event_row(
+        return Ok(Completion::processed(rows_for_all(
             OUTCOME_IGNORED,
             Some(REASON_PR_CLOSED),
-            Vec::new(),
-            Vec::new(),
-        )]));
+        )));
     }
     if action.is_empty() {
-        return Ok(Completion::processed(vec![event_row(
+        return Ok(Completion::processed(rows_for_all(
             OUTCOME_IGNORED,
             Some(REASON_PR_ACTION_IGNORED),
-            Vec::new(),
-            Vec::new(),
-        )]));
+        )));
     }
 
     // Fork PRs never execute: workspace secrets must not flow to fork code,
@@ -627,29 +684,23 @@ async fn process_pull_request(
     // ids fail safe (treated as a fork).
     let same_repo = matches!((head_repo, base_repo), (Some(h), Some(b)) if h == b);
     if !same_repo {
-        return Ok(Completion::processed(vec![event_row(
+        return Ok(Completion::processed(rows_for_all(
             OUTCOME_IGNORED,
             Some(REASON_FORK_PR_SKIPPED),
-            Vec::new(),
-            Vec::new(),
-        )]));
+        )));
     }
 
     let (Some(number), Some(head_sha), Some(base_ref)) = (number, head_sha, base_ref) else {
-        return Ok(Completion::processed(vec![event_row(
+        return Ok(Completion::processed(rows_for_all(
             OUTCOME_IGNORED,
             Some(REASON_NO_HEAD_COMMIT),
-            Vec::new(),
-            Vec::new(),
-        )]));
+        )));
     };
     let Ok(pr_number) = i32::try_from(number) else {
-        return Ok(Completion::processed(vec![event_row(
+        return Ok(Completion::processed(rows_for_all(
             OUTCOME_IGNORED,
             Some(REASON_PR_ACTION_IGNORED),
-            Vec::new(),
-            Vec::new(),
-        )]));
+        )));
     };
 
     let pr_ctx = PrContext {
@@ -673,36 +724,35 @@ async fn process_pull_request(
         },
         changed_paths: None,
     };
-    let (pipeline_ids, skipped, considered) = run_matching_workflows(
-        state,
-        delivery,
-        &repo,
-        "pull_request",
-        head_sha,
-        &git_ref,
-        Some(&pr_ctx),
-        &ctx,
-    )
-    .await?;
-
-    let (outcome, reason) = if pipeline_ids.is_empty() {
-        (
-            OUTCOME_IGNORED,
-            Some(if considered == 0 {
-                REASON_NO_MATCHING_WORKFLOWS
-            } else {
-                REASON_FILTERS_NOT_MATCHED
-            }),
+    let mut events = Vec::with_capacity(repos.len());
+    for repo in &repos {
+        let (pipeline_ids, skipped, considered) = run_matching_workflows(
+            state,
+            delivery,
+            repo,
+            "pull_request",
+            head_sha,
+            &git_ref,
+            Some(&pr_ctx),
+            &ctx,
         )
-    } else {
-        (OUTCOME_PIPELINES, None)
-    };
-    Ok(Completion::processed(vec![event_row(
-        outcome,
-        reason,
-        pipeline_ids,
-        skipped,
-    )]))
+        .await?;
+
+        let (outcome, reason) = if pipeline_ids.is_empty() {
+            (
+                OUTCOME_IGNORED,
+                Some(if considered == 0 {
+                    REASON_NO_MATCHING_WORKFLOWS
+                } else {
+                    REASON_FILTERS_NOT_MATCHED
+                }),
+            )
+        } else {
+            (OUTCOME_PIPELINES, None)
+        };
+        events.push(event_row(repo.id, outcome, reason, pipeline_ids, skipped));
+    }
+    Ok(Completion::processed(events))
 }
 
 async fn process_repository(
@@ -713,56 +763,73 @@ async fn process_repository(
     let Some(github_repo_id) = delivery.github_repo_id else {
         return Ok(Completion::ignored());
     };
-    let Some(repo) = db::repositories::find_by_github_id(&state.pool, github_repo_id).await?
-    else {
+    // Fan out to every workspace connection of this repository.
+    let repos = db::repositories::find_all_by_github_id(&state.pool, github_repo_id).await?;
+    if repos.is_empty() {
         return Ok(Completion::ignored());
-    };
+    }
     match action {
         "deleted" => {
+            // mark_failed keys on the GitHub id, so one call covers every
+            // workspace connection.
             db::repositories::mark_failed(
                 &state.pool,
                 &[github_repo_id],
                 "repository deleted on github",
             )
             .await?;
-            Ok(Completion::processed(vec![EventRow {
-                repository_id: repo.id,
-                git_ref: None,
-                head_sha: None,
-                outcome: OUTCOME_IGNORED,
-                ignored_reason: Some(REASON_REPOSITORY_DELETED),
-                pipeline_ids: Vec::new(),
-                sync_run_id: None,
-                summary: serde_json::json!({}),
-            }]))
+            Ok(Completion::processed(
+                repos
+                    .iter()
+                    .map(|repo| EventRow {
+                        repository_id: repo.id,
+                        git_ref: None,
+                        head_sha: None,
+                        outcome: OUTCOME_IGNORED,
+                        ignored_reason: Some(REASON_REPOSITORY_DELETED),
+                        pipeline_ids: Vec::new(),
+                        sync_run_id: None,
+                        summary: serde_json::json!({}),
+                    })
+                    .collect(),
+            ))
         }
         "renamed" | "edited" | "privatized" | "publicized" | "transferred" => {
-            let sync_run_id = repo_sync::schedule(state, repo.id, "webhook").await?;
-            Ok(Completion::processed(vec![EventRow {
-                repository_id: repo.id,
-                git_ref: None,
-                head_sha: None,
-                outcome: OUTCOME_SYNC,
-                ignored_reason: None,
-                pipeline_ids: Vec::new(),
-                sync_run_id,
-                summary: if sync_run_id.is_none() {
-                    serde_json::json!({ "syncCollapsed": true })
-                } else {
-                    serde_json::json!({})
-                },
-            }]))
+            let mut events = Vec::with_capacity(repos.len());
+            for repo in &repos {
+                let sync_run_id = repo_sync::schedule(state, repo.id, "webhook").await?;
+                events.push(EventRow {
+                    repository_id: repo.id,
+                    git_ref: None,
+                    head_sha: None,
+                    outcome: OUTCOME_SYNC,
+                    ignored_reason: None,
+                    pipeline_ids: Vec::new(),
+                    sync_run_id,
+                    summary: if sync_run_id.is_none() {
+                        serde_json::json!({ "syncCollapsed": true })
+                    } else {
+                        serde_json::json!({})
+                    },
+                });
+            }
+            Ok(Completion::processed(events))
         }
-        _ => Ok(Completion::processed(vec![EventRow {
-            repository_id: repo.id,
-            git_ref: None,
-            head_sha: None,
-            outcome: OUTCOME_IGNORED,
-            ignored_reason: Some(REASON_EVENT_NOT_SUPPORTED),
-            pipeline_ids: Vec::new(),
-            sync_run_id: None,
-            summary: serde_json::json!({}),
-        }])),
+        _ => Ok(Completion::processed(
+            repos
+                .iter()
+                .map(|repo| EventRow {
+                    repository_id: repo.id,
+                    git_ref: None,
+                    head_sha: None,
+                    outcome: OUTCOME_IGNORED,
+                    ignored_reason: Some(REASON_EVENT_NOT_SUPPORTED),
+                    pipeline_ids: Vec::new(),
+                    sync_run_id: None,
+                    summary: serde_json::json!({}),
+                })
+                .collect(),
+        )),
     }
 }
 
@@ -832,16 +899,15 @@ async fn process_installation_repositories(
         return Ok(Completion::processed(Vec::new()));
     }
 
-    // Timeline rows only for repositories actually connected here.
+    // Timeline rows only for repositories actually connected here — one per
+    // workspace connection.
     let mut events = Vec::new();
     let mut seen = HashSet::new();
     for github_repo_id in &ids {
         if !seen.insert(*github_repo_id) {
             continue;
         }
-        if let Some(repo) =
-            db::repositories::find_by_github_id(&state.pool, *github_repo_id).await?
-        {
+        for repo in db::repositories::find_all_by_github_id(&state.pool, *github_repo_id).await? {
             events.push(EventRow {
                 repository_id: repo.id,
                 git_ref: None,

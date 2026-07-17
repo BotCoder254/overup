@@ -18,6 +18,15 @@ const SYNC_LABELS: Record<Repository['syncStatus'], string> = {
   failed: 'Failed',
 };
 
+/** Static rejection causes → operator-facing hints (server vocabulary). */
+const REJECTION_HINTS: Record<string, string> = {
+  missing_header: 'App has no webhook secret set',
+  malformed_header: 'signature header unreadable',
+  bad_prefix: 'sender is not signing with sha256',
+  invalid_hex: 'signature digest malformed',
+  mismatch: 'secret mismatch — check GITHUB_WEBHOOK_SECRET',
+};
+
 interface CellProps {
   label: string;
   value: ReactNode;
@@ -92,10 +101,32 @@ export function RepositorySyncPanel({ repository, health }: RepositorySyncPanelP
         ? 'results report to commits'
         : 'reporting disabled',
     },
+    {
+      label: 'Webhook auth',
+      value:
+        health.webhookAuth.rejections24h > 0
+          ? String(health.webhookAuth.rejections24h)
+          : 'OK',
+      valueClassName: health.webhookAuth.rejections24h > 0 ? 'text-danger' : undefined,
+      hint:
+        health.webhookAuth.rejections24h > 0
+          ? `${
+              health.webhookAuth.lastCause
+                ? REJECTION_HINTS[health.webhookAuth.lastCause] ?? health.webhookAuth.lastCause
+                : 'deliveries rejected'
+            }${
+              health.webhookAuth.lastRejectedAt
+                ? ` · last ${formatDistanceToNow(new Date(health.webhookAuth.lastRejectedAt), {
+                    addSuffix: true,
+                  })}`
+                : ''
+            }`
+          : 'signatures verifying',
+    },
   ];
 
   return (
-    <div className="mb-6 grid grid-cols-2 gap-px overflow-hidden rounded border border-steel/20 bg-steel/10 sm:grid-cols-3 lg:grid-cols-5">
+    <div className="mb-6 grid grid-cols-2 gap-px overflow-hidden rounded border border-steel/20 bg-steel/10 sm:grid-cols-3 lg:grid-cols-6">
       {cells.map((cell) => (
         <Cell key={cell.label} {...cell} />
       ))}
