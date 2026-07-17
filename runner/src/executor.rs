@@ -79,7 +79,9 @@ while [ $# -gt 0 ]; do
     *) break ;;
   esac
 done
-[ $# -eq 0 ] && exec /bin/sh
+# Nothing left to run (`sudo -s`, `sudo -u` with no command). Never start a
+# shell here: with stdin open it would block until the job times out.
+[ $# -eq 0 ] && exit 0
 exec env "$@"
 "#;
 
@@ -1295,6 +1297,8 @@ mod tests {
         assert!(SUDO_SHIM.starts_with("#!/bin/sh\n"));
         assert!(SUDO_SHIM.contains(r#"exec env "$@""#));
         assert!(!SUDO_SHIM.contains("/usr/bin/sudo"));
+        // An interactive shell here would block until the job timed out.
+        assert!(!SUDO_SHIM.contains("exec /bin/sh"));
         // Options taking a separate argument must consume both slots, or the
         // shim would exec the argument (`sudo -u root apt-get` -> `root …`).
         assert!(SUDO_SHIM.contains("-u|-g|-p|-C|-D|-R|-T)"));
