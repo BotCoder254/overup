@@ -143,7 +143,7 @@ you — a fresh deployment that keeps the default `RUNNER_IMAGE` will log
 
 ```bash
 # From the repo root — the context must include runner/ AND protocol/.
-docker build -f runner/Dockerfile -t ghcr.io/<your-gh-username>/overup-runner:latest .
+docker build --build-arg BUILD_REF=$(git rev-parse --short HEAD) -f runner/Dockerfile -t ghcr.io/<your-gh-username>/overup-runner:latest .
 
 # PAT (classic) with the write:packages scope.
 echo <PAT> | docker login ghcr.io -u <your-gh-username> --password-stdin
@@ -157,7 +157,7 @@ Then make it publicly pullable — `docker push` creates GHCR packages as
 `RUNNER_IMAGE` accordingly.)
 
 **No-registry alternative:** build the image directly on the server's daemon
-under the same tag (`docker build -f runner/Dockerfile -t
+under the same tag (`docker build --build-arg BUILD_REF=$(git rev-parse --short HEAD) -f runner/Dockerfile -t
 ghcr.io/<you>/overup-runner:latest .` on the VPS). The provisioner still tries
 the registry first to keep `:latest` fresh, but a locally present image
 satisfies both the pre-pull warm-up and hosted-runner provisioning when the
@@ -200,7 +200,7 @@ From the **repository root** (the context must include both `runner/` and `proto
 — the runner depends on the sibling `protocol` crate, same rule as the backend image):
 
 ```bash
-docker build -f runner/Dockerfile -t overup-runner:latest .
+docker build --build-arg BUILD_REF=$(git rev-parse --short HEAD) -f runner/Dockerfile -t overup-runner:latest .
 ```
 
 Multi-stage: `rust:1-slim-bookworm` builder with a cached dependency layer →

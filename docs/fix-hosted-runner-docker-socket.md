@@ -131,14 +131,14 @@ registry denies every anonymous pull. Two fixes, pick one
 
 ```bash
 # A) Publish once from any machine with the repo (recommended):
-docker build -f runner/Dockerfile -t ghcr.io/<your-gh-username>/overup-runner:latest .
+docker build --build-arg BUILD_REF=$(git rev-parse --short HEAD) -f runner/Dockerfile -t ghcr.io/<your-gh-username>/overup-runner:latest .
 echo <PAT with write:packages> | docker login ghcr.io -u <your-gh-username> --password-stdin
 docker push ghcr.io/<your-gh-username>/overup-runner:latest
 # then on github.com: Packages → overup-runner → Package settings → Change visibility → Public
 # (docker push creates GHCR packages PRIVATE by default — this step is required)
 
 # B) No registry — build on the VPS under the same tag:
-docker build -f runner/Dockerfile -t ghcr.io/<your-gh-username>/overup-runner:latest .
+docker build --build-arg BUILD_REF=$(git rev-parse --short HEAD) -f runner/Dockerfile -t ghcr.io/<your-gh-username>/overup-runner:latest .
 ```
 
 With option B the registry pull still fails, but a locally present image satisfies

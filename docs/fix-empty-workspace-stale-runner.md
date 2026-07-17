@@ -35,8 +35,28 @@ independent problems with three independent fixes:
 | `ENOENT /workspace/package.json` (workspace empty at step time) | The deployed runner image contains the **old, pre-archive-API binary** | §1–§5 |
 | `failed to extract layer … failed to Lchown … no such file or directory` | **Docker-host** containerd snapshotter state (disk pressure / partial-pull leftovers), not Overup | §6 |
 | `cargo: not found` (or any missing toolchain) | The **job image** doesn't ship that toolchain — `catthehacker/ubuntu:act-latest` has no Rust | §7 |
+| `sudo: … setresuid(-1, 1, -1): Operation not permitted` | The deployed runner predates the **sudo shim** — a current runner logs `sudo shim installed` right after `container started` | §1–§5 |
 
-## 0. The 10-second diagnostic: read the log ORDER, not the log text
+## 0. The 1-second diagnostic: read the runner's version
+
+Every runner reports `0.1.0+<git-ref>` — the ref is stamped in at build time
+(`runner/build.rs`) and appears in the **Runners UI** version column and in the runner
+container's first log line:
+
+```
+INFO runner: overup runner starting version=0.1.0+2c05f20
+```
+
+Compare it to `git rev-parse --short HEAD` of the source you expect to be deployed. If
+they differ, the runner is stale — stop here and go to §2. (`+unknown` means the image
+was built without `--build-arg BUILD_REF=…`; see §2.)
+
+`docker logs <runner-container> | head -1` gets it straight from the host.
+
+## 0b. The 10-second diagnostic: read the log ORDER, not the log text
+
+Older runners predate the version stamp, so their `version` is a bare `0.1.0`. For
+those, the log ORDER still fingerprints the binary:
 
 The old and new runner binaries produce almost identical log lines — but in a
 **different order**. This ordering is the single reliable fingerprint for which binary
@@ -83,13 +103,11 @@ of them must be closed:
    only **revoking and re-creating** the hosted runner produces a container on the
    new image.
 
-A CI job now exists (`.github/workflows/ci.yml`, job `runner-image`) that builds
-`runner/Dockerfile` and pushes `:latest` + `:{sha}` to GHCR on every push to `main` —
-that is the durable fix for gap 2. Note it only helps when GitHub Actions actually
-runs: on a **private** repository, an exhausted spending limit or a failed payment
-makes every workflow die instantly as `startup_failure` (even Dependabot's), and the
-publish silently never happens. Check github.com → Settings → Billing if runs show
-`startup_failure` at 0s. Until Actions is healthy, publish manually (§2–§3).
+**There is no CI job that publishes the runner image.** `.github/workflows/ci.yml`
+contains exactly one job (`frontend`); its header states that the Rust crates and the
+GHCR runner-image publish were deliberately removed. Nothing on any branch — including
+`main` — turns a merged runner commit into a new image. Gap 2 is closed only by a human
+running §2–§3. Assume every runner change requires a manual publish, because it does.
 
 ## 2. Rebuild from the RIGHT source
 
@@ -111,7 +129,7 @@ git log --oneline -5
 # timestamp.
 
 # Build context MUST be the repo root (runner/ needs the sibling protocol/ crate):
-docker build -f runner/Dockerfile -t ghcr.io/<your-gh-username>/overup-runner:latest .
+docker build --build-arg BUILD_REF=$(git rev-parse --short HEAD) -f runner/Dockerfile -t ghcr.io/<your-gh-username>/overup-runner:latest .
 ```
 
 ## 3. Verify the binary INSIDE the image before shipping it
@@ -130,7 +148,20 @@ docker run --rm --entrypoint sh ghcr.io/<your-gh-username>/overup-runner:latest 
   and rebuild.
 
 Other new-binary marker strings, if you want a stronger check:
-`" files)"`, `"using locally cached image"`, `"contained no usable files"`.
+`" files)"`, `"using locally cached image"`, `"contained no usable files"`,
+`"sudo shim installed"` (present only in runners carrying the sudo fix).
+
+Stronger still — ask the binary who it is, rather than grepping for strings:
+
+```bash
+docker run --rm --entrypoint /app/runner ghcr.io/<your-gh-username>/overup-runner:latest 2>&1 | head -1
+# INFO runner: overup runner starting version=0.1.0+2c05f20
+#   (then it exits on the missing RUNNER_TOKEN — that is expected here)
+```
+
+The ref after `+` must equal `git rev-parse --short HEAD` of the tree you built. A
+`+unknown` means the `--build-arg BUILD_REF=…` was omitted (§2): the image is probably
+fine, but it can never be identified later — rebuild with the arg.
 
 Then push (PAT with `write:packages`; package must be **public** — see
 [publish-runner-image.md](./publish-runner-image.md) §3):

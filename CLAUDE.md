@@ -759,20 +759,35 @@ into a traversal-safe tar streamed into the container via the Docker archive API
   throwaway per-job bridge network removed on every exit path), optional non-root
   `RUNNER_JOB_USER` and `RUNNER_JOB_READONLY_ROOTFS` (tmpfs /tmp), SIGKILL on
   cancel/timeout, containers force-removed afterwards
-- **`sudo` is shimmed, never enabled** (`RUNNER_SUDO_SHIM`, default true): the
-  unconditional `no-new-privileges` makes the kernel ignore the setuid bit, so the real
-  setuid `sudo` structurally cannot run (`setresuid: Operation not permitted`) — while
-  the privilege it requests is already held, because job containers run as root.
-  Workflows carry `sudo` only because GitHub's hosted runners are non-root. So the
-  runner uploads `/usr/local/bin/sudo` (ahead of `/usr/bin` on PATH) — a shim that
-  strips sudo's options and `exec env "$@"`s the command, covering both the plain and
-  `VAR=val` forms. It is a COMPATIBILITY shim, not a relaxation: installed ONLY when
-  `id -u` returns 0 (root->root escalates nothing), skipped under a read-only rootfs and
-  for non-root `RUNNER_JOB_USER` containers (whose `sudo` then fails honestly rather
-  than being lied to), and best-effort — an install failure warns into the job log and
-  never fails the job. It never invokes the real binary, never changes user, and never
-  starts a shell when no command remains (that would block until the job timed out).
+- **`sudo` is shimmed, never enabled** (`RUNNER_SUDO_SHIM`, default true): job containers
+  already run as root, but that root is capability-less — `cap_drop: ALL` strips
+  **`CAP_SETUID` from root itself**, and the unconditional `no-new-privileges` makes the
+  kernel ignore the setuid bit. Either alone breaks setuid `sudo`
+  (`setresuid(-1, 1, -1): Operation not permitted` — note this proves the caller is
+  capability-less, NOT non-root: real root would pass that call), while the privilege
+  sudo requests is already held. Workflows carry `sudo` only because GitHub's hosted
+  runners are non-root. So the runner uploads `/usr/local/bin/sudo` (ahead of `/usr/bin`
+  on PATH) — a shim that strips sudo's options and `exec env "$@"`s the command,
+  covering both the plain and `VAR=val` forms. It is a COMPATIBILITY shim, not a
+  relaxation: installed ONLY when `id -u` returns 0 (root->root escalates nothing),
+  skipped under a read-only rootfs and for non-root `RUNNER_JOB_USER` containers (whose
+  `sudo` then fails honestly rather than being lied to), and best-effort — an install
+  failure warns into the job log and never fails the job. It never invokes the real
+  binary, never changes user, and never starts a shell when no command remains (that
+  would block until the job timed out). EVERY branch logs its outcome to the job log:
+  a silent skip is indistinguishable from a runner too old to have the code at all.
   `no-new-privileges` and cap-drop are unchanged and stay hardcoded/default-on
+- **The runner stamps its source ref into its own identity** (`runner/build.rs` →
+  `RUNNER_BUILD_REF` → `hello.version` = `0.1.0+<git-ref>`, stored on the runner row,
+  logged at startup). `CARGO_PKG_VERSION` alone is a hardcoded `0.1.0` identical in
+  every build ever made, which is how stale runner images go unnoticed — nothing in CI
+  builds or publishes the runner image (`ci.yml` is frontend-only by design), hosted
+  containers are pinned to their creation-time image ID with NO digest comparison
+  anywhere, and a backend restart never moves them. A runner change therefore requires
+  a manual `docker build --build-arg BUILD_REF=$(git rev-parse --short HEAD)` + push +
+  **revoke and re-create the runner**. `.dockerignore` excludes `.git`, so build.rs
+  cannot shell out to git inside the image — hence the build arg. See
+  `docs/fix-empty-workspace-stale-runner.md`
 - Remote Docker daemons are TLS-only in practice: the runner honors `DOCKER_HOST` with
   `DOCKER_TLS_VERIFY=1` + `DOCKER_CERT_PATH` (rustls; bollard `ssl` feature) — never expose
   an unauthenticated tcp://2375 daemon
