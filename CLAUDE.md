@@ -285,6 +285,27 @@ allow-list + path re-validation + cap) before `WorkflowDetailResponse` ships met
 the workflow Metadata tab renders a "Files referenced" section (found/not found/
 unverified badges), and the pipeline step timeline shows `in <dir>/` per step.
 
+**Checkout model + its known limits.** The execution context is the complete repository
+at an immutable commit — `scheduler.rs::build_checkout` pins the tarball URL to
+`pipeline.commit_sha` (never a branch ref, so a push racing a job cannot change what
+builds), and the runner reconstructs the tree into `/workspace` BEFORE any container
+starts. Execution never reads repository content from Postgres: sync exists for workflow
+discovery, trigger evaluation, and UI only, so a script added moments before a push is
+present at runtime. Deliberate non-goals, all consequences of tarball-over-API rather
+than git (`git2` stays rejected — heavy native dep on Windows, and the API needs no
+cloning):
+- **No `.git` directory.** `/workspace` is a plain snapshot, so `git describe`,
+  `git rev-parse HEAD`, `git diff HEAD~1`, and version tools that read git metadata
+  (`setuptools-scm`, nbgv, changelog generators) fail. The largest gap vs
+  `actions/checkout`. Pass the SHA through env instead.
+- **Symlinks and hardlinks are dropped**, not just escaping ones — a link target can't be
+  validated by path checks. A repo that legitimately contains symlinks materializes
+  incompletely, and today this surfaces only as a runner-side `tracing::warn`, not in the
+  job log the user reads.
+- **No submodules, sparse checkout, shallow/`fetch-depth`, or LFS.**
+- **No repository cache** — every job re-downloads the full tarball (1 GiB compressed
+  cap; the repackaged tar is buffered in memory, so the decompressed size is unbounded).
+
 **Notification Center (operational inbox).** Notifications are a per-user, actionable
 PROJECTION of the immutable `audit_logs` ledger — the Activity Feed keeps the complete
 history, notifications hold only what a user should act on (OWASP's audit-vs-messaging
