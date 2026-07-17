@@ -19,6 +19,26 @@ interface AnnouncementBannerProps {
 
 const STORAGE_PREFIX = 'overup.banner.dismissed.';
 
+/**
+ * Only ever navigate to links we can prove are safe: root-relative internal
+ * paths, or absolute http(s) URLs. Anything else — `javascript:`, `data:`,
+ * `vbscript:`, protocol-relative `//evil.com`, malformed input — is rejected,
+ * so a compromised/attacker-controlled `actionHref` can never become an XSS or
+ * open-redirect sink.
+ */
+function isSafeHref(href: string): boolean {
+  const value = href.trim();
+  if (!value) return false;
+  // Root-relative internal link (but not protocol-relative "//host").
+  if (value.startsWith('/') && !value.startsWith('//')) return true;
+  try {
+    const url = new URL(value, window.location.origin);
+    return url.protocol === 'https:' || url.protocol === 'http:';
+  } catch {
+    return false;
+  }
+}
+
 export function AnnouncementBanner({
   id = 'workspace-capacity-2026',
   message = (
@@ -32,10 +52,17 @@ export function AnnouncementBanner({
   actionHref = 'https://github.com/BotCoder254/overup',
 }: AnnouncementBannerProps) {
   const storageKey = `${STORAGE_PREFIX}${id}`;
-  const [dismissed, setDismissed] = useState(true);
+  // Read persisted dismissal synchronously on first render: new users see the
+  // banner immediately, and a user who already closed it never gets a flash.
+  const [dismissed, setDismissed] = useState(() => {
+    try {
+      return window.localStorage.getItem(storageKey) === '1';
+    } catch {
+      return false;
+    }
+  });
 
-  // Read persisted dismissal after mount (avoids a first-paint flash of a
-  // banner the user already closed).
+  // Re-sync when the announcement id (and thus its storage key) changes.
   useEffect(() => {
     try {
       setDismissed(window.localStorage.getItem(storageKey) === '1');
@@ -43,6 +70,8 @@ export function AnnouncementBanner({
       setDismissed(false);
     }
   }, [storageKey]);
+
+  const showAction = Boolean(actionLabel && actionHref && isSafeHref(actionHref));
 
   const close = () => {
     setDismissed(true);
@@ -69,11 +98,12 @@ export function AnnouncementBanner({
           {message}
         </p>
 
-        {actionLabel && actionHref && (
+        {showAction && (
           <a
             href={actionHref}
             target="_blank"
-            rel="noopener noreferrer"
+            rel="noopener noreferrer nofollow"
+            referrerPolicy="no-referrer"
             className="hidden shrink-0 items-center gap-1 rounded bg-white px-3 py-1.5 text-xs font-semibold text-primary transition-colors hover:bg-white/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-primary sm:inline-flex"
           >
             {actionLabel}
