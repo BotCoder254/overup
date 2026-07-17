@@ -22,7 +22,9 @@ pub struct PlannedJob {
     pub name: Option<String>,
     pub runs_on: Vec<String>,
     pub needs: Vec<String>,
-    /// `{ image, env, steps: [{name, run, shell}], environment, notices }`
+    /// `{ image, env, steps: [{name, run, shell, workingDirectory?}],
+    /// environment, notices }` — `workingDirectory` is present only when the
+    /// step declares one (workspace root stays implicit).
     pub plan: serde_json::Value,
     pub position: i32,
 }
@@ -96,6 +98,23 @@ pub fn build_plans(raw_content: &str, default_image: &str) -> Result<Vec<Planned
         let mut env = root_env.clone();
         env.extend(env_map(job_node.get("env")));
 
+        // GitHub precedence: step `working-directory` > job
+        // `defaults.run.working-directory` > workflow `defaults.run.
+        // working-directory`. Invalid values fall back to the workspace root
+        // with a visible notice; the value itself never ships unvalidated.
+        let job_default_workdir = match defaults_working_directory(&job_node)
+            .or_else(|| defaults_working_directory(&doc))
+        {
+            None => None,
+            Some(raw) => match plan_working_directory(raw) {
+                Ok(value) => Some(value),
+                Err(bad) => {
+                    push_workdir_notice(&mut notices, &bad);
+                    None
+                }
+            },
+        };
+
         let mut steps = Vec::new();
         if let Some(uses) = &job.uses {
             notices.push(format!(
@@ -136,11 +155,26 @@ pub fn build_plans(raw_content: &str, default_image: &str) -> Result<Vec<Planned
                     Some("bash") => "bash",
                     _ => "sh",
                 };
-                steps.push(serde_json::json!({
+                let working_directory = match step.get("working-directory").and_then(Value::as_str)
+                {
+                    Some(raw) => match plan_working_directory(raw) {
+                        Ok(value) => Some(value),
+                        Err(bad) => {
+                            push_workdir_notice(&mut notices, &bad);
+                            None
+                        }
+                    },
+                    None => job_default_workdir.clone(),
+                };
+                let mut step_json = serde_json::json!({
                     "name": name,
                     "run": run,
                     "shell": shell,
-                }));
+                });
+                if let Some(workdir) = working_directory {
+                    step_json["workingDirectory"] = serde_json::Value::String(workdir);
+                }
+                steps.push(step_json);
             }
         }
 
@@ -251,6 +285,44 @@ fn sanitize_for_notice(value: &str) -> String {
     value.chars().filter(|c| !c.is_control()).take(100).collect()
 }
 
+/// The `defaults.run.working-directory` string under a workflow root or job
+/// node, if present. Non-string values read as absent — the parser already
+/// emitted a warning for them.
+fn defaults_working_directory(node: &Value) -> Option<&str> {
+    node.get("defaults")?
+        .get("run")?
+        .get("working-directory")?
+        .as_str()
+}
+
+/// Classify a `working-directory` value for plan emission. `Ok` is the value
+/// to persist: a normalized static path, or a `${{ … }}` expression carried
+/// verbatim (the scheduler substitutes and re-validates it at dispatch).
+/// `Err` carries the sanitized fragment for a notice — the step falls back
+/// to the workspace root and the raw value never ships.
+fn plan_working_directory(raw: &str) -> Result<String, String> {
+    if raw.contains("${{") {
+        // Never truncate a path — a cut expression changes meaning.
+        if raw.len() <= protocol::MAX_RELATIVE_PATH_BYTES && !raw.chars().any(char::is_control) {
+            return Ok(raw.to_string());
+        }
+        return Err(sanitize_for_notice(raw));
+    }
+    protocol::normalize_relative_path(raw).ok_or_else(|| sanitize_for_notice(raw))
+}
+
+/// One notice per distinct rejected working-directory value per job — a bad
+/// job-level default must not repeat for every step.
+fn push_workdir_notice(notices: &mut Vec<String>, bad: &str) {
+    let notice = format!(
+        "working-directory `{bad}` is not a supported workspace-relative path; \
+         the affected steps run at the workspace root"
+    );
+    if !notices.contains(&notice) {
+        notices.push(notice);
+    }
+}
+
 /// Whether a `uses:` step is a repository checkout. These are a no-op on
 /// overup because the runner checks the repository out automatically before
 /// the job runs — so the notice must not imply the source is missing.
@@ -326,6 +398,93 @@ jobs:
         assert_eq!(test.needs, vec!["build".to_string()]);
         assert_eq!(test.plan["image"], "catthehacker/ubuntu:act-22.04");
         assert_eq!(test.plan["steps"][0]["shell"], "bash");
+    }
+
+    #[test]
+    fn working_directory_precedence_is_step_over_job_over_workflow() {
+        let workflow = r#"
+on: push
+defaults:
+  run:
+    working-directory: root-dir
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./job-dir/
+    steps:
+      - run: echo job default
+      - run: echo step override
+        working-directory: step-dir
+  b:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo workflow default
+"#;
+        let plans = build_plans(workflow, "ubuntu:24.04").ok().unwrap();
+        let a = plans[0].plan["steps"].as_array().unwrap();
+        // Job default (normalized: `./` and trailing `/` stripped).
+        assert_eq!(a[0]["workingDirectory"], "job-dir");
+        assert_eq!(a[1]["workingDirectory"], "step-dir");
+        let b = plans[1].plan["steps"].as_array().unwrap();
+        assert_eq!(b[0]["workingDirectory"], "root-dir");
+    }
+
+    #[test]
+    fn absent_working_directory_emits_no_key() {
+        let plans = build_plans(SIMPLE, "ubuntu:24.04").ok().unwrap();
+        let step = &plans[0].plan["steps"][0];
+        assert!(step.get("workingDirectory").is_none());
+        // Exact step shape stays pinned for plans without a workdir.
+        assert_eq!(
+            step.as_object().unwrap().keys().collect::<Vec<_>>(),
+            ["name", "run", "shell"]
+        );
+    }
+
+    #[test]
+    fn invalid_working_directory_becomes_a_notice_not_a_field() {
+        let workflow = r#"
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ../escape
+    steps:
+      - run: echo one
+      - run: echo two
+"#;
+        let plans = build_plans(workflow, "ubuntu:24.04").ok().unwrap();
+        let steps = plans[0].plan["steps"].as_array().unwrap();
+        assert!(steps.iter().all(|s| s.get("workingDirectory").is_none()));
+        let notices = plans[0].plan["notices"].as_array().unwrap();
+        let workdir_notices: Vec<_> = notices
+            .iter()
+            .filter(|n| n.as_str().unwrap().contains("workspace-relative"))
+            .collect();
+        // Deduped: one notice for the shared bad job default, not per step.
+        assert_eq!(workdir_notices.len(), 1);
+    }
+
+    #[test]
+    fn expression_working_directory_ships_verbatim() {
+        let workflow = r#"
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+        working-directory: ${{ vars.TARGET_DIR }}
+"#;
+        let plans = build_plans(workflow, "ubuntu:24.04").ok().unwrap();
+        assert_eq!(
+            plans[0].plan["steps"][0]["workingDirectory"],
+            "${{ vars.TARGET_DIR }}"
+        );
     }
 
     #[test]

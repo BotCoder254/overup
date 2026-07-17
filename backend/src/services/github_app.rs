@@ -309,6 +309,13 @@ fn require_safe_segments(owner: &str, repo: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Commit refs are interpolated into URLs (tarball downloads, tree lookups);
+/// only plain hex-ish revision identifiers pass. Canonical copy — the
+/// scheduler and repo sync both call this.
+pub fn is_safe_commit_ref(value: &str) -> bool {
+    (7..=64).contains(&value.len()) && value.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
 /// Every repository accessible to the installation (private repos included),
 /// paginated with a hard page cap.
 pub async fn list_installation_repositories(
@@ -446,6 +453,53 @@ pub async fn last_commit_for_path(
         // First line is enough for the UI; caps stored size.
         message: c.commit.message.lines().next().unwrap_or("").to_string(),
     }))
+}
+
+/// One entry of a recursive Git tree — path plus its object type
+/// (`blob` | `tree` | `commit` for submodules).
+#[derive(Debug, serde::Deserialize)]
+pub struct GitTreeEntry {
+    pub path: String,
+    #[serde(rename = "type")]
+    pub entry_type: String,
+}
+
+/// A repository's Git tree at one commit. `truncated` is GitHub's own flag
+/// (recursive listings cap at 100k entries / 7 MB) — callers must fail OPEN
+/// when it is set, since the listing is incomplete.
+#[derive(Debug, serde::Deserialize)]
+pub struct GitTree {
+    #[serde(default)]
+    pub tree: Vec<GitTreeEntry>,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+/// Defensive ceiling on tree entries kept in memory, matching GitHub's own
+/// recursive-listing cap.
+const MAX_TREE_ENTRIES: usize = 100_000;
+
+/// The full recursive tree at a commit — used transiently at sync time to
+/// verify detected file references. Never persisted, never logged.
+pub async fn get_git_tree(
+    http: &reqwest::Client,
+    token: &str,
+    owner: &str,
+    repo: &str,
+    commit_sha: &str,
+) -> anyhow::Result<GitTree> {
+    require_safe_segments(owner, repo)?;
+    if !is_safe_commit_ref(commit_sha) {
+        bail!("commit ref failed validation");
+    }
+    let mut tree: GitTree = api_get(
+        http,
+        token,
+        &format!("{GITHUB_API}/repos/{owner}/{repo}/git/trees/{commit_sha}?recursive=1"),
+    )
+    .await?;
+    tree.tree.truncate(MAX_TREE_ENTRIES);
+    Ok(tree)
 }
 
 async fn api_get<T: serde::de::DeserializeOwned>(

@@ -351,6 +351,10 @@ pub struct JobStep {
     pub name: String,
     pub run: String,
     pub shell: String,
+    /// Workspace-relative directory the step executes in (already
+    /// normalized via [`normalize_relative_path`]); `None` = workspace root.
+    #[serde(default)]
+    pub working_dir: Option<String>,
 }
 
 /// Read-only, short-lived checkout credentials. The token is registered as
@@ -368,6 +372,57 @@ pub struct JobCaps {
     pub max_log_bytes: u64,
     pub max_artifact_bytes: u64,
     pub max_artifacts: u32,
+}
+
+// ---------------------------------------------------------------------------
+// Path validation
+// ---------------------------------------------------------------------------
+
+/// Maximum byte length of a workspace-relative path (e.g. a step
+/// `working-directory`).
+pub const MAX_RELATIVE_PATH_BYTES: usize = 255;
+/// Maximum number of `/`-separated segments in a workspace-relative path.
+pub const MAX_RELATIVE_PATH_SEGMENTS: usize = 32;
+
+/// Normalize and validate a workspace-relative path.
+///
+/// Lives in this crate so the control plane (parser, planner, dispatch) and
+/// the runner validate with ONE implementation — the runner re-checks
+/// independently and never trusts the payload for path safety.
+///
+/// Accepts only paths that stay inside the workspace by construction:
+/// - one leading `./` and any trailing `/` are stripped (`./scripts/` → `scripts`)
+/// - non-empty after normalization, ≤ 255 bytes, ≤ 32 segments
+/// - no leading `/` (absolute), no `\`, no control characters
+/// - every `/`-separated segment is non-empty (rejects `//`), not `.` or
+///   `..`, and matches `[A-Za-z0-9._-]+` (ASCII only)
+///
+/// Returns the normalized path, or `None` when the value is unsafe. A plain
+/// join of the result onto the workspace root cannot escape it.
+pub fn normalize_relative_path(value: &str) -> Option<String> {
+    let mut path = value.strip_prefix("./").unwrap_or(value);
+    while let Some(stripped) = path.strip_suffix('/') {
+        path = stripped;
+    }
+    if path.is_empty() || path.len() > MAX_RELATIVE_PATH_BYTES {
+        return None;
+    }
+    let segments: Vec<&str> = path.split('/').collect();
+    if segments.len() > MAX_RELATIVE_PATH_SEGMENTS {
+        return None;
+    }
+    for segment in &segments {
+        if segment.is_empty() || *segment == "." || *segment == ".." {
+            return None;
+        }
+        if !segment
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        {
+            return None;
+        }
+    }
+    Some(path.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -439,6 +494,7 @@ mod tests {
                 name: "build".into(),
                 run: "echo hello".into(),
                 shell: "sh".into(),
+                working_dir: None,
             }],
             checkout: None,
             timeout_seconds: 3600,
@@ -598,6 +654,76 @@ mod tests {
                 }][..]
             )
         );
+    }
+
+    #[test]
+    fn old_shape_job_step_still_parses() {
+        // A step serialized by a pre-working-directory control plane: only
+        // the original three fields. `working_dir` must default to None.
+        let json = r#"{"name":"build","run":"echo hello","shell":"sh"}"#;
+        let step: JobStep = serde_json::from_str(json).unwrap();
+        assert_eq!(step.working_dir, None);
+    }
+
+    #[test]
+    fn working_dir_survives_sign_verify() {
+        let key = b"0123456789abcdef0123456789abcdef";
+        let mut payload = sample_payload();
+        payload.steps[0].working_dir = Some("scripts/build".into());
+        let ServerMsg::JobAssign {
+            payload_json,
+            signature_hex,
+        } = sign_job_payload(key, &payload).unwrap()
+        else {
+            panic!("expected JobAssign");
+        };
+        let verified = verify_job_payload(key, &payload_json, &signature_hex, Utc::now())
+            .expect("valid signature must verify");
+        assert_eq!(verified.steps[0].working_dir.as_deref(), Some("scripts/build"));
+    }
+
+    #[test]
+    fn normalize_relative_path_accepts_safe_paths() {
+        assert_eq!(normalize_relative_path("scripts").as_deref(), Some("scripts"));
+        assert_eq!(normalize_relative_path("a/b/c").as_deref(), Some("a/b/c"));
+        assert_eq!(
+            normalize_relative_path("sub.dir/x_y-z").as_deref(),
+            Some("sub.dir/x_y-z")
+        );
+        // Normalization: one leading `./`, trailing slashes.
+        assert_eq!(normalize_relative_path("./scripts").as_deref(), Some("scripts"));
+        assert_eq!(normalize_relative_path("scripts/").as_deref(), Some("scripts"));
+        assert_eq!(normalize_relative_path("./a/b/").as_deref(), Some("a/b"));
+    }
+
+    #[test]
+    fn normalize_relative_path_rejects_unsafe_paths() {
+        for bad in [
+            "",
+            ".",
+            "./",
+            "..",
+            "a/../b",
+            "../escape",
+            "/etc",
+            "/",
+            "a//b",
+            "a\\b",
+            "a/б",       // non-ASCII
+            "a b",       // space
+            "~root",     // charset
+            "a/\x07b",   // control char
+            "${{ x }}",  // expression left unresolved
+        ] {
+            assert!(
+                normalize_relative_path(bad).is_none(),
+                "expected rejection of {bad:?}"
+            );
+        }
+        // Length and segment budgets.
+        assert!(normalize_relative_path(&"a".repeat(256)).is_none());
+        assert!(normalize_relative_path(&["a"; 33].join("/")).is_none());
+        assert!(normalize_relative_path(&["a"; 32].join("/")).is_some());
     }
 
     #[test]

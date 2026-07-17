@@ -1,5 +1,13 @@
 import { format } from 'date-fns';
-import { Boxes, GitCommitHorizontal, KeyRound, Lock, Variable } from 'lucide-react';
+import {
+  Boxes,
+  FileCode,
+  FolderOpen,
+  GitCommitHorizontal,
+  KeyRound,
+  Lock,
+  Variable,
+} from 'lucide-react';
 import { Badge } from '../../../components/ui/Badge';
 import type { WorkflowDetail } from '../../../types/workflow';
 
@@ -19,9 +27,13 @@ export function MetadataPanel({ workflow }: { workflow: WorkflowDetail }) {
   const varRefs = metadata.varRefs ?? [];
   const environments = metadata.environments ?? [];
   const envKeys = metadata.envKeys ?? [];
+  const fileRefs = metadata.fileRefs ?? [];
   // Reference detection shipped after this workflow's last parse — the
   // arrays are absent (not empty) until the repository re-syncs.
-  const staleDetection = metadata.secretRefs === undefined || metadata.varRefs === undefined;
+  const staleDetection =
+    metadata.secretRefs === undefined ||
+    metadata.varRefs === undefined ||
+    metadata.fileRefs === undefined;
 
   return (
     <div className="divide-y divide-steel/10 text-sm">
@@ -139,6 +151,36 @@ export function MetadataPanel({ workflow }: { workflow: WorkflowDetail }) {
             ))}
           </div>
         )}
+      </Section>
+
+      <Section title="Files referenced">
+        {fileRefs.length === 0 ? (
+          <p className="text-xs text-steel">No file references detected.</p>
+        ) : (
+          <div className="flex flex-wrap gap-1">
+            {fileRefs.map((ref) => (
+              <Badge
+                key={`${ref.kind}:${ref.path}`}
+                variant={
+                  ref.exists === false ? 'danger' : ref.exists === true ? 'neutral' : 'outline'
+                }
+              >
+                {ref.kind === 'workdir' ? (
+                  <FolderOpen size={10} aria-hidden="true" />
+                ) : (
+                  <FileCode size={10} aria-hidden="true" />
+                )}
+                <span className="font-mono">{ref.path}</span>
+                {ref.exists === false && ' — not found'}
+                {ref.exists === null && ' — unverified'}
+              </Badge>
+            ))}
+          </div>
+        )}
+        <p className="mt-2 text-[11px] leading-relaxed text-steel">
+          Working directories and scripts this workflow references, checked against the default
+          branch at the last sync. Advisory only — execution verifies at run time.
+        </p>
         {staleDetection && (
           <p className="mt-2 text-[11px] leading-relaxed text-steel">
             Detection data comes from the last sync — re-sync the repository to refresh it.

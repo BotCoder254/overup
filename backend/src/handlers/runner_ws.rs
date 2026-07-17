@@ -51,6 +51,7 @@ const KNOWN_ERROR_CATEGORIES: &[&str] = &[
     "container_error",
     "checkout_failed",
     "artifact_upload_failed",
+    "workdir_missing",
     "timeout",
     "cancelled",
     "internal",
