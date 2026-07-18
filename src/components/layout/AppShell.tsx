@@ -101,7 +101,9 @@ export function AppShell() {
             bell far right. A shrink-0 sibling of the canvas, so the canvas
             gives up exactly its height and stays the only scroll region. */}
         <TopBar onSearch={openSearch} />
-        <div className="flex min-h-0 flex-1 flex-col p-2 pt-0 lg:p-3 lg:pl-0 lg:pt-3">
+        {/* Visible gap on every side between the floating canvas and the
+            outer shell (including sidebar-side, so the canvas is narrower). */}
+        <div className="flex min-h-0 flex-1 flex-col p-2 pt-0 lg:p-3 lg:pt-3">
           {/* Deliberate 8px exception to the 6px radius rule: the floating
               canvas alone reads better slightly softer at shell scale. */}
           <main className="min-h-0 flex-1 overflow-y-auto rounded-[8px] border border-steel/20 bg-canvas">

@@ -27,4 +27,36 @@
   ::selection {
     @apply bg-primary/40 text-charcoal;
   }
+
+  /* Themed scrollbars, matching the shell palette in every scroll region
+     (canvas, sidebar nav, popovers). Standard properties for Firefox and
+     modern Chromium; the -webkit rules cover Safari. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: theme('colors.steel / 40%') transparent;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    border-radius: 9999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+    background-color: theme('colors.steel / 40%');
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: theme('colors.steel / 60%');
+  }
+
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
 }
