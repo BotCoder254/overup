@@ -95,10 +95,10 @@ function decorate(chunk: LogChunk, showTimestamps: boolean): string {
 
 /** Match highlighting in the shell's primary tint. */
 const SEARCH_DECORATIONS = {
-  matchBackground: '#5645d433',
-  activeMatchBackground: '#5645d466',
-  matchOverviewRuler: '#5645d4',
-  activeMatchColorOverviewRuler: '#5645d4',
+  matchBackground: '#5645d455',
+  activeMatchBackground: '#5645d488',
+  matchOverviewRuler: '#6a59e8',
+  activeMatchColorOverviewRuler: '#6a59e8',
 };
 
 function formatBytesShort(bytes: number): string {
@@ -239,13 +239,13 @@ export function LogViewer({
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
       scrollback: 10_000,
       theme: {
-        background: '#ffffff',
-        foreground: '#37352f',
-        cursor: '#ffffff',
-        selectionBackground: '#5645d433',
-        red: '#c62828',
-        blue: '#0075de',
-        magenta: '#5645d4',
+        background: '#000000',
+        foreground: '#e8e6e3',
+        cursor: '#e8e6e3',
+        selectionBackground: '#5645d455',
+        red: '#ef5350',
+        blue: '#4d9fff',
+        magenta: '#9d8cff',
       },
     });
     const fit = new FitAddon();

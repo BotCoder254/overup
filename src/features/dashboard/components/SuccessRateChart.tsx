@@ -25,9 +25,9 @@ export function SuccessRateChart({ summary, loading, error }: SuccessRateChartPr
     () =>
       summary
         ? [
-            { name: 'Succeeded', count: summary.pipelinesSucceeded, fill: '#5645d4' },
-            { name: 'Failed', count: summary.pipelinesFailed, fill: '#c62828' },
-            { name: 'Cancelled', count: summary.pipelinesCancelled, fill: '#787671' },
+            { name: 'Succeeded', count: summary.pipelinesSucceeded, fill: '#6a59e8' },
+            { name: 'Failed', count: summary.pipelinesFailed, fill: '#e5484d' },
+            { name: 'Cancelled', count: summary.pipelinesCancelled, fill: '#8f8d88' },
           ]
         : [],
     [summary],
@@ -61,17 +61,23 @@ export function SuccessRateChart({ summary, loading, error }: SuccessRateChartPr
     <div className="h-56 w-full">
       <ResponsiveContainer width="100%" height="100%">
         <BarChart data={data} layout="vertical" margin={{ top: 4, right: 16, bottom: 4, left: 8 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#78767133" />
-          <XAxis type="number" tick={{ fontSize: 11, fill: '#787671' }} allowDecimals={false} />
+          <CartesianGrid strokeDasharray="3 3" stroke="#8f8d8833" />
+          <XAxis type="number" tick={{ fontSize: 11, fill: '#8f8d88' }} allowDecimals={false} />
           <YAxis
             type="category"
             dataKey="name"
-            tick={{ fontSize: 12, fill: '#37352f' }}
+            tick={{ fontSize: 12, fill: '#e8e6e3' }}
             width={80}
           />
           <Tooltip
-            cursor={{ fill: '#f6f5f4' }}
-            contentStyle={{ borderRadius: 6, border: '1px solid #78767133', fontSize: 12 }}
+            cursor={{ fill: '#161614' }}
+            contentStyle={{
+              borderRadius: 6,
+              border: '1px solid #8f8d8833',
+              fontSize: 12,
+              backgroundColor: '#161614',
+              color: '#e8e6e3',
+            }}
           />
           <Bar dataKey="count" radius={[0, 6, 6, 0]}>
             {data.map((entry) => (

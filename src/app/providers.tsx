@@ -26,7 +26,7 @@ export function Providers({ children }: { children: ReactNode }) {
     <ErrorBoundary FallbackComponent={ErrorFallback}>
       <QueryClientProvider client={queryClient}>
         {children}
-        <Toaster position="top-right" />
+        <Toaster position="top-right" theme="dark" />
       </QueryClientProvider>
     </ErrorBoundary>
   );

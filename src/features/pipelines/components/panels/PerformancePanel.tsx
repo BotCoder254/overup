@@ -74,21 +74,23 @@ export function PerformancePanel({ jobs, events }: PerformancePanelProps) {
         <div className="h-56 w-full">
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={rows} margin={{ top: 4, right: 8, bottom: 4, left: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#78767133" />
-              <XAxis dataKey="name" tick={{ fontSize: 11, fill: '#787671' }} />
-              <YAxis tick={{ fontSize: 11, fill: '#787671' }} unit="s" width={44} />
+              <CartesianGrid strokeDasharray="3 3" stroke="#8f8d8833" />
+              <XAxis dataKey="name" tick={{ fontSize: 11, fill: '#8f8d88' }} />
+              <YAxis tick={{ fontSize: 11, fill: '#8f8d88' }} unit="s" width={44} />
               <Tooltip
-                cursor={{ fill: '#f6f5f4' }}
+                cursor={{ fill: '#161614' }}
                 contentStyle={{
                   borderRadius: 6,
-                  border: '1px solid #78767133',
+                  border: '1px solid #8f8d8833',
                   fontSize: 12,
+                  backgroundColor: '#161614',
+                  color: '#e8e6e3',
                 }}
               />
               <Legend wrapperStyle={{ fontSize: 12 }} />
               {/* Solid palette only: steel for waiting, primary for doing. */}
-              <Bar dataKey="Queue (s)" stackId="time" fill="#787671" radius={[0, 0, 0, 0]} />
-              <Bar dataKey="Execution (s)" stackId="time" fill="#5645d4" radius={[6, 6, 0, 0]} />
+              <Bar dataKey="Queue (s)" stackId="time" fill="#8f8d88" radius={[0, 0, 0, 0]} />
+              <Bar dataKey="Execution (s)" stackId="time" fill="#6a59e8" radius={[6, 6, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </div>
@@ -99,19 +101,21 @@ export function PerformancePanel({ jobs, events }: PerformancePanelProps) {
           <div className="h-40 w-full">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={cpuData} margin={{ top: 4, right: 8, bottom: 4, left: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#78767133" />
-                <XAxis dataKey="name" tick={{ fontSize: 11, fill: '#787671' }} />
-                <YAxis tick={{ fontSize: 11, fill: '#787671' }} unit="%" width={44} />
+                <CartesianGrid strokeDasharray="3 3" stroke="#8f8d8833" />
+                <XAxis dataKey="name" tick={{ fontSize: 11, fill: '#8f8d88' }} />
+                <YAxis tick={{ fontSize: 11, fill: '#8f8d88' }} unit="%" width={44} />
                 <Tooltip
-                  cursor={{ fill: '#f6f5f4' }}
+                  cursor={{ fill: '#161614' }}
                   contentStyle={{
                     borderRadius: 6,
-                    border: '1px solid #78767133',
+                    border: '1px solid #8f8d8833',
                     fontSize: 12,
+                    backgroundColor: '#161614',
+                    color: '#e8e6e3',
                   }}
                 />
                 {/* 100% = one full core; multi-core jobs exceed it. */}
-                <Bar dataKey="CPU peak (%)" fill="#5645d4" radius={[6, 6, 0, 0]} />
+                <Bar dataKey="CPU peak (%)" fill="#6a59e8" radius={[6, 6, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
           </div>

@@ -14,27 +14,27 @@ interface WorkflowEditorProps {
 
 const MARKER_OWNER = 'overup-validation';
 
-/** Editor colors from the shell palette — flat, light, no gradients. */
+/** Editor colors from the shell palette — flat, dark, no gradients. */
 function defineTheme(monaco: Monaco) {
   monaco.editor.defineTheme('overup', {
-    base: 'vs',
+    base: 'vs-dark',
     inherit: true,
     rules: [
-      { token: 'type', foreground: '5645d4' },
-      { token: 'string.yaml', foreground: '0075de' },
-      { token: 'number', foreground: '5645d4' },
-      { token: 'comment', foreground: '787671' },
-      { token: 'keyword', foreground: '5645d4' },
+      { token: 'type', foreground: '9d8cff' },
+      { token: 'string.yaml', foreground: '4d9fff' },
+      { token: 'number', foreground: '9d8cff' },
+      { token: 'comment', foreground: '8f8d88' },
+      { token: 'keyword', foreground: '9d8cff' },
     ],
     colors: {
-      'editor.background': '#ffffff',
-      'editor.foreground': '#37352f',
-      'editor.lineHighlightBackground': '#f6f5f4',
-      'editorLineNumber.foreground': '#787671',
-      'editorLineNumber.activeForeground': '#37352f',
-      'editorIndentGuide.background': '#f6f5f4',
-      'editor.selectionBackground': '#5645d426',
-      'focusBorder': '#5645d4',
+      'editor.background': '#000000',
+      'editor.foreground': '#e8e6e3',
+      'editor.lineHighlightBackground': '#161614',
+      'editorLineNumber.foreground': '#8f8d88',
+      'editorLineNumber.activeForeground': '#e8e6e3',
+      'editorIndentGuide.background': '#26251f',
+      'editor.selectionBackground': '#6a59e845',
+      'focusBorder': '#6a59e8',
     },
   });
 }
