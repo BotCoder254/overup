@@ -40,10 +40,17 @@ export function CommandPalette({ open, onOpenChange, initialQuery }: CommandPale
   const navigate = useNavigate();
   const [q, setQ] = useState('');
 
-  useHotkeys('mod+k', () => onOpenChange(!open), {
-    enableOnFormTags: true,
-    preventDefault: true,
-  });
+  useHotkeys(
+    'mod+k',
+    () => onOpenChange(!open),
+    {
+      enableOnFormTags: true,
+      preventDefault: true,
+    },
+    // Without deps the callback keeps the first render's `open` (false), so
+    // the shortcut could open the palette but never toggle it closed.
+    [open, onOpenChange],
+  );
 
   // Seed (or clear) the query whenever the palette opens; typing in the
   // sidebar input while open appends through the same channel.

@@ -6,6 +6,7 @@ import { AnnouncementBanner } from './AnnouncementBanner';
 import { CommandPalette } from './CommandPalette';
 import { MobileTopBar } from './MobileTopBar';
 import { Sidebar } from './Sidebar';
+import { TopBar } from './TopBar';
 
 /**
  * The persistent application shell, mounted once as a layout route for the
@@ -55,7 +56,7 @@ export function AppShell() {
       <div className="flex min-h-0 flex-1">
       {/* Desktop sidebar */}
       <div className="hidden w-[272px] shrink-0 lg:block">
-        <Sidebar onSearch={openSearch} />
+        <Sidebar />
       </div>
 
       {/* Mobile drawer + backdrop */}
@@ -84,17 +85,11 @@ export function AppShell() {
             drawerOpen ? 'translate-x-0' : '-translate-x-full',
           )}
         >
-          <Sidebar
-            onNavigate={() => setDrawerOpen(false)}
-            onSearch={(seed) => {
-              setDrawerOpen(false);
-              openSearch(seed);
-            }}
-          />
+          <Sidebar onNavigate={() => setDrawerOpen(false)} />
         </div>
       </div>
 
-      {/* Content column: mobile top bar + floating canvas */}
+      {/* Content column: top bar (desktop) / mobile top bar + floating canvas */}
       <div className="flex min-w-0 flex-1 flex-col">
         <MobileTopBar
           ref={menuButtonRef}
@@ -102,6 +97,10 @@ export function AppShell() {
           onMenu={() => setDrawerOpen(true)}
           onSearch={() => openSearch()}
         />
+        {/* Desktop header strip on the exposed outer shell: centered search,
+            bell far right. A shrink-0 sibling of the canvas, so the canvas
+            gives up exactly its height and stays the only scroll region. */}
+        <TopBar onSearch={openSearch} />
         <div className="flex min-h-0 flex-1 flex-col p-2 pt-0 lg:p-3 lg:pl-0 lg:pt-3">
           <main className="min-h-0 flex-1 overflow-y-auto rounded border border-steel/20 bg-canvas">
             <div className="mx-auto max-w-6xl p-4 sm:p-6 lg:p-8">
