@@ -102,7 +102,9 @@ export function AppShell() {
             gives up exactly its height and stays the only scroll region. */}
         <TopBar onSearch={openSearch} />
         <div className="flex min-h-0 flex-1 flex-col p-2 pt-0 lg:p-3 lg:pl-0 lg:pt-3">
-          <main className="min-h-0 flex-1 overflow-y-auto rounded border border-steel/20 bg-canvas">
+          {/* Deliberate 8px exception to the 6px radius rule: the floating
+              canvas alone reads better slightly softer at shell scale. */}
+          <main className="min-h-0 flex-1 overflow-y-auto rounded-[8px] border border-steel/20 bg-canvas">
             <div className="mx-auto max-w-6xl p-4 sm:p-6 lg:p-8">
               <Outlet />
             </div>
