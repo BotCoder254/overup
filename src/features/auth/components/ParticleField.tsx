@@ -286,9 +286,9 @@ export function ParticleField({ className }: ParticleFieldProps) {
             const ix = px0 + dx;
             if (ix < 0 || ix >= PW) continue;
             const i = (row + ix) * 4;
-            buf[i] = 0;
-            buf[i + 1] = 0;
-            buf[i + 2] = 0;
+            buf[i] = 232;
+            buf[i + 1] = 230;
+            buf[i + 2] = 227;
             buf[i + 3] = alpha;
           }
         }

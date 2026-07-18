@@ -3,6 +3,10 @@
 @tailwind utilities;
 
 @layer base {
+  :root {
+    color-scheme: dark;
+  }
+
   html,
   body,
   #root {
@@ -11,5 +15,16 @@
 
   body {
     @apply bg-canvas font-sans text-charcoal antialiased;
+  }
+
+  /* Focus rings offset against the black canvas, not preflight's white default. */
+  *,
+  ::before,
+  ::after {
+    --tw-ring-offset-color: theme('colors.canvas');
+  }
+
+  ::selection {
+    @apply bg-primary/40 text-charcoal;
   }
 }

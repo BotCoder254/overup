@@ -64,25 +64,31 @@ export function ActivityChart({ buckets, range, loading, error }: ActivityChartP
     <div className="h-56 w-full">
       <ResponsiveContainer width="100%" height="100%">
         <BarChart data={data} margin={{ top: 4, right: 8, bottom: 4, left: 0 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#78767133" />
+          <CartesianGrid strokeDasharray="3 3" stroke="#8f8d8833" />
           <XAxis
             dataKey="name"
-            tick={{ fontSize: 11, fill: '#787671' }}
+            tick={{ fontSize: 11, fill: '#8f8d88' }}
             interval="preserveStartEnd"
             angle={-35}
             textAnchor="end"
             height={40}
           />
-          <YAxis tick={{ fontSize: 11, fill: '#787671' }} width={32} allowDecimals={false} />
+          <YAxis tick={{ fontSize: 11, fill: '#8f8d88' }} width={32} allowDecimals={false} />
           <Tooltip
-            cursor={{ fill: '#f6f5f4' }}
-            contentStyle={{ borderRadius: 6, border: '1px solid #78767133', fontSize: 12 }}
+            cursor={{ fill: '#161614' }}
+            contentStyle={{
+              borderRadius: 6,
+              border: '1px solid #8f8d8833',
+              fontSize: 12,
+              backgroundColor: '#161614',
+              color: '#e8e6e3',
+            }}
           />
           <Legend wrapperStyle={{ fontSize: 12 }} />
-          <Bar dataKey="Succeeded" stackId="activity" fill="#5645d4" />
-          <Bar dataKey="Failed" stackId="activity" fill="#c62828" />
-          <Bar dataKey="Cancelled" stackId="activity" fill="#787671" />
-          <Bar dataKey="Queued" stackId="activity" fill="#0075de" radius={[6, 6, 0, 0]} />
+          <Bar dataKey="Succeeded" stackId="activity" fill="#6a59e8" />
+          <Bar dataKey="Failed" stackId="activity" fill="#e5484d" />
+          <Bar dataKey="Cancelled" stackId="activity" fill="#8f8d88" />
+          <Bar dataKey="Queued" stackId="activity" fill="#4d9fff" radius={[6, 6, 0, 0]} />
         </BarChart>
       </ResponsiveContainer>
     </div>
