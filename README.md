@@ -93,7 +93,7 @@ src/
 
 - Backend: `cd backend && cargo test` (validation and slug-generation unit tests) and `cargo check`.
 - Frontend: `npm test` (CRA test runner) and `npx tsc --noEmit` for type checking.
-- Production build: `npm run build`.
+- Production build: `npm run build`..
 
 ## Environment variables
 
